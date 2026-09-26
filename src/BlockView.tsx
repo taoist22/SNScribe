@@ -44,7 +44,9 @@ function ParagraphView({p, onFrame, onLines}: {p: ParagraphBlock; onFrame: Props
   const size = sizeFor(p);
   const lineHeight = Math.round(size * 1.45);
   const heading = p.kind !== 'body';
-  const indent = Math.min(160, Math.round(p.indent / 20));
+  // Word allows negative indents (text pulled into the page margin); the screen has no
+  // margin to pull into, so they start at the left edge instead of off it.
+  const indent = Math.max(0, Math.min(160, Math.round(p.indent / 20)));
   const text = (
     <Text
       allowFontScaling={false}
