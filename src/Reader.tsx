@@ -20,7 +20,6 @@ import {
   expectedTexts,
   formatOps,
   rangesBetween,
-  shiftPos,
   styleOps,
   textEditProblem,
   wordAround,
@@ -45,7 +44,9 @@ import {Docx, DocxText, errorText, log, nativeBuild} from './services/native';
  * through the pages already seen.
  *
  * Editing: the pen selects words (the paragraph's own TextView reports the character under
- * the pen, via DocxText); a tap places a caret, a double tap selects a word. Buttons turn
+ * the pen, via DocxText); a tap places a caret and typing starts there, a double tap
+ * selects a word. Typed text shows in the page as it is typed — a pending edit on top of
+ * the committed ones — and becomes one undo step when typing ends. Buttons turn
  * the selection into edits (domain/edits), one undo step per button press. The page shows
  * the original with the first `cursor` steps applied — Undo/Redo move the cursor — and Save
  * hands the same edits to the native writer, which saves a verified copy beside the
@@ -64,6 +65,12 @@ const DOUBLE_TAP_MS = 500;
 type Frame = {x: number; top: number; height: number};
 type Selection = {from: Pos; to: Pos};
 type Typing = {mode: 'insert'; at: Pos} | {mode: 'replace'; range: Range};
+
+/** One line of text: line breaks and other control characters become spaces. */
+const clean = (text: string) => text.replace(/[\r\n\u0000-\u0008\u000b-\u001f\ufffc]/g, ' ');
+
+const typedRange = (t: Typing): Range =>
+  t.mode === 'insert' ? {para: t.at.para, start: t.at.offset, end: t.at.offset} : t.range;
 
 export function Reader(): React.JSX.Element {
   const [doc, setDoc] = useState<DocxDocument | null>(null);
@@ -102,7 +109,21 @@ export function Reader(): React.JSX.Element {
   }, []);
 
   const applied = useMemo(() => edits.steps.slice(0, edits.cursor).flat(), [edits]);
-  const blocks = useMemo(() => (doc ? applyOps(doc.blocks, applied) : []), [doc, applied]);
+  const committed = useMemo(() => (doc ? applyOps(doc.blocks, applied) : []), [doc, applied]);
+  // What is being typed: shown in the page as it is typed, committed when typing ends.
+  const pending: Op[] = useMemo(() => {
+    const text = typing ? clean(input) : '';
+    if (!typing || text === '') {
+      return [];
+    }
+    const r = typedRange(typing);
+    return [{op: 'text', para: r.para, start: r.start, end: r.end, text}];
+  }, [typing, input]);
+  const blocks = useMemo(() => applyOps(committed, pending), [committed, pending]);
+  /** Where the caret is drawn: after the typed text while typing. */
+  const caretAt: Pos | null = typing
+    ? {para: typedRange(typing).para, offset: typedRange(typing).start + clean(input).length}
+    : caret;
   const dirty = edits.cursor !== saved.cursor;
   const readOnly = !!doc && doc.report.trackedChanges > 0;
 
@@ -173,7 +194,8 @@ export function Reader(): React.JSX.Element {
   // ---------------------------------------------------------------- open / close
 
   const open = async () => {
-    if (dirty && !discardArmed) {
+    flushTyping();
+    if ((dirty || pending.length > 0) && !discardArmed) {
       setDiscardArmed(true);
       setStatus('You have unsaved changes. Tap Open again to discard them, or Save first.');
       return;
@@ -234,6 +256,7 @@ export function Reader(): React.JSX.Element {
     if (!doc || atEnd) {
       return;
     }
+    flushTyping();
     const to = anchorAfter(anchor, boxesNow(), brk);
     if (!to || to.block >= blocks.length) {
       return;
@@ -246,11 +269,13 @@ export function Reader(): React.JSX.Element {
     if (history.length === 0) {
       return;
     }
+    flushTyping();
     setAnchor(history[history.length - 1]);
     setHistory(history.slice(0, -1));
   };
 
   const jump = (block: number) => {
+    flushTyping();
     setHistory(h => [...h, anchor]);
     setAnchor({block, offset: 0});
     setContents(false);
@@ -337,11 +362,12 @@ export function Reader(): React.JSX.Element {
         setStatus(typeof ha === 'string' ? ha : (hb as string));
         return;
       }
-      // Anything typed so far is applied first; positions measured before it are moved.
-      const adjust = flushTyping();
+      // Anything typed so far is committed first. The page already showed it, so the
+      // positions just measured stay right.
+      flushTyping();
       if (tap && !doubleTap) {
         // One tap: a caret in the gap nearest the pen, and typing there shortly after.
-        const at = adjust({para: ha.para, offset: ha.offset});
+        const at = {para: ha.para, offset: ha.offset};
         setSelection(null);
         setCaret(at);
         setStatus('');
@@ -355,8 +381,8 @@ export function Reader(): React.JSX.Element {
       const [s, e] = comparePos({para: ha.para, offset: ha.char}, {para: hb.para, offset: hb.char}) <= 0 ? [ha, hb] : [hb, ha];
       const ws = wordAround(textOf(s.para), s.char, 'right');
       const we = wordAround(textOf(e.para), e.char, 'left');
-      const from = adjust({para: s.para, offset: ws?.start ?? s.offset});
-      const to = adjust({para: e.para, offset: we?.end ?? e.offset});
+      const from = {para: s.para, offset: ws?.start ?? s.offset};
+      const to = {para: e.para, offset: we?.end ?? e.offset};
       if (comparePos(from, to) >= 0) {
         setSelection(null);
         return;
@@ -376,7 +402,8 @@ export function Reader(): React.JSX.Element {
   const point = (e: GestureResponderEvent) => ({x: e.nativeEvent.locationX, y: e.nativeEvent.locationY});
 
   const selectedIn = (b: (typeof window)[number]): {start: number; end: number} | null => {
-    if (!selection || b.type !== 'p') {
+    // Once replacement text is typed, the selected text is gone from the page.
+    if (!selection || b.type !== 'p' || pending.length > 0) {
       return null;
     }
     const r = rangesBetween([b], selection.from, selection.to)[0];
@@ -449,7 +476,7 @@ export function Reader(): React.JSX.Element {
       setStatus(problem);
       return;
     }
-    setInput(paragraphText(p!).slice(r.start, r.end));
+    setInput('');
     setTyping({mode: 'replace', range: r});
   };
 
@@ -465,40 +492,36 @@ export function Reader(): React.JSX.Element {
     setTyping({mode: 'insert', at});
   };
 
-  /** One line of text: line breaks and other control characters become spaces. */
-  const clean = (text: string) => text.replace(/[\r\n\u0000-\u0008\u000b-\u001f\ufffc]/g, ' ');
-
-  const typedRange = (t: Typing): Range =>
-    t.mode === 'insert' ? {para: t.at.para, start: t.at.offset, end: t.at.offset} : t.range;
-
-  /**
-   * Applies the text typed so far, if it changes anything, and closes the text box.
-   * Returns how to move a position that was measured before the text went in.
-   */
-  const flushTyping = (): ((p: Pos) => Pos) => {
+  /** Commits what was typed (one undo step) and ends typing. */
+  const flushTyping = () => {
     if (!typing) {
-      return p => p;
+      return;
     }
-    const r = typedRange(typing);
-    const text = clean(input);
-    const current = paragraphText(paragraph(r.para)!).slice(r.start, r.end);
     setTyping(null);
     setInput('');
-    if (text === current) {
-      return p => p;
+    if (pending.length > 0) {
+      commit(pending, typing.mode);
+      setSelection(null);
     }
-    commit([{op: 'text', para: r.para, start: r.start, end: r.end, text}], typing.mode);
-    return p => shiftPos(p, r, text.length);
   };
 
-  const finishTyping = () => {
+  /** Enter: commit and keep typing after the new text. */
+  const enter = () => {
     if (!typing) {
       return;
     }
     const r = typedRange(typing);
-    const after = flushTyping()({para: r.para, offset: r.end});
+    const at = {para: r.para, offset: pending.length > 0 ? r.start + clean(input).length : r.start};
+    flushTyping();
     setSelection(null);
-    setCaret(after);
+    setTyping({mode: 'insert', at});
+  };
+
+  /** Done: commit and leave the caret after the new text. */
+  const done = () => {
+    const at = caretAt;
+    flushTyping();
+    setCaret(at);
   };
 
   const cancelTyping = () => {
@@ -507,12 +530,40 @@ export function Reader(): React.JSX.Element {
     setCaret(null);
   };
 
+  /** Backspace with nothing typed: delete the selection being replaced, or the character before the caret. */
+  const backspace = () => {
+    if (!typing || input !== '') {
+      return;
+    }
+    if (typing.mode === 'replace') {
+      const r = typing.range;
+      commit([{op: 'text', para: r.para, start: r.start, end: r.end, text: ''}], 'delete');
+      setSelection(null);
+      setTyping({mode: 'insert', at: {para: r.para, offset: r.start}});
+      return;
+    }
+    const at = typing.at;
+    const p = paragraph(at.para);
+    if (!p || at.offset === 0) {
+      return;
+    }
+    const problem = textEditProblem(p, at.offset - 1, at.offset);
+    if (problem) {
+      setStatus(problem);
+      return;
+    }
+    commit([{op: 'text', para: at.para, start: at.offset - 1, end: at.offset, text: ''}], 'backspace');
+    setTyping({mode: 'insert', at: {para: at.para, offset: at.offset - 1}});
+  };
+
   const undo = () => {
+    flushTyping();
     setEdits(e => ({...e, cursor: Math.max(0, e.cursor - 1)}));
     setCaret(null);
     setSelection(null);
   };
   const redo = () => {
+    flushTyping();
     setEdits(e => ({...e, cursor: Math.min(e.steps.length, e.cursor + 1)}));
     setCaret(null);
     setSelection(null);
@@ -522,6 +573,10 @@ export function Reader(): React.JSX.Element {
     if (!doc || !Docx) {
       return;
     }
+    // Text being typed is part of what is saved.
+    const ops = [...applied, ...pending];
+    const cursor = edits.cursor + (pending.length > 0 ? 1 : 0);
+    flushTyping();
     setBusy(true);
     setStatus('Saving…');
     try {
@@ -529,8 +584,8 @@ export function Reader(): React.JSX.Element {
         setStatus('Saving needs file write permission.');
         return;
       }
-      const res = await Docx.save(doc.path, applied, saved.dest ?? '', expectedTexts(doc.blocks, applied));
-      setSaved({cursor: edits.cursor, dest: res.dest});
+      const res = await Docx.save(doc.path, ops, saved.dest ?? '', expectedTexts(doc.blocks, ops));
+      setSaved({cursor, dest: res.dest});
       setDiscardArmed(false);
       setStatus(`Saved as ${res.name} (next to the original, which is unchanged).`);
     } catch (error) {
@@ -542,27 +597,33 @@ export function Reader(): React.JSX.Element {
 
   // Where to draw the caret: asked of the paragraph's own layout once the page is measured.
   useEffect(() => {
-    if (!caret || brk.kind === 'pending' || !DocxText) {
+    const at = caretAt;
+    if (!at || brk.kind === 'pending' || !DocxText) {
       return;
     }
-    const i = window.findIndex(b => b.type === 'p' && b.index === caret.para);
+    const i = window.findIndex(b => b.type === 'p' && b.index === at.para);
     const f = frames.current[i];
     const tag = i >= 0 ? findNodeHandle(textRefs.current[i] ?? null) : null;
     if (i < 0 || !f || tag === null) {
       return;
     }
-    const tf = textFrames.current[i] ?? {x: 0, y: 0};
     const key = pageKey;
-    DocxText.caretRect(tag, caret.offset).then(r => {
-      if (r.error !== undefined || measuredFor.current !== key) {
-        return;
-      }
-      const scale = PixelRatio.get();
-      setCaretBox({key, x: f.x + tf.x + r.x! / scale, top: f.top + tf.y + r.top! / scale, height: (r.bottom! - r.top!) / scale});
-    });
+    // Typing changes the paragraph's layout: ask once it has been laid out again.
+    const timer = setTimeout(() => {
+      const fr = frames.current[i] ?? f;
+      const tf = textFrames.current[i] ?? {x: 0, y: 0};
+      DocxText?.caretRect(tag, at.offset).then(r => {
+        if (r.error !== undefined || measuredFor.current !== key) {
+          return;
+        }
+        const scale = PixelRatio.get();
+        setCaretBox({key, x: fr.x + tf.x + r.x! / scale, top: fr.top + tf.y + r.top! / scale, height: (r.bottom! - r.top!) / scale});
+      });
+    }, 40);
+    return () => clearTimeout(timer);
     // frames/refs are read at call time; brk marks "measured".
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [caret, brk, pageKey]);
+  }, [caretAt?.para, caretAt?.offset, brk, pageKey]);
 
   // ---------------------------------------------------------------- render
 
@@ -598,18 +659,24 @@ export function Reader(): React.JSX.Element {
       <View style={styles.bar}>
         {doc && typing && !contents ? (
           <View style={styles.typing}>
+            {/* Invisible: it only receives the keystrokes, which show in the page itself. */}
             <TextInput
-              style={styles.input}
+              style={styles.hiddenInput}
               value={input}
               onChangeText={setInput}
+              onKeyPress={e => e.nativeEvent.key === 'Backspace' && backspace()}
               autoFocus
-              allowFontScaling={false}
-              returnKeyType="done"
-              onSubmitEditing={finishTyping}
-              placeholder={typing.mode === 'insert' ? 'Type here…' : 'Replacement text…'}
-              placeholderTextColor="#666"
+              blurOnSubmit={false}
+              onSubmitEditing={enter}
+              autoCapitalize="none"
+              autoCorrect={false}
+              spellCheck={false}
+              caretHidden
             />
-            {button('OK', finishTyping)}
+            <Text allowFontScaling={false} style={styles.caretHint} numberOfLines={1}>
+              {typing.mode === 'insert' ? 'Typing — tap elsewhere or Done to finish.' : 'Type to replace the selection.'}
+            </Text>
+            {button('Done', done)}
             {button('Cancel', cancelTyping)}
           </View>
         ) : doc && selection && !contents ? (
@@ -641,7 +708,7 @@ export function Reader(): React.JSX.Element {
           <View style={styles.editButtons}>
             {button('Undo', undo, edits.cursor === 0)}
             {button('Redo', redo, edits.cursor === edits.steps.length)}
-            {button('Save', save, !dirty)}
+            {button('Save', save, !dirty && pending.length === 0)}
           </View>
         ) : null}
       </View>
@@ -678,7 +745,7 @@ export function Reader(): React.JSX.Element {
                   }}
                 />
               ))}
-              {caret && caretBox?.key === pageKey ? (
+              {caretAt && caretBox?.key === pageKey ? (
                 <View pointerEvents="none" style={[styles.caret, {left: caretBox.x - 1, top: caretBox.top, height: caretBox.height}]} />
               ) : null}
             </View>
@@ -733,7 +800,7 @@ const styles = StyleSheet.create({
   actionsInner: {alignItems: 'center'},
   editButtons: {flexDirection: 'row', marginLeft: 8},
   typing: {flex: 1, flexDirection: 'row', alignItems: 'center'},
-  input: {flex: 1, height: 44, borderWidth: 1, borderColor: '#000', paddingHorizontal: 10, fontSize: 18, color: '#000'},
+  hiddenInput: {position: 'absolute', left: 0, top: 0, width: 1, height: 1, opacity: 0},
   caretRow: {flex: 1, flexDirection: 'row', alignItems: 'center'},
   caretHint: {flex: 1, color: '#000', fontSize: 15},
   caret: {position: 'absolute', width: 3, backgroundColor: '#000'},
