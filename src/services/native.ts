@@ -12,7 +12,13 @@ type DocxModule = {
   delay(ms: number): Promise<void>;
   open(path: string): Promise<DocxDocument>;
   /** Saves a verified copy with `ops` applied; `dest` '' = new <name>-edited.docx beside the original. */
-  save(src: string, ops: object[], dest: string): Promise<{dest: string; name: string; ms: number; changed: string[]}>;
+  save(
+    src: string,
+    ops: object[],
+    dest: string,
+    /** Paragraph index → the text the screen shows after the edits; the save is refused on any mismatch. */
+    expected: Record<number, string>,
+  ): Promise<{dest: string; name: string; ms: number; changed: string[]}>;
 };
 
 export type OffsetResult = {
@@ -28,6 +34,8 @@ export type OffsetResult = {
 type DocxTextModule = {
   /** x, y in px relative to the Text view: the gap nearest the pen and the character under it. */
   offsetAt(tag: number, x: number, y: number): Promise<OffsetResult>;
+  /** Where a caret before character `offset` goes: px relative to the Text view. */
+  caretRect(tag: number, offset: number): Promise<{x?: number; top?: number; bottom?: number; error?: string}>;
 };
 
 export const DocxText = NativeModules.DocxText as DocxTextModule | undefined;

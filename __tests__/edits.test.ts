@@ -1,6 +1,9 @@
 import {
   allHave,
   applyOps,
+  deletionRange,
+  expectedTexts,
+  textEditProblem,
   formatOps,
   markSelection,
   rangesBetween,
@@ -101,5 +104,54 @@ describe('selections', () => {
   it('marks the selected runs for drawing', () => {
     const marked = markSelection(p1.runs, {start: 6, end: 15});
     expect(marked.filter(r => r.sel).map(r => r.t).join('')).toBe('then bold');
+  });
+});
+
+
+describe('text edits', () => {
+  const edit = (start: number, end: number, text: string) =>
+    (applyOps(doc, [{op: 'text', para: 1, start, end, text}])[2] as ParagraphBlock);
+
+  it('replaces inside a formatted run with that formatting', () => {
+    const out = edit(11, 15, 'BRAVE'); // "bold" → "BRAVE"
+    expect(paragraphText(out)).toBe('Plain then BRAVE note' + OBJECT + ' end.');
+    expect(out.runs.find(r => r.t === 'BRAVE')?.b).toBe(true);
+  });
+
+  it('inserts with the formatting of the character before', () => {
+    const out = edit(15, 15, '!'); // right after "bold"
+    expect(out.runs.find(r => r.t === '!')?.b).toBe(true);
+    const start = edit(0, 0, '>> ');
+    expect(paragraphText(start).startsWith('>> Plain')).toBe(true);
+    expect(start.runs[0]).toMatchObject({t: '>> '});
+  });
+
+  it('deletes across runs', () => {
+    expect(paragraphText(edit(6, 16, ''))).toBe('Plain note' + OBJECT + ' end.');
+  });
+
+  it('never copies object-ness into typed text', () => {
+    const out = edit(21, 21, 'x'); // right after the note marker
+    expect(out.runs.find(r => r.t === 'x')?.obj).toBeUndefined();
+  });
+
+  it('refuses ranges that touch objects or fields', () => {
+    expect(textEditProblem(p1, 17, 22)).toMatch(/note marker/);
+    expect(textEditProblem(p1, 0, 5)).toBeNull();
+    const field = {...p1, runs: [{t: 'Page '}, {t: '3', k: true}]};
+    expect(textEditProblem(field, 5, 6)).toMatch(/field/);
+    expect(textEditProblem(field, 6, 6)).toMatch(/field/);
+  });
+
+  it('removes the extra space when deleting a word', () => {
+    const t = 'one two three.';
+    expect(deletionRange(t, 4, 7)).toEqual({start: 4, end: 8}); // "two " → "one three."
+    expect(deletionRange(t, 8, 13)).toEqual({start: 7, end: 13}); // " three" before "."
+    expect(deletionRange(t, 0, 3)).toEqual({start: 0, end: 4});
+  });
+
+  it('computes the texts to cross-check on save', () => {
+    const ops: Op[] = [{op: 'text', para: 1, start: 0, end: 5, text: 'Simple'}];
+    expect(expectedTexts(doc, ops)).toEqual({1: 'Simple then bold note' + OBJECT + ' end.'});
   });
 });

@@ -18,6 +18,8 @@ export type Run = {
   l?: boolean;
   sup?: boolean;
   obj?: 'image' | 'note' | 'object';
+  /** Inside a field or content control: formattable, but its text is not editable. */
+  k?: boolean;
 };
 
 export type ParagraphBlock = {

@@ -63,4 +63,31 @@ class DocxTextModule(private val reactContext: ReactApplicationContext) :
             promise.resolve(result)
         }
     }
+    /**
+     * Where to draw a caret before character [offset]: {x, top, bottom} in px relative to the
+     * Text view (padding included), or {error}. Never rejects.
+     */
+    @ReactMethod
+    fun caretRect(tag: Double, offset: Double, promise: Promise) {
+        UiThreadUtil.runOnUiThread {
+            val result = Arguments.createMap()
+            try {
+                val reactTag = tag.toInt()
+                val view = UIManagerHelper.getUIManagerForReactTag(reactContext, reactTag)?.resolveView(reactTag)
+                val layout = (view as? TextView)?.layout
+                if (view !is TextView || layout == null) {
+                    result.putString("error", "no text layout")
+                } else {
+                    val o = offset.toInt().coerceIn(0, layout.text.length)
+                    val line = layout.getLineForOffset(o)
+                    result.putDouble("x", (layout.getPrimaryHorizontal(o) + view.totalPaddingLeft).toDouble())
+                    result.putDouble("top", (layout.getLineTop(line) + view.totalPaddingTop).toDouble())
+                    result.putDouble("bottom", (layout.getLineBottom(line) + view.totalPaddingTop).toDouble())
+                }
+            } catch (t: Throwable) {
+                result.putString("error", t.toString())
+            }
+            promise.resolve(result)
+        }
+    }
 }

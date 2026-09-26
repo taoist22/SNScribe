@@ -6,14 +6,16 @@
 // Offsets are into a paragraph's text (runs' `t` joined; objects are one U+FFFC), the
 // same text the native reader and writer use.
 
-import {paragraphText, type Block, type ParagraphBlock, type Run} from '../model/docx';
+import {OBJECT, paragraphText, type Block, type ParagraphBlock, type Run} from '../model/docx';
 
 export type FormatProp = 'b' | 'i' | 'u' | 'h';
 export type StyleKind = 'heading1' | 'heading2' | 'title' | 'normal';
 
 export type Op =
   | {op: 'format'; para: number; start: number; end: number; prop: FormatProp; on: boolean}
-  | {op: 'style'; para: number; kind: StyleKind};
+  | {op: 'style'; para: number; kind: StyleKind}
+  /** Replace [start, end) with text: delete when text is '', insert when start === end. */
+  | {op: 'text'; para: number; start: number; end: number; text: string};
 
 /** A position between characters of paragraph `para` (Paragraph.index). */
 export type Pos = {para: number; offset: number};
@@ -64,6 +66,97 @@ function styleParagraph(p: ParagraphBlock, kind: StyleKind): ParagraphBlock {
   }
 }
 
+/** The run holding character `ch`, when it is a text run (not an object). */
+function runAt(runs: Run[], ch: number): Run | null {
+  if (ch < 0) {
+    return null;
+  }
+  let offset = 0;
+  for (const r of runs) {
+    const end = offset + r.t.length;
+    if (ch >= offset && ch < end) {
+      return r.obj ? null : r;
+    }
+    offset = end;
+  }
+  return null;
+}
+
+/**
+ * Mirrors DocxEditor.replaceText. New text takes the formatting of the first replaced
+ * character, or when inserting, of the character before it, else the one after; it goes
+ * between the run ending at `start` and the run starting there.
+ */
+function editText(p: ParagraphBlock, op: Extract<Op, {op: 'text'}>): ParagraphBlock {
+  const source = runAt(p.runs, op.end > op.start ? op.start : op.start - 1) ?? runAt(p.runs, op.start);
+  let offset = 0;
+  const kept: Run[] = [];
+  let insertAt = -1;
+  for (const r of splitRuns(p.runs, [op.start, op.end])) {
+    const s = offset;
+    offset += r.t.length;
+    if (r.t.length > 0 && s >= op.start && offset <= op.end) {
+      continue;
+    }
+    if (insertAt < 0 && s >= op.start && r.t.length > 0) {
+      insertAt = kept.length;
+    }
+    kept.push(r);
+  }
+  if (op.text) {
+    const {t: _t, obj: _o, k: _k, ...format} = source ?? {t: ''};
+    kept.splice(insertAt < 0 ? kept.length : insertAt, 0, {...format, t: op.text});
+  }
+  return {...p, runs: kept};
+}
+
+/**
+ * Why a text edit of [start, end) can't be made, or null when it can: the range must not
+ * touch an image, note marker, other object, or field / content-control text, and typing
+ * must not land inside a field. Mirrors the native refusal.
+ */
+export function textEditProblem(p: ParagraphBlock, start: number, end: number): string | null {
+  let offset = 0;
+  for (const r of p.runs) {
+    const s = offset;
+    offset += r.t.length;
+    if (r.t.length > 0 && s < end && offset > start && (r.obj || r.k || r.t.includes(OBJECT))) {
+      return r.k ? 'That text belongs to a field or form control, which can\'t be edited yet.' : 'The selection includes an image or note marker, which can\'t be deleted yet.';
+    }
+  }
+  const source = runAt(p.runs, end > start ? start : start - 1) ?? runAt(p.runs, start);
+  return source?.k ? 'Typing inside a field or form control isn\'t supported yet.' : null;
+}
+
+/**
+ * The range a Delete removes: the selection, plus one neighbouring space when deleting a
+ * whole word would otherwise leave two spaces (or a space before punctuation).
+ */
+export function deletionRange(text: string, start: number, end: number): {start: number; end: number} {
+  const before = text[start - 1];
+  const after = text[end];
+  if (after === ' ' && (start === 0 || before === ' ')) {
+    return {start, end: end + 1};
+  }
+  if (before === ' ' && (end === text.length || after === ' ' || /[.,;:!?)]/.test(after ?? ''))) {
+    return {start: start - 1, end};
+  }
+  return {start, end};
+}
+
+/** Paragraph texts after `ops`, for the paragraphs they touch: sent with Save as a cross-check. */
+export function expectedTexts(blocks: Block[], ops: Op[]): Record<number, string> {
+  const after = applyOps(blocks, ops);
+  const touched = new Set(ops.map(o => o.para));
+  const out: Record<number, string> = {};
+  for (const b of after) {
+    if (b.type === 'p' && touched.has(b.index)) {
+      out[b.index] = paragraphText(b);
+    }
+  }
+  return out;
+}
+
 /** The document with `ops` applied, in order. Untouched blocks keep their identity. */
 export function applyOps(blocks: Block[], ops: Op[]): Block[] {
   if (ops.length === 0) {
@@ -78,7 +171,7 @@ export function applyOps(blocks: Block[], ops: Op[]): Block[] {
       continue;
     }
     const p = out[i] as ParagraphBlock;
-    out[i] = op.op === 'format' ? formatParagraph(p, op) : styleParagraph(p, op.kind);
+    out[i] = op.op === 'format' ? formatParagraph(p, op) : op.op === 'style' ? styleParagraph(p, op.kind) : editText(p, op);
   }
   return out;
 }

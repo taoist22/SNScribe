@@ -28,8 +28,10 @@ import javax.xml.transform.stream.StreamResult
  * [DocxReader.segments] defines it — the same text the reader shows — so an edit lands on
  * the characters the user selected.
  *
- * Formatting never changes text, so ops can be applied in any order, and the saved copy is
- * verified by re-reading it: every paragraph's text must equal the original's.
+ * Ops apply in order; each op's offsets refer to the text left by the ops before it (the
+ * text the screen showed when the op was made). The saved copy is verified by re-reading
+ * it: every paragraph's text must equal the original with the text ops applied as plain
+ * string edits — and, when the screen sent them, the texts the screen expects.
  */
 object DocxEditor {
     sealed class Op {
@@ -38,6 +40,13 @@ object DocxEditor {
 
         /** kind: "heading1", "heading2", "title" or "normal". */
         data class Style(val para: Int, val kind: String) : Op()
+
+        /**
+         * Replaces characters [start, end) of a paragraph with [text]: delete when [text] is
+         * empty, insert when start == end. New text takes the formatting of the first
+         * replaced character, or when inserting, of the character before it (Word's rule).
+         */
+        data class Text(val para: Int, val start: Int, val end: Int, val text: String) : Op()
     }
 
     data class Saved(val dest: File, val changedParts: List<String>, val notes: List<String>)
@@ -62,7 +71,7 @@ object DocxEditor {
      * written to [dest], so [dest] never holds an unverified file. Throws with the reason
      * when anything fails; [dest] is then untouched.
      */
-    fun save(src: File, ops: List<Op>, dest: File, workDir: File): Saved {
+    fun save(src: File, ops: List<Op>, dest: File, workDir: File, expected: Map<Int, String> = emptyMap()): Saved {
         require(src.length() <= DocxReader.MAX_DOCX_BYTES) { "too large: ${src.length()} bytes" }
         val notes = ArrayList<String>()
         val changed = ArrayList<String>()
@@ -90,7 +99,7 @@ object DocxEditor {
                     }
                 }
             }
-            verify(src, temp, changed)
+            verify(src, temp, changed, ops, expected)
             copy(temp, dest)
             return Saved(dest, changed, notes)
         } finally {
@@ -98,13 +107,22 @@ object DocxEditor {
         }
     }
 
-    /** Every paragraph's text unchanged, every untouched part byte-identical. */
-    private fun verify(src: File, written: File, changed: List<String>) {
+    /**
+     * Every paragraph's text is exactly what the ops say (original + text edits as string
+     * splices) and what the screen expected; every untouched part is byte-identical.
+     */
+    private fun verify(src: File, written: File, changed: List<String>, ops: List<Op>, expected: Map<Int, String>) {
         val before = DocxReader.read(src).blocks.filterIsInstance<DocxReader.Paragraph>()
         val after = DocxReader.read(written).blocks.filterIsInstance<DocxReader.Paragraph>()
         check(before.size == after.size) { "verify: paragraph count ${before.size} → ${after.size}" }
-        for ((a, b) in before.zip(after)) {
-            check(a.text == b.text) { "verify: text of paragraph ${a.index} changed" }
+        val want = before.associate { it.index to it.text }.toMutableMap()
+        for (op in ops) if (op is Op.Text) {
+            val t = want[op.para] ?: continue
+            want[op.para] = t.substring(0, op.start) + op.text + t.substring(op.end)
+        }
+        for (p in after) {
+            check(p.text == want[p.index]) { "verify: paragraph ${p.index} does not have the text the edits describe" }
+            expected[p.index]?.let { check(p.text == it) { "verify: paragraph ${p.index} differs from what the screen showed" } }
         }
         val ha = hashes(src)
         val hb = hashes(written)
@@ -125,6 +143,7 @@ object DocxEditor {
                 when (op) {
                     is Op.Format -> op.para
                     is Op.Style -> op.para
+                    is Op.Text -> op.para
                 },
             )
             if (p == null) {
@@ -134,6 +153,7 @@ object DocxEditor {
             when (op) {
                 is Op.Format -> format(document, p, op, notes)
                 is Op.Style -> setStyle(document, p, styleIds.idFor(op.kind))
+                is Op.Text -> replaceText(document, p, op, notes)
             }
         }
         return styleIds.added
@@ -159,6 +179,109 @@ object DocxEditor {
             offset += len
         }
         notes.add("${op.prop}=${op.on} p${op.para} [${op.start},${op.end}): $touched run(s)")
+    }
+
+    /**
+     * Replaces [op.start, op.end) of paragraph [p] with [op.text] (see [Op.Text]).
+     * Refuses — throws — when the range touches an image, note reference, other object, or
+     * field / content-control text: deleting those would orphan or corrupt structure the
+     * editor does not manage yet.
+     */
+    private fun replaceText(document: Document, p: Element, op: Op.Text, notes: MutableList<String>) {
+        val segs = DocxReader.segments(p)
+        val total = segs.sumOf { it.length }
+        require(op.start in 0..op.end && op.end <= total) { "text edit [${op.start},${op.end}) outside paragraph ${op.para} (length $total)" }
+
+        // What the range covers must be plain, unlocked text.
+        var offset = 0
+        for (seg in segs) {
+            val s = offset
+            offset += seg.length
+            if (seg.length > 0 && s < op.end && offset > op.start) {
+                check(seg.isRun && !seg.locked && !hasObject(seg.el, s, op.start, op.end)) {
+                    "paragraph ${op.para}: the edit touches an image, note marker, field or content control"
+                }
+            }
+        }
+
+        // Formatting source: first replaced character, else the one before, else the one after.
+        val source = sourceRun(segs, if (op.end > op.start) op.start else op.start - 1) ?: sourceRun(segs, op.start)
+        check(source == null || !source.locked) { "paragraph ${op.para}: can't type inside a field or content control" }
+        val rPr = source?.el?.let { child(it, "rPr") }?.cloneNode(true) as Element?
+        rPr?.let { r -> elementChildren(r).filter { it.localName == "rPrChange" }.forEach { r.removeChild(it) } }
+
+        splitAt(p, op.start)
+        splitAt(p, op.end)
+        offset = 0
+        for (seg in DocxReader.segments(p)) {
+            val s = offset
+            offset += seg.length
+            if (seg.length > 0 && s >= op.start && offset <= op.end) {
+                val parent = seg.el.parentNode
+                parent.removeChild(seg.el)
+                // A hyperlink (or other container) emptied by the deletion goes too.
+                if (parent is Element && parent !== p && elementChildren(parent).none { it.localName == "r" }) {
+                    parent.parentNode?.removeChild(parent)
+                }
+            }
+        }
+
+        if (op.text.isNotEmpty()) {
+            val run = document.createElementNS(W, "w:r")
+            rPr?.let { run.appendChild(it) }
+            val parts = op.text.split('\t')
+            parts.forEachIndexed { i, part ->
+                if (i > 0) run.appendChild(document.createElementNS(W, "w:tab"))
+                if (part.isNotEmpty()) {
+                    val t = document.createElementNS(W, "w:t")
+                    t.setAttributeNS(XMLConstants.XML_NS_URI, "xml:space", "preserve")
+                    t.textContent = part
+                    run.appendChild(t)
+                }
+            }
+            // Between the piece ending at start and the piece starting there: after the former
+            // when there is one (so typing at the end of a link extends it, as the screen shows).
+            var before: Element? = null
+            var after: Element? = null
+            offset = 0
+            for (seg in DocxReader.segments(p)) {
+                val s = offset
+                offset += seg.length
+                if (seg.length > 0 && offset == op.start) before = seg.el
+                if (seg.length > 0 && s == op.start && after == null) after = seg.el
+            }
+            when {
+                before != null -> before.parentNode.insertBefore(run, before.nextSibling)
+                after != null -> after.parentNode.insertBefore(run, after)
+                else -> p.appendChild(run)
+            }
+        }
+        notes.add("text p${op.para} [${op.start},${op.end}) → ${op.text.length} chars")
+    }
+
+    /** The run segment holding character [ch], or null (out of range or not a text run). */
+    private fun sourceRun(segs: List<DocxReader.Segment>, ch: Int): DocxReader.Segment? {
+        if (ch < 0) return null
+        var offset = 0
+        for (seg in segs) {
+            val s = offset
+            offset += seg.length
+            if (ch in s until offset) return seg.takeIf { it.isRun && !hasObject(it.el, s, ch, ch + 1) }
+        }
+        return null
+    }
+
+    /** Whether the run's characters that fall in [from, to) include an object (U+FFFC). */
+    private fun hasObject(r: Element, runStart: Int, from: Int, to: Int): Boolean {
+        var pos = runStart
+        for (c in elementChildren(r)) {
+            val t = DocxReader.textOf(c)
+            for (ch in t) {
+                if (pos in from until to && ch == DocxReader.OBJECT) return true
+                pos++
+            }
+        }
+        return false
     }
 
     /**

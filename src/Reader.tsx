@@ -5,6 +5,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
   findNodeHandle,
   type GestureResponderEvent,
@@ -15,13 +16,17 @@ import {BlockView} from './BlockView';
 import {
   applyOps,
   comparePos,
+  deletionRange,
+  expectedTexts,
   formatOps,
   rangesBetween,
   styleOps,
+  textEditProblem,
   wordAround,
   type FormatProp,
   type Op,
   type Pos,
+  type Range,
   type StyleKind,
 } from './domain/edits';
 import {anchorAfter, findBreak, windowEnd, type Anchor, type BlockBox, type Break, type LineBox} from './domain/paging';
@@ -39,10 +44,11 @@ import {Docx, DocxText, errorText, log, nativeBuild} from './services/native';
  * through the pages already seen.
  *
  * Editing: the pen selects words (the paragraph's own TextView reports the character under
- * the pen, via DocxText). Buttons turn the selection into edits (domain/edits). The page
- * shows the original with the first `cursor` edits applied — Undo/Redo move the cursor —
- * and Save hands the same edits to the native writer, which saves a verified copy beside
- * the original. The original file is never changed.
+ * the pen, via DocxText); a tap places a caret, a double tap selects a word. Buttons turn
+ * the selection into edits (domain/edits), one undo step per button press. The page shows
+ * the original with the first `cursor` steps applied — Undo/Redo move the cursor — and Save
+ * hands the same edits to the native writer, which saves a verified copy beside the
+ * original. The original file is never changed.
  */
 
 const HEADER_H = 64;
@@ -51,9 +57,12 @@ const PAD = 16;
 const START: Anchor = {block: 0, offset: 0};
 /** Pen travel below this (dp) is a tap: it selects the word under the pen. */
 const TAP_SLOP = 12;
+/** A second tap this soon, this close, selects the word under it. */
+const DOUBLE_TAP_MS = 500;
 
 type Frame = {x: number; top: number; height: number};
 type Selection = {from: Pos; to: Pos};
+type Typing = {mode: 'insert'; at: Pos} | {mode: 'replace'; range: Range};
 
 export function Reader(): React.JSX.Element {
   const [doc, setDoc] = useState<DocxDocument | null>(null);
@@ -64,9 +73,13 @@ export function Reader(): React.JSX.Element {
   const [contents, setContents] = useState(false);
   const [pageH, setPageH] = useState(0);
   const [measured, setMeasured] = useState<{key: string; brk: Break} | null>(null);
-  const [edits, setEdits] = useState<{ops: Op[]; cursor: number}>({ops: [], cursor: 0});
+  const [edits, setEdits] = useState<{steps: Op[][]; cursor: number}>({steps: [], cursor: 0});
   const [saved, setSaved] = useState<{cursor: number; dest: string | null}>({cursor: 0, dest: null});
   const [selection, setSelection] = useState<Selection | null>(null);
+  const [caret, setCaret] = useState<Pos | null>(null);
+  const [caretBox, setCaretBox] = useState<{key: string; x: number; top: number; height: number} | null>(null);
+  const [typing, setTyping] = useState<Typing | null>(null);
+  const [input, setInput] = useState('');
   const [discardArmed, setDiscardArmed] = useState(false);
   const started = useRef(false);
 
@@ -87,7 +100,7 @@ export function Reader(): React.JSX.Element {
     })();
   }, []);
 
-  const applied = useMemo(() => edits.ops.slice(0, edits.cursor), [edits]);
+  const applied = useMemo(() => edits.steps.slice(0, edits.cursor).flat(), [edits]);
   const blocks = useMemo(() => (doc ? applyOps(doc.blocks, applied) : []), [doc, applied]);
   const dirty = edits.cursor !== saved.cursor;
   const readOnly = !!doc && doc.report.trackedChanges > 0;
@@ -192,9 +205,11 @@ export function Reader(): React.JSX.Element {
       setAnchor(START);
       setHistory([]);
       setContents(false);
-      setEdits({ops: [], cursor: 0});
+      setEdits({steps: [], cursor: 0});
       setSaved({cursor: 0, dest: null});
       setSelection(null);
+      setCaret(null);
+      setTyping(null);
       const r = opened.report;
       setStatus(
         r.trackedChanges > 0
@@ -290,6 +305,7 @@ export function Reader(): React.JSX.Element {
   const penFrom = useRef<{x: number; y: number} | null>(null);
   const penTo = useRef<{x: number; y: number} | null>(null);
   const selecting = useRef(false);
+  const lastTap = useRef<{x: number; y: number; at: number} | null>(null);
 
   const release = async () => {
     const a = penFrom.current;
@@ -302,10 +318,22 @@ export function Reader(): React.JSX.Element {
     selecting.current = true;
     try {
       const tap = Math.hypot(b.x - a.x, b.y - a.y) < TAP_SLOP;
+      const now = Date.now();
+      const prev = lastTap.current;
+      const doubleTap = tap && !!prev && now - prev.at < DOUBLE_TAP_MS && Math.hypot(a.x - prev.x, a.y - prev.y) < TAP_SLOP * 2;
+      lastTap.current = tap && !doubleTap ? {x: a.x, y: a.y, at: now} : null;
       const ha = await hit(a.x, a.y);
       const hb = tap ? ha : await hit(b.x, b.y);
       if (typeof ha === 'string' || typeof hb === 'string') {
         setStatus(typeof ha === 'string' ? ha : (hb as string));
+        return;
+      }
+      if (tap && !doubleTap) {
+        // One tap: a caret in the gap nearest the pen.
+        setSelection(null);
+        setTyping(null);
+        setCaret({para: ha.para, offset: ha.offset});
+        setStatus('');
         return;
       }
       // Order by the character under each end, then snap both ends to whole words.
@@ -319,6 +347,8 @@ export function Reader(): React.JSX.Element {
         return;
       }
       setSelection({from, to});
+      setCaret(null);
+      setTyping(null);
       setStatus('');
     } catch (error) {
       setStatus(`Selection failed: ${errorText(error)}`);
@@ -340,11 +370,12 @@ export function Reader(): React.JSX.Element {
 
   // ---------------------------------------------------------------- edits
 
+  /** One button press = one undo step, however many paragraphs it touches. */
   const commit = (ops: Op[], label: string) => {
     if (ops.length === 0) {
       return;
     }
-    setEdits(({ops: all, cursor}) => ({ops: [...all.slice(0, cursor), ...ops], cursor: cursor + ops.length}));
+    setEdits(({steps, cursor}) => ({steps: [...steps.slice(0, cursor), ops], cursor: cursor + 1}));
     // An undone save point can no longer be reached by redo.
     setSaved(sv => (sv.cursor > edits.cursor ? {...sv, cursor: -1} : sv));
     log(`${label}: ${JSON.stringify(ops)}`);
@@ -364,8 +395,95 @@ export function Reader(): React.JSX.Element {
     commit(styleOps(rangesBetween(blocks, selection.from, selection.to), kind), label);
   };
 
-  const undo = () => setEdits(e => ({...e, cursor: Math.max(0, e.cursor - 1)}));
-  const redo = () => setEdits(e => ({...e, cursor: Math.min(e.ops.length, e.cursor + 1)}));
+  const paragraph = (para: number) => blocks.find(b => b.type === 'p' && b.index === para) as ParagraphBlock | undefined;
+
+  const remove = () => {
+    if (!selection) {
+      return;
+    }
+    const ranges = rangesBetween(blocks, selection.from, selection.to);
+    const ops: Op[] = [];
+    for (const r of ranges) {
+      const p = paragraph(r.para);
+      const problem = p && textEditProblem(p, r.start, r.end);
+      if (!p || problem) {
+        setStatus(problem ?? 'Paragraph not found.');
+        return;
+      }
+      const d = deletionRange(paragraphText(p), r.start, r.end);
+      ops.push({op: 'text', para: r.para, start: d.start, end: d.end, text: ''});
+    }
+    commit(ops, 'delete');
+    setSelection(null);
+    setCaret(ranges.length ? {para: ranges[0].para, offset: ops[0].op === 'text' ? ops[0].start : 0} : null);
+  };
+
+  const startReplace = () => {
+    if (!selection) {
+      return;
+    }
+    const ranges = rangesBetween(blocks, selection.from, selection.to);
+    if (ranges.length !== 1) {
+      setStatus('Replace works inside one paragraph. Select less, or use Delete.');
+      return;
+    }
+    const r = ranges[0];
+    const p = paragraph(r.para);
+    const problem = p ? textEditProblem(p, r.start, r.end) : 'Paragraph not found.';
+    if (problem) {
+      setStatus(problem);
+      return;
+    }
+    setInput(paragraphText(p!).slice(r.start, r.end));
+    setTyping({mode: 'replace', range: r});
+  };
+
+  const startInsert = () => {
+    if (!caret) {
+      return;
+    }
+    const p = paragraph(caret.para);
+    const problem = p ? textEditProblem(p, caret.offset, caret.offset) : 'Paragraph not found.';
+    if (problem) {
+      setStatus(problem);
+      return;
+    }
+    setInput('');
+    setTyping({mode: 'insert', at: caret});
+  };
+
+  const finishTyping = () => {
+    if (!typing) {
+      return;
+    }
+    // One line of text: line breaks and other control characters become spaces.
+    const text = input.replace(/[\r\n\u0000-\u0008\u000b-\u001f\ufffc]/g, ' ');
+    const r = typing.mode === 'insert' ? {para: typing.at.para, start: typing.at.offset, end: typing.at.offset} : typing.range;
+    const current = paragraphText(paragraph(r.para)!).slice(r.start, r.end);
+    if (text !== current) {
+      commit([{op: 'text', para: r.para, start: r.start, end: r.end, text}], typing.mode);
+    }
+    setTyping(null);
+    setSelection(null);
+    setInput('');
+    setCaret({para: r.para, offset: r.start + (text !== current ? text.length : r.end - r.start)});
+  };
+
+  const cancelTyping = () => {
+    setTyping(null);
+    setInput('');
+  };
+
+  const undo = () => {
+    setEdits(e => ({...e, cursor: Math.max(0, e.cursor - 1)}));
+    setCaret(null);
+    setSelection(null);
+  };
+  const redo = () => {
+    setEdits(e => ({...e, cursor: Math.min(e.steps.length, e.cursor + 1)}));
+    setCaret(null);
+    setSelection(null);
+  };
 
   const save = async () => {
     if (!doc || !Docx) {
@@ -378,7 +496,7 @@ export function Reader(): React.JSX.Element {
         setStatus('Saving needs file write permission.');
         return;
       }
-      const res = await Docx.save(doc.path, applied, saved.dest ?? '');
+      const res = await Docx.save(doc.path, applied, saved.dest ?? '', expectedTexts(doc.blocks, applied));
       setSaved({cursor: edits.cursor, dest: res.dest});
       setDiscardArmed(false);
       setStatus(`Saved as ${res.name} (next to the original, which is unchanged).`);
@@ -388,6 +506,30 @@ export function Reader(): React.JSX.Element {
       setBusy(false);
     }
   };
+
+  // Where to draw the caret: asked of the paragraph's own layout once the page is measured.
+  useEffect(() => {
+    if (!caret || brk.kind === 'pending' || !DocxText) {
+      return;
+    }
+    const i = window.findIndex(b => b.type === 'p' && b.index === caret.para);
+    const f = frames.current[i];
+    const tag = i >= 0 ? findNodeHandle(textRefs.current[i] ?? null) : null;
+    if (i < 0 || !f || tag === null) {
+      return;
+    }
+    const tf = textFrames.current[i] ?? {x: 0, y: 0};
+    const key = pageKey;
+    DocxText.caretRect(tag, caret.offset).then(r => {
+      if (r.error !== undefined || measuredFor.current !== key) {
+        return;
+      }
+      const scale = PixelRatio.get();
+      setCaretBox({key, x: f.x + tf.x + r.x! / scale, top: f.top + tf.y + r.top! / scale, height: (r.bottom! - r.top!) / scale});
+    });
+    // frames/refs are read at call time; brk marks "measured".
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [caret, brk, pageKey]);
 
   // ---------------------------------------------------------------- render
 
@@ -421,7 +563,23 @@ export function Reader(): React.JSX.Element {
         {button('Close', close)}
       </View>
       <View style={styles.bar}>
-        {doc && selection && !contents ? (
+        {doc && typing && !contents ? (
+          <View style={styles.typing}>
+            <TextInput
+              style={styles.input}
+              value={input}
+              onChangeText={setInput}
+              autoFocus
+              allowFontScaling={false}
+              returnKeyType="done"
+              onSubmitEditing={finishTyping}
+              placeholder={typing.mode === 'insert' ? 'Type text to insert…' : 'Replacement text…'}
+              placeholderTextColor="#666"
+            />
+            {button('OK', finishTyping)}
+            {button('Cancel', cancelTyping)}
+          </View>
+        ) : doc && selection && !contents ? (
           <ScrollView horizontal style={styles.actions} contentContainerStyle={styles.actionsInner}>
             {button('Highlight', () => format('h', 'highlight'))}
             {button('Bold', () => format('b', 'bold'))}
@@ -430,17 +588,29 @@ export function Reader(): React.JSX.Element {
             {button('H1', () => style('heading1', 'heading 1'))}
             {button('H2', () => style('heading2', 'heading 2'))}
             {button('Body', () => style('normal', 'body text'))}
+            {button('Delete', remove)}
+            {button('Replace', startReplace)}
             {button('✕', () => setSelection(null))}
           </ScrollView>
+        ) : doc && caret && !contents ? (
+          <View style={styles.actions}>
+            <View style={styles.actionsInner}>
+              <Text allowFontScaling={false} style={styles.caretHint}>
+                {'Caret placed.'}
+              </Text>
+              {button('Type', startInsert)}
+              {button('✕', () => setCaret(null))}
+            </View>
+          </View>
         ) : (
           <Text allowFontScaling={false} style={styles.statusText} numberOfLines={2}>
-            {status || (doc && !readOnly ? 'Drag the pen across words to select them.' : '')}
+            {status || (doc && !readOnly ? 'Drag across words to select · tap for a caret · double-tap a word.' : '')}
           </Text>
         )}
         {doc && !readOnly ? (
           <View style={styles.editButtons}>
             {button('Undo', undo, edits.cursor === 0)}
-            {button('Redo', redo, edits.cursor === edits.ops.length)}
+            {button('Redo', redo, edits.cursor === edits.steps.length)}
             {button('Save', save, !dirty)}
           </View>
         ) : null}
@@ -478,6 +648,9 @@ export function Reader(): React.JSX.Element {
                   }}
                 />
               ))}
+              {caret && caretBox?.key === pageKey ? (
+                <View pointerEvents="none" style={[styles.caret, {left: caretBox.x - 1, top: caretBox.top, height: caretBox.height}]} />
+              ) : null}
             </View>
             <View style={[styles.mask, {top: visible}]} />
             {/* Owns the pen, so nothing inks and no text handles the touch itself. */}
@@ -529,6 +702,10 @@ const styles = StyleSheet.create({
   actions: {flex: 1},
   actionsInner: {alignItems: 'center'},
   editButtons: {flexDirection: 'row', marginLeft: 8},
+  typing: {flex: 1, flexDirection: 'row', alignItems: 'center'},
+  input: {flex: 1, height: 44, borderWidth: 1, borderColor: '#000', paddingHorizontal: 10, fontSize: 18, color: '#000'},
+  caretHint: {color: '#000', fontSize: 15},
+  caret: {position: 'absolute', width: 3, backgroundColor: '#000'},
   statusText: {flex: 1, color: '#000', fontSize: 15},
   pageArea: {flex: 1, padding: PAD},
   viewport: {overflow: 'hidden'},

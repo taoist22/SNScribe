@@ -42,6 +42,8 @@ object DocxReader {
         val superscript: Boolean = false,
         /** For a U+FFFC run: "image", "note" or "object". */
         val obj: String? = null,
+        /** Inside a field or content control: shown and formattable, but its text is not editable. */
+        val locked: Boolean = false,
     )
 
     sealed class Block
@@ -201,11 +203,11 @@ object DocxReader {
                 }
             }
             for (seg in segs) {
-                if (seg.isRun) run(seg.el, base, seg.link, out) else out.add(Run(OBJECT.toString(), obj = "object"))
+                if (seg.isRun) run(seg.el, base, seg.link, seg.locked, out) else out.add(Run(OBJECT.toString(), obj = "object", locked = true))
             }
         }
 
-        private fun run(r: Element, base: Fmt, link: Boolean, out: MutableList<Run>) {
+        private fun run(r: Element, base: Fmt, link: Boolean, locked: Boolean, out: MutableList<Run>) {
             val rPr = child(r, "rPr")
             val charStyle = rPr?.let { child(it, "rStyle") }?.getAttributeNS(W, "val")
             val fmt = base.merge(styles.character(charStyle)).merge(Fmt.of(rPr))
@@ -223,6 +225,7 @@ object DocxReader {
                         link = isLink,
                         superscript = fmt.superscript == true || obj == "note",
                         obj = obj,
+                        locked = locked,
                     ),
                 )
             }
@@ -254,7 +257,7 @@ object DocxReader {
      * One text-bearing piece of a paragraph, in reading order: a w:r run, or a foreign object
      * (mc:AlternateContent — a text box or shape) that counts as a single U+FFFC.
      */
-    class Segment(val el: Element, val isRun: Boolean, val link: Boolean) {
+    class Segment(val el: Element, val isRun: Boolean, val link: Boolean, var locked: Boolean = false) {
         val length: Int get() = if (isRun) runText(el).length else 1
     }
 
@@ -267,30 +270,51 @@ object DocxReader {
      */
     fun segments(p: Element, onMarker: (Element) -> Unit = {}): List<Segment> {
         val out = ArrayList<Segment>()
-        walk(p, false, out, onMarker)
+        walk(p, false, out, onMarker, locked = false)
+        // Complex fields (fldChar begin … end) span several runs: all of them, the codes and
+        // the shown result, are locked against text edits. Nesting is counted.
+        var depth = 0
+        for (seg in out) {
+            if (!seg.isRun) continue
+            var begins = 0
+            var ends = 0
+            for (c in elementChildren(seg.el)) {
+                if (c.localName == "fldChar") when (c.getAttributeNS(W, "fldCharType")) {
+                    "begin" -> begins++
+                    "end" -> ends++
+                }
+            }
+            if (depth > 0 || begins > 0 || ends > 0) seg.locked = true
+            depth = maxOf(0, depth + begins - ends)
+        }
         return out
     }
 
-    private fun walk(parent: Element, link: Boolean, out: MutableList<Segment>, onMarker: (Element) -> Unit) {
+    /** [locked]: inside a simple field or content control — shown, formattable, not text-editable. */
+    private fun walk(parent: Element, link: Boolean, out: MutableList<Segment>, onMarker: (Element) -> Unit, locked: Boolean) {
         for (el in elementChildren(parent)) {
             if (el.namespaceURI != W) {
                 if (el.localName == "AlternateContent") {
                     onMarker(el)
-                    out.add(Segment(el, false, link))
+                    out.add(Segment(el, false, link, locked))
                 }
                 continue
             }
             when (el.localName) {
-                "r" -> out.add(Segment(el, true, link))
-                "hyperlink" -> walk(el, true, out, onMarker)
-                "ins", "moveTo", "fldSimple" -> {
+                "r" -> out.add(Segment(el, true, link, locked))
+                "hyperlink" -> walk(el, true, out, onMarker, locked)
+                "ins", "moveTo" -> {
                     onMarker(el)
-                    walk(el, link, out, onMarker)
+                    walk(el, link, out, onMarker, locked)
                 }
-                "smartTag", "customXml" -> walk(el, link, out, onMarker)
+                "fldSimple" -> {
+                    onMarker(el)
+                    walk(el, link, out, onMarker, true)
+                }
+                "smartTag", "customXml" -> walk(el, link, out, onMarker, locked)
                 "sdt" -> {
                     onMarker(el)
-                    child(el, "sdtContent")?.let { walk(it, link, out, onMarker) }
+                    child(el, "sdtContent")?.let { walk(it, link, out, onMarker, true) }
                 }
                 else -> onMarker(el) // del, moveFrom, commentRangeStart, bookmarks, proofErr, pPr …
             }

@@ -53,6 +53,85 @@ class DocxEditorTest {
         assertEquals("body", paragraphs(dest)[0].kind)
     }
 
+    @Test
+    fun textEditsKeepFormattingAndStructure() {
+        val src = File(fixtures, "probe-fixture.docx")
+        val before = paragraphs(src)
+        val p1 = before[1].text // "Plain words come first …, then a bold phrase sits …"
+        val bold = p1.indexOf("a bold phrase")
+        val (dest, _) = save(
+            src,
+            listOf(
+                Op.Text(1, 0, 5, "Simple"), // replace "Plain" (plain formatting)
+                Op.Text(1, bold + 1 + 1, bold + 1 + 1 + "bold".length, "BRAVE"), // offsets after "Simple" (+1)
+                Op.Text(1, 0, 0, ">> "), // insert at the very start
+                Op.Text(3, before[3].text.length, before[3].text.length, " The end."), // append
+                Op.Text(0, 0, before[0].text.length, ""), // delete a whole heading's text
+            ),
+        )
+        val after = paragraphs(dest)
+        assertTrue(after[1].text.startsWith(">> Simple words come first"))
+        // Replacing inside the bold run keeps bold: the new word is bold.
+        assertTrue(after[1].runs.any { it.text.contains("BRAVE") && it.bold })
+        assertTrue(after[3].text.endsWith("differently formatted runs at once. The end."))
+        assertEquals("", after[0].text)
+        assertEquals("heading", after[0].kind) // the paragraph (and its style) stay
+        assertEquals(before.size, after.size)
+    }
+
+    @Test
+    fun refusesToDeleteANoteMarker() {
+        val src = File(fixtures, "probe-fixture.docx")
+        val p2 = paragraphs(src)[2].text
+        val note = p2.indexOf(DocxReader.OBJECT)
+        val dest = File(work, "refused.docx")
+        val failure = runCatching { DocxEditor.save(src, listOf(Op.Text(2, note - 4, note + 2, "")), dest, File(work, "tmp")) }
+        assertTrue(failure.isFailure)
+        assertFalse(dest.exists()) // nothing unverified reaches the destination
+        // Typing right after the marker is fine.
+        val (ok, _) = save(src, listOf(Op.Text(2, note + 1, note + 1, "!")))
+        assertTrue(paragraphs(ok)[2].text.contains("${DocxReader.OBJECT}!, then"))
+    }
+
+    @Test
+    fun typesIntoAnEmptyParagraph() {
+        val src = File(fixtures, "probe-fixture.docx")
+        val empty = paragraphs(src).first { it.text.isEmpty() || it.runs.all { r -> r.obj != null } }
+        val at = empty.text.length
+        val (dest, _) = save(src, listOf(Op.Text(empty.index, at, at, "Caption\there")))
+        assertTrue(paragraphs(dest).first { it.index == empty.index }.text.endsWith("Caption\there"))
+    }
+
+    /**
+     * Stress (text): on every real document in DOCX_SAMPLES, in every paragraph with plain
+     * editable text, replace the middle third, insert at the start and delete the last
+     * character — skipping ranges that touch objects or fields, as the screen would.
+     */
+    @Test
+    fun textEditsOnRealDocuments() {
+        val dir = System.getProperty("docx.samples").orEmpty()
+        if (dir.isEmpty()) return
+        val files = File(dir).listFiles { f -> f.name.endsWith(".docx") }.orEmpty().sortedBy { it.name }
+        for (f in files) {
+            val ops = ArrayList<Op>()
+            for (p in paragraphs(f)) {
+                if (p.runs.any { it.locked || it.obj != null }) continue
+                var t = p.text
+                if (t.length < 6) continue
+                val a = t.length / 3
+                val b = 2 * t.length / 3
+                ops.add(Op.Text(p.index, a, b, "«edited»"))
+                t = t.substring(0, a) + "«edited»" + t.substring(b)
+                ops.add(Op.Text(p.index, 0, 0, "▶ "))
+                t = "▶ $t"
+                ops.add(Op.Text(p.index, t.length - 1, t.length, ""))
+            }
+            val (dest, saved) = save(f, ops)
+            println("${f.name}: ${ops.size} text ops verified, ${saved.changedParts}")
+            assertTrue(dest.exists())
+        }
+    }
+
     /**
      * Stress: on every real document in DOCX_SAMPLES, bold the first word, highlight the
      * middle third and italicise the end of every paragraph, and make paragraph 1 a

@@ -6,6 +6,7 @@ import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.ReadableArray
+import com.facebook.react.bridge.ReadableMap
 import com.facebook.react.bridge.WritableMap
 import java.io.File
 import java.io.FileOutputStream
@@ -31,7 +32,7 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
 
     companion object {
         /** Bumped with each native change; first log line, to spot stale installs. */
-        const val NATIVE_BUILD = 2
+        const val NATIVE_BUILD = 3
         private val EXPORT_DIR = File("/storage/emulated/0/EXPORT")
         private const val LOG_MAX_BYTES = 2L * 1024 * 1024
         private const val LOG_LINE_MAX = 4000
@@ -132,7 +133,7 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
      * {dest, name, ms, changed, notes}; rejects with the reason, leaving any file untouched.
      */
     @ReactMethod
-    fun save(srcPath: String, ops: ReadableArray, dest: String, promise: Promise) {
+    fun save(srcPath: String, ops: ReadableArray, dest: String, expected: ReadableMap, promise: Promise) {
         worker.execute {
             val t0 = System.currentTimeMillis()
             try {
@@ -144,11 +145,15 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
                             m.getString("prop") ?: "", m.getBoolean("on"),
                         )
                         "style" -> DocxEditor.Op.Style(m.getInt("para"), m.getString("kind") ?: "normal")
+                        "text" -> DocxEditor.Op.Text(
+                            m.getInt("para"), m.getInt("start"), m.getInt("end"), m.getString("text") ?: "",
+                        )
                         else -> throw IllegalArgumentException("unknown op ${m.getString("op")}")
                     }
                 }
                 val target = if (dest.isEmpty()) DocxEditor.editedCopyName(src) else File(dest)
-                val saved = DocxEditor.save(src, parsed, target, File(reactContext.cacheDir, "saving"))
+                val expect = expected.toHashMap().mapNotNull { (k, v) -> k.toIntOrNull()?.let { it to v.toString() } }.toMap()
+                val saved = DocxEditor.save(src, parsed, target, File(reactContext.cacheDir, "saving"), expect)
                 val ms = System.currentTimeMillis() - t0
                 appendLog("save ${src.name} → ${target.path}: ${parsed.size} ops, ${saved.changedParts}, $ms ms")
                 saved.notes.forEach { appendLog("  $it") }
@@ -197,6 +202,7 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
                         if (r.link) putBoolean("l", true)
                         if (r.superscript) putBoolean("sup", true)
                         r.obj?.let { putString("obj", it) }
+                        if (r.locked) putBoolean("k", true)
                     })
                 })
             }
