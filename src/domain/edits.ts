@@ -144,6 +144,20 @@ export function deletionRange(text: string, start: number, end: number): {start:
   return {start, end};
 }
 
+/**
+ * Where a position measured before a text edit ends up after it: the edit replaced
+ * [r.start, r.end) of paragraph r.para with `len` characters.
+ */
+export function shiftPos(p: Pos, r: Range, len: number): Pos {
+  if (p.para !== r.para || p.offset <= r.start) {
+    return p;
+  }
+  if (p.offset >= r.end) {
+    return {para: p.para, offset: p.offset + len - (r.end - r.start)};
+  }
+  return {para: p.para, offset: r.start + len};
+}
+
 /** Paragraph texts after `ops`, for the paragraphs they touch: sent with Save as a cross-check. */
 export function expectedTexts(blocks: Block[], ops: Op[]): Record<number, string> {
   const after = applyOps(blocks, ops);

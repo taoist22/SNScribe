@@ -3,6 +3,7 @@ import {
   applyOps,
   deletionRange,
   expectedTexts,
+  shiftPos,
   textEditProblem,
   formatOps,
   markSelection,
@@ -153,5 +154,20 @@ describe('text edits', () => {
   it('computes the texts to cross-check on save', () => {
     const ops: Op[] = [{op: 'text', para: 1, start: 0, end: 5, text: 'Simple'}];
     expect(expectedTexts(doc, ops)).toEqual({1: 'Simple then bold note' + OBJECT + ' end.'});
+  });
+});
+
+describe('shiftPos', () => {
+  const r = {para: 2, start: 10, end: 14}; // 4 chars replaced by 7
+  it('moves positions after the edit, keeps those before or elsewhere', () => {
+    expect(shiftPos({para: 2, offset: 20}, r, 7)).toEqual({para: 2, offset: 23});
+    expect(shiftPos({para: 2, offset: 10}, r, 7)).toEqual({para: 2, offset: 10});
+    expect(shiftPos({para: 3, offset: 20}, r, 7)).toEqual({para: 3, offset: 20});
+  });
+  it('puts positions inside the replaced text at its end', () => {
+    expect(shiftPos({para: 2, offset: 12}, r, 7)).toEqual({para: 2, offset: 17});
+  });
+  it('handles a plain insertion', () => {
+    expect(shiftPos({para: 2, offset: 11}, {para: 2, start: 10, end: 10}, 3)).toEqual({para: 2, offset: 14});
   });
 });

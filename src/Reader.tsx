@@ -20,6 +20,7 @@ import {
   expectedTexts,
   formatOps,
   rangesBetween,
+  shiftPos,
   styleOps,
   textEditProblem,
   wordAround,
@@ -306,6 +307,10 @@ export function Reader(): React.JSX.Element {
   const penTo = useRef<{x: number; y: number} | null>(null);
   const selecting = useRef(false);
   const lastTap = useRef<{x: number; y: number; at: number} | null>(null);
+  /** Typing opens this long after a tap, unless a second tap (a double tap) cancels it. */
+  const pendingType = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const blocksNow = useRef(blocks);
+  blocksNow.current = blocks;
 
   const release = async () => {
     const a = penFrom.current;
@@ -322,26 +327,36 @@ export function Reader(): React.JSX.Element {
       const prev = lastTap.current;
       const doubleTap = tap && !!prev && now - prev.at < DOUBLE_TAP_MS && Math.hypot(a.x - prev.x, a.y - prev.y) < TAP_SLOP * 2;
       lastTap.current = tap && !doubleTap ? {x: a.x, y: a.y, at: now} : null;
+      if (pendingType.current) {
+        clearTimeout(pendingType.current);
+        pendingType.current = null;
+      }
       const ha = await hit(a.x, a.y);
       const hb = tap ? ha : await hit(b.x, b.y);
       if (typeof ha === 'string' || typeof hb === 'string') {
         setStatus(typeof ha === 'string' ? ha : (hb as string));
         return;
       }
+      // Anything typed so far is applied first; positions measured before it are moved.
+      const adjust = flushTyping();
       if (tap && !doubleTap) {
-        // One tap: a caret in the gap nearest the pen.
+        // One tap: a caret in the gap nearest the pen, and typing there shortly after.
+        const at = adjust({para: ha.para, offset: ha.offset});
         setSelection(null);
-        setTyping(null);
-        setCaret({para: ha.para, offset: ha.offset});
+        setCaret(at);
         setStatus('');
+        pendingType.current = setTimeout(() => {
+          pendingType.current = null;
+          startInsertAt(at);
+        }, DOUBLE_TAP_MS);
         return;
       }
       // Order by the character under each end, then snap both ends to whole words.
       const [s, e] = comparePos({para: ha.para, offset: ha.char}, {para: hb.para, offset: hb.char}) <= 0 ? [ha, hb] : [hb, ha];
       const ws = wordAround(textOf(s.para), s.char, 'right');
       const we = wordAround(textOf(e.para), e.char, 'left');
-      const from = {para: s.para, offset: ws?.start ?? s.offset};
-      const to = {para: e.para, offset: we?.end ?? e.offset};
+      const from = adjust({para: s.para, offset: ws?.start ?? s.offset});
+      const to = adjust({para: e.para, offset: we?.end ?? e.offset});
       if (comparePos(from, to) >= 0) {
         setSelection(null);
         return;
@@ -438,40 +453,58 @@ export function Reader(): React.JSX.Element {
     setTyping({mode: 'replace', range: r});
   };
 
-  const startInsert = () => {
-    if (!caret) {
-      return;
-    }
-    const p = paragraph(caret.para);
-    const problem = p ? textEditProblem(p, caret.offset, caret.offset) : 'Paragraph not found.';
+  /** Typing at a caret. Reads the latest blocks: it may run after an edit was committed. */
+  const startInsertAt = (at: Pos) => {
+    const p = blocksNow.current.find(b => b.type === 'p' && b.index === at.para) as ParagraphBlock | undefined;
+    const problem = p ? textEditProblem(p, at.offset, at.offset) : 'Paragraph not found.';
     if (problem) {
       setStatus(problem);
       return;
     }
     setInput('');
-    setTyping({mode: 'insert', at: caret});
+    setTyping({mode: 'insert', at});
+  };
+
+  /** One line of text: line breaks and other control characters become spaces. */
+  const clean = (text: string) => text.replace(/[\r\n\u0000-\u0008\u000b-\u001f\ufffc]/g, ' ');
+
+  const typedRange = (t: Typing): Range =>
+    t.mode === 'insert' ? {para: t.at.para, start: t.at.offset, end: t.at.offset} : t.range;
+
+  /**
+   * Applies the text typed so far, if it changes anything, and closes the text box.
+   * Returns how to move a position that was measured before the text went in.
+   */
+  const flushTyping = (): ((p: Pos) => Pos) => {
+    if (!typing) {
+      return p => p;
+    }
+    const r = typedRange(typing);
+    const text = clean(input);
+    const current = paragraphText(paragraph(r.para)!).slice(r.start, r.end);
+    setTyping(null);
+    setInput('');
+    if (text === current) {
+      return p => p;
+    }
+    commit([{op: 'text', para: r.para, start: r.start, end: r.end, text}], typing.mode);
+    return p => shiftPos(p, r, text.length);
   };
 
   const finishTyping = () => {
     if (!typing) {
       return;
     }
-    // One line of text: line breaks and other control characters become spaces.
-    const text = input.replace(/[\r\n\u0000-\u0008\u000b-\u001f\ufffc]/g, ' ');
-    const r = typing.mode === 'insert' ? {para: typing.at.para, start: typing.at.offset, end: typing.at.offset} : typing.range;
-    const current = paragraphText(paragraph(r.para)!).slice(r.start, r.end);
-    if (text !== current) {
-      commit([{op: 'text', para: r.para, start: r.start, end: r.end, text}], typing.mode);
-    }
-    setTyping(null);
+    const r = typedRange(typing);
+    const after = flushTyping()({para: r.para, offset: r.end});
     setSelection(null);
-    setInput('');
-    setCaret({para: r.para, offset: r.start + (text !== current ? text.length : r.end - r.start)});
+    setCaret(after);
   };
 
   const cancelTyping = () => {
     setTyping(null);
     setInput('');
+    setCaret(null);
   };
 
   const undo = () => {
@@ -573,7 +606,7 @@ export function Reader(): React.JSX.Element {
               allowFontScaling={false}
               returnKeyType="done"
               onSubmitEditing={finishTyping}
-              placeholder={typing.mode === 'insert' ? 'Type text to insert…' : 'Replacement text…'}
+              placeholder={typing.mode === 'insert' ? 'Type here…' : 'Replacement text…'}
               placeholderTextColor="#666"
             />
             {button('OK', finishTyping)}
@@ -593,18 +626,15 @@ export function Reader(): React.JSX.Element {
             {button('✕', () => setSelection(null))}
           </ScrollView>
         ) : doc && caret && !contents ? (
-          <View style={styles.actions}>
-            <View style={styles.actionsInner}>
-              <Text allowFontScaling={false} style={styles.caretHint}>
-                {'Caret placed.'}
-              </Text>
-              {button('Type', startInsert)}
-              {button('✕', () => setCaret(null))}
-            </View>
+          <View style={styles.caretRow}>
+            <Text allowFontScaling={false} style={styles.caretHint}>
+              {'Caret placed — start typing.'}
+            </Text>
+            {button('✕', () => setCaret(null))}
           </View>
         ) : (
           <Text allowFontScaling={false} style={styles.statusText} numberOfLines={2}>
-            {status || (doc && !readOnly ? 'Drag across words to select · tap for a caret · double-tap a word.' : '')}
+            {status || (doc && !readOnly ? 'Tap to type · drag across words to select · double-tap a word.' : '')}
           </Text>
         )}
         {doc && !readOnly ? (
@@ -704,7 +734,8 @@ const styles = StyleSheet.create({
   editButtons: {flexDirection: 'row', marginLeft: 8},
   typing: {flex: 1, flexDirection: 'row', alignItems: 'center'},
   input: {flex: 1, height: 44, borderWidth: 1, borderColor: '#000', paddingHorizontal: 10, fontSize: 18, color: '#000'},
-  caretHint: {color: '#000', fontSize: 15},
+  caretRow: {flex: 1, flexDirection: 'row', alignItems: 'center'},
+  caretHint: {flex: 1, color: '#000', fontSize: 15},
   caret: {position: 'absolute', width: 3, backgroundColor: '#000'},
   statusText: {flex: 1, color: '#000', fontSize: 15},
   pageArea: {flex: 1, padding: PAD},
