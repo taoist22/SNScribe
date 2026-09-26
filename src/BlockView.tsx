@@ -1,5 +1,6 @@
 import React from 'react';
 import {StyleSheet, Text, View, type LayoutChangeEvent, type TextLayoutEventData, type NativeSyntheticEvent} from 'react-native';
+import {markSelection} from './domain/edits';
 import {OBJECT, type Block, type ParagraphBlock, type Run} from './model/docx';
 import type {LineBox} from './domain/paging';
 
@@ -16,8 +17,14 @@ import type {LineBox} from './domain/paging';
 
 type Props = {
   block: Block;
+  /** Selected characters of this paragraph, drawn inverted. */
+  selection?: {start: number; end: number} | null;
   onFrame: (e: LayoutChangeEvent) => void;
   onLines?: (lines: LineBox[]) => void;
+  /** The paragraph's Text: its native view is asked which character is under the pen. */
+  textRef?: (t: Text | null) => void;
+  /** The paragraph Text's position inside the block frame (list rows shift it right). */
+  onTextFrame?: (e: LayoutChangeEvent) => void;
 };
 
 const SYMBOL: Record<string, string> = {image: '▣', note: '*', object: '◇'};
@@ -40,7 +47,7 @@ function sizeFor(p: ParagraphBlock): number {
   }
 }
 
-function ParagraphView({p, onFrame, onLines}: {p: ParagraphBlock; onFrame: Props['onFrame']; onLines?: Props['onLines']}) {
+function ParagraphView({p, selection, onFrame, onLines, textRef, onTextFrame}: Omit<Props, 'block'> & {p: ParagraphBlock}) {
   const size = sizeFor(p);
   const lineHeight = Math.round(size * 1.45);
   const heading = p.kind !== 'body';
@@ -49,6 +56,8 @@ function ParagraphView({p, onFrame, onLines}: {p: ParagraphBlock; onFrame: Props
   const indent = Math.max(0, Math.min(160, Math.round(p.indent / 20)));
   const text = (
     <Text
+      ref={textRef}
+      onLayout={onTextFrame}
       allowFontScaling={false}
       style={[
         styles.text,
@@ -61,7 +70,7 @@ function ParagraphView({p, onFrame, onLines}: {p: ParagraphBlock; onFrame: Props
       onTextLayout={(e: NativeSyntheticEvent<TextLayoutEventData>) =>
         onLines?.(e.nativeEvent.lines.map(l => ({y: l.y, height: l.height})))
       }>
-      {p.runs.map((r, i) => (
+      {markSelection(p.runs, selection ?? null).map((r, i) => (
         <Text
           key={i}
           style={[
@@ -70,6 +79,7 @@ function ParagraphView({p, onFrame, onLines}: {p: ParagraphBlock; onFrame: Props
             r.h ? styles.highlight : null,
             r.u || r.s ? {textDecorationLine: r.u && r.s ? 'underline line-through' : r.u ? 'underline' : 'line-through'} : null,
             r.sup ? {fontSize: Math.round(size * 0.65)} : null,
+            r.sel ? styles.selected : null,
           ]}>
           {runText(r)}
         </Text>
@@ -97,10 +107,11 @@ function ParagraphView({p, onFrame, onLines}: {p: ParagraphBlock; onFrame: Props
   );
 }
 
-export function BlockView({block, onFrame, onLines}: Props): React.JSX.Element {
+export function BlockView({block, ...rest}: Props): React.JSX.Element {
   if (block.type === 'p') {
-    return <ParagraphView p={block} onFrame={onFrame} onLines={onLines} />;
+    return <ParagraphView p={block} {...rest} />;
   }
+  const {onFrame} = rest;
   const title =
     block.type === 'table'
       ? `▦ Table · ${block.rows} × ${block.cols} — shown as a summary`
@@ -127,6 +138,7 @@ const styles = StyleSheet.create({
   bold: {fontWeight: '700'},
   italic: {fontStyle: 'italic'},
   highlight: {backgroundColor: '#cfcfcf'},
+  selected: {backgroundColor: '#000', color: '#fff'},
   locked: {borderWidth: 1, borderColor: '#000', borderStyle: 'dashed', padding: 10, marginBottom: 12},
   lockedTitle: {color: '#000', fontSize: 17, fontWeight: '700'},
   lockedPreview: {color: '#333', fontSize: 16, fontStyle: 'italic', marginTop: 4},

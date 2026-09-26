@@ -5,6 +5,7 @@ import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
+import com.facebook.react.bridge.ReadableArray
 import com.facebook.react.bridge.WritableMap
 import java.io.File
 import java.io.FileOutputStream
@@ -21,7 +22,7 @@ import java.util.concurrent.TimeUnit
  * Writes to EXPORT are refused until plugin.permission.FILE:WRITE is granted (the probe lost
  * two logs that way), so log() reports a refusal instead of swallowing it.
  */
-class DocxModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaModule(reactContext) {
+class DocxModule(private val reactContext: ReactApplicationContext) : ReactContextBaseJavaModule(reactContext) {
 
     override fun getName() = "Docx"
 
@@ -30,7 +31,7 @@ class DocxModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaMo
 
     companion object {
         /** Bumped with each native change; first log line, to spot stale installs. */
-        const val NATIVE_BUILD = 1
+        const val NATIVE_BUILD = 2
         private val EXPORT_DIR = File("/storage/emulated/0/EXPORT")
         private const val LOG_MAX_BYTES = 2L * 1024 * 1024
         private const val LOG_LINE_MAX = 4000
@@ -120,6 +121,46 @@ class DocxModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaMo
             } catch (t: Throwable) {
                 appendLog("open FAILED $path: $t")
                 promise.reject("DOCX_OPEN_FAILED", t.message ?: t.toString(), t)
+            }
+        }
+    }
+
+    /**
+     * Saves a copy with [ops] applied. [dest] empty = a new `<name>-edited.docx` beside the
+     * original; otherwise that copy (from an earlier save this session) is overwritten.
+     * Built and verified in private storage first (DocxEditor.save). Resolves
+     * {dest, name, ms, changed, notes}; rejects with the reason, leaving any file untouched.
+     */
+    @ReactMethod
+    fun save(srcPath: String, ops: ReadableArray, dest: String, promise: Promise) {
+        worker.execute {
+            val t0 = System.currentTimeMillis()
+            try {
+                val src = File(srcPath)
+                val parsed = (0 until ops.size()).mapNotNull { i -> ops.getMap(i) }.map { m ->
+                    when (m.getString("op")) {
+                        "format" -> DocxEditor.Op.Format(
+                            m.getInt("para"), m.getInt("start"), m.getInt("end"),
+                            m.getString("prop") ?: "", m.getBoolean("on"),
+                        )
+                        "style" -> DocxEditor.Op.Style(m.getInt("para"), m.getString("kind") ?: "normal")
+                        else -> throw IllegalArgumentException("unknown op ${m.getString("op")}")
+                    }
+                }
+                val target = if (dest.isEmpty()) DocxEditor.editedCopyName(src) else File(dest)
+                val saved = DocxEditor.save(src, parsed, target, File(reactContext.cacheDir, "saving"))
+                val ms = System.currentTimeMillis() - t0
+                appendLog("save ${src.name} → ${target.path}: ${parsed.size} ops, ${saved.changedParts}, $ms ms")
+                saved.notes.forEach { appendLog("  $it") }
+                promise.resolve(Arguments.createMap().apply {
+                    putString("dest", target.path)
+                    putString("name", target.name)
+                    putDouble("ms", ms.toDouble())
+                    putArray("changed", Arguments.fromList(saved.changedParts))
+                })
+            } catch (t: Throwable) {
+                appendLog("save FAILED $srcPath: $t")
+                promise.reject("DOCX_SAVE_FAILED", t.message ?: t.toString(), t)
             }
         }
     }

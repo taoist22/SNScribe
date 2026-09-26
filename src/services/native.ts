@@ -11,7 +11,26 @@ type DocxModule = {
   logName(): Promise<string>;
   delay(ms: number): Promise<void>;
   open(path: string): Promise<DocxDocument>;
+  /** Saves a verified copy with `ops` applied; `dest` '' = new <name>-edited.docx beside the original. */
+  save(src: string, ops: object[], dest: string): Promise<{dest: string; name: string; ms: number; changed: string[]}>;
 };
+
+export type OffsetResult = {
+  offset?: number;
+  char?: number;
+  line?: number;
+  lineCount?: number;
+  length?: number;
+  viewClass: string;
+  error?: string;
+};
+
+type DocxTextModule = {
+  /** x, y in px relative to the Text view: the gap nearest the pen and the character under it. */
+  offsetAt(tag: number, x: number, y: number): Promise<OffsetResult>;
+};
+
+export const DocxText = NativeModules.DocxText as DocxTextModule | undefined;
 
 export const Docx = NativeModules.Docx as DocxModule | undefined;
 

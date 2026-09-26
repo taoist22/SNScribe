@@ -1,7 +1,7 @@
 {
   "name": "DOCX",
   "desc": "Read Word documents (.docx) on Supernote. Editing comes in later versions.",
-  "iconPath": "assets/probe.png",
+  "iconPath": "assets/docx.png",
   "versionName": "0.1.0",
   "versionCode": "1",
   "pluginID": "r7gdcjlpcbaedsws",

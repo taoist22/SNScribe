@@ -177,7 +177,7 @@ object DocxReader {
                 ?: style.indent
 
             val runs = ArrayList<Run>()
-            collectRuns(p, style.run, link = false, out = runs)
+            collectRuns(p, style.run, runs)
             return Paragraph(
                 index = index,
                 styleId = styleId,
@@ -190,40 +190,18 @@ object DocxReader {
             )
         }
 
-        /**
-         * Runs in reading order. Descends through containers the reader shows inline
-         * (hyperlinks, insertions, fields, smart tags, inline content controls) and skips
-         * deleted or moved-away text, which Word does not show either.
-         */
-        private fun collectRuns(parent: Element, base: Fmt, link: Boolean, out: MutableList<Run>) {
-            for (el in elementChildren(parent)) {
-                if (el.namespaceURI != W) {
-                    // mc:AlternateContent and other foreign wrappers: an object the reader can't show.
-                    if (el.localName == "AlternateContent") {
-                        images++
-                        out.add(Run(OBJECT.toString(), obj = "object"))
-                    }
-                    continue
-                }
-                when (el.localName) {
-                    "r" -> run(el, base, link, out)
-                    "hyperlink" -> collectRuns(el, base, true, out)
-                    "ins", "moveTo" -> {
-                        tracked++
-                        collectRuns(el, base, link, out)
-                    }
-                    "del", "moveFrom" -> tracked++
-                    "fldSimple" -> {
-                        fields++
-                        collectRuns(el, base, link, out)
-                    }
-                    "smartTag", "customXml" -> collectRuns(el, base, link, out)
-                    "sdt" -> {
-                        contentControls++
-                        child(el, "sdtContent")?.let { collectRuns(it, base, link, out) }
-                    }
+        private fun collectRuns(p: Element, base: Fmt, out: MutableList<Run>) {
+            val segs = segments(p) { marker ->
+                when (marker.localName) {
+                    "ins", "moveTo", "del", "moveFrom" -> tracked++
+                    "fldSimple" -> fields++
+                    "sdt" -> contentControls++
                     "commentRangeStart" -> comments++
+                    "AlternateContent" -> images++
                 }
+            }
+            for (seg in segs) {
+                if (seg.isRun) run(seg.el, base, seg.link, out) else out.add(Run(OBJECT.toString(), obj = "object"))
             }
         }
 
@@ -271,6 +249,55 @@ object DocxReader {
             add(text.toString())
         }
     }
+
+    /**
+     * One text-bearing piece of a paragraph, in reading order: a w:r run, or a foreign object
+     * (mc:AlternateContent — a text box or shape) that counts as a single U+FFFC.
+     */
+    class Segment(val el: Element, val isRun: Boolean, val link: Boolean) {
+        val length: Int get() = if (isRun) runText(el).length else 1
+    }
+
+    /**
+     * THE definition of a paragraph's text, shared by the reader and the writer so their
+     * character offsets always agree. Descends through containers Word shows inline
+     * (hyperlinks, insertions, simple fields, smart tags, custom XML, inline content
+     * controls) and skips deleted or moved-away text, which Word does not show either.
+     * [onMarker] sees every container and marker passed on the way (for the report).
+     */
+    fun segments(p: Element, onMarker: (Element) -> Unit = {}): List<Segment> {
+        val out = ArrayList<Segment>()
+        walk(p, false, out, onMarker)
+        return out
+    }
+
+    private fun walk(parent: Element, link: Boolean, out: MutableList<Segment>, onMarker: (Element) -> Unit) {
+        for (el in elementChildren(parent)) {
+            if (el.namespaceURI != W) {
+                if (el.localName == "AlternateContent") {
+                    onMarker(el)
+                    out.add(Segment(el, false, link))
+                }
+                continue
+            }
+            when (el.localName) {
+                "r" -> out.add(Segment(el, true, link))
+                "hyperlink" -> walk(el, true, out, onMarker)
+                "ins", "moveTo", "fldSimple" -> {
+                    onMarker(el)
+                    walk(el, link, out, onMarker)
+                }
+                "smartTag", "customXml" -> walk(el, link, out, onMarker)
+                "sdt" -> {
+                    onMarker(el)
+                    child(el, "sdtContent")?.let { walk(it, link, out, onMarker) }
+                }
+                else -> onMarker(el) // del, moveFrom, commentRangeStart, bookmarks, proofErr, pPr …
+            }
+        }
+    }
+
+    fun runText(r: Element): String = buildString { for (c in elementChildren(r)) append(textOf(c)) }
 
     /**
      * What one run child contributes to the paragraph's text. Breaks are '\n', tabs '\t',
