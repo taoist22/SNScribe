@@ -446,6 +446,39 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
         }
     }
 
+    /**
+     * The words in [words] that the [lang] dictionary does not know (loaded once, on the
+     * worker thread; an empty list just loads it). Resolves the misspelled ones.
+     */
+    @ReactMethod
+    fun spellCheck(lang: String, words: ReadableArray, promise: Promise) {
+        worker.execute {
+            try {
+                val t0 = System.currentTimeMillis()
+                val sc = SpellChecker.builtIn(lang)
+                val list = (0 until words.size()).mapNotNull { words.getString(it) }
+                val bad = list.filter { !sc.check(it) }
+                if (list.isEmpty()) appendLog("spelling: $lang ready in ${System.currentTimeMillis() - t0} ms")
+                promise.resolve(Arguments.fromList(bad))
+            } catch (t: Throwable) {
+                appendLog("spelling FAILED: $t")
+                promise.reject("DOCX_SPELL", t.message ?: t.toString(), t)
+            }
+        }
+    }
+
+    /** Corrections for a misspelled [word], closest first. */
+    @ReactMethod
+    fun spellSuggest(lang: String, word: String, promise: Promise) {
+        worker.execute {
+            try {
+                promise.resolve(Arguments.fromList(SpellChecker.builtIn(lang).suggest(word)))
+            } catch (t: Throwable) {
+                promise.reject("DOCX_SPELL", t.message ?: t.toString(), t)
+            }
+        }
+    }
+
     /** An EPUB's title, creators, date and publisher, for citing it. */
     @ReactMethod
     fun epubInfo(path: String, promise: Promise) {

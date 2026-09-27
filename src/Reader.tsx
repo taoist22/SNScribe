@@ -62,6 +62,7 @@ import {credentialsIn, searchZotero, setZoteroLog, testZotero, zoteroItem, type 
 import {lookUpDoi} from './services/doi';
 import {QUOTES_KEY, SOURCES_KEY, fileName, isEpub, parseList, parseMap, quoteWithReference, type SavedQuote, type SourceRef} from './domain/quotes';
 import {detailsFromEpub, formatSource, type Details} from './domain/reference';
+import {misspelledRanges, normal, tokens} from './domain/spelling';
 import {anchorAfter, findBreak, pageIndexOf, windowEnd, type Anchor, type BlockBox, type Break, type LineBox, type PageStart} from './domain/paging';
 import {countWords, fontsUsed, outline, paragraphText, wordCount, type DocxDocument, type ParagraphBlock, type Run} from './model/docx';
 import {ensureFileReadPermission, ensureFileWritePermission, ensureInternetPermission} from './pluginPermissions';
@@ -123,7 +124,7 @@ type Typing = {mode: 'insert'; at: Pos} | {mode: 'replace'; range: Range};
 type HfLine = {text: string; align: 'left' | 'center' | 'right'; page: boolean};
 
 type Menu =
-  | 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count' | 'page' | 'preset' | 'header' | 'link' | 'thread' | 'comment' | 'note' | 'hl' | 'find' | 'cite' | 'quotes'
+  | 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count' | 'page' | 'preset' | 'header' | 'link' | 'thread' | 'comment' | 'note' | 'hl' | 'find' | 'cite' | 'quotes' | 'spell'
   | 'recent' | 'versions' | 'recover';
 
 /** Drop-down menu width; menus are kept inside the screen. */
@@ -188,6 +189,20 @@ export function Reader(): React.JSX.Element {
     message: string;
   }>({setup: false, userId: '', apiKey: '', query: '', results: null, chosen: null, narrative: false, page: '', busy: false, message: ''});
   useEffect(() => setZoteroLog(line => log(line)), []);
+  /** Spelling: marks while typing (View), the language, the dictionary's answers so far, the user's words. */
+  const SPELL_LANG = 'en_US';
+  const [spellOn, setSpellOn] = useState(true);
+  const spellCache = useRef(new Map<string, boolean>());
+  const [spellTick, setSpellTick] = useState(0);
+  const [myWords, setMyWords] = useState<Set<string>>(new Set());
+  const [ignored, setIgnored] = useState<Set<string>>(new Set());
+  const [sp, setSp] = useState<{items: Array<{para: number; start: number; end: number; word: string}>; at: number; suggestions: string[]; replace: string; message: string}>({
+    items: [],
+    at: 0,
+    suggestions: [],
+    replace: '',
+    message: '',
+  });
   /** Insert quote…: the saved quotes, where each source file's details come from, and the flow's state. */
   const [qp, setQp] = useState<{
     mode: 'list' | 'source' | 'zotero' | 'form' | 'preview';
@@ -275,7 +290,7 @@ export function Reader(): React.JSX.Element {
       const refused = await log(`DOCX opened: NATIVE_BUILD=${nativeBuild()} read=${canRead} write=${canWrite} log=${name}`);
       // Remembered between sessions: text size, New's folder, recent documents.
       try {
-        const saved = JSON.parse((await Docx?.load('settings')) ?? '{}') as {scaleAt?: number; newFolder?: string; lastName?: string; author?: string; marginOpen?: boolean; inkColor?: string; citeStyle?: string};
+        const saved = JSON.parse((await Docx?.load('settings')) ?? '{}') as {scaleAt?: number; newFolder?: string; lastName?: string; author?: string; marginOpen?: boolean; inkColor?: string; citeStyle?: string; spell?: boolean};
         if (typeof saved.lastName === 'string') {
           setLastName(saved.lastName);
         }
@@ -293,6 +308,10 @@ export function Reader(): React.JSX.Element {
         if (typeof saved.author === 'string') {
           setAuthor(saved.author);
         }
+        if (typeof saved.spell === 'boolean') {
+          setSpellOn(saved.spell);
+        }
+        setMyWords(new Set(parseList<string>(await Docx?.load(`spell-words-${SPELL_LANG}`))));
         if (typeof saved.marginOpen === 'boolean') {
           setShowMargin(saved.marginOpen);
         }
@@ -437,6 +456,7 @@ export function Reader(): React.JSX.Element {
     setIsNew(!!created);
     setDiskStamp(stamp);
     setPad(null);
+    setIgnored(new Set());
     const found = parseRecovery(await Docx!.load(`recovery-${key}`), path, stamp);
     setRecovery(found);
     setRecent(list => {
@@ -1270,6 +1290,150 @@ export function Reader(): React.JSX.Element {
     setCaret({para: at.para, offset: at.offset + cited.length});
     setMenu(null);
     setStatus(added ? `Cited, and added to the reference list.` : 'Cited (already in the reference list).');
+  };
+
+  // ---------------------------------------------------------------- spelling
+
+  /** Asks the dictionary about words it has not been asked about yet; marks follow. */
+  const checkWords = async (words: string[]) => {
+    const fresh = [...new Set(words.map(normal))].filter(w => !spellCache.current.has(w));
+    if (fresh.length === 0 || !Docx) {
+      return;
+    }
+    try {
+      const bad = new Set(await Docx.spellCheck(SPELL_LANG, fresh));
+      for (const w of fresh) {
+        spellCache.current.set(w, !bad.has(w));
+      }
+      setSpellTick(t => t + 1);
+    } catch (error) {
+      log(`spell check failed: ${errorText(error)}`);
+    }
+  };
+
+  // The page's words are checked shortly after the page settles or changes (typing included).
+  useEffect(() => {
+    if (!spellOn || !doc) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      checkWords(window.flatMap(b => (b.type === 'p' ? tokens(paragraphText(b)).map(t => t.word) : [])));
+    }, 500);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [window, spellOn, doc]);
+
+  /** What to mark in a paragraph on the page (nothing when marking is off). */
+  const spellFor = (b: (typeof window)[number]) => {
+    if (!spellOn || b.type !== 'p') {
+      return undefined;
+    }
+    const typingAt = typing && caretAt && caretAt.para === b.index ? caretAt.offset : undefined;
+    const r = misspelledRanges(b, w => spellCache.current.get(w) === false, myWords, ignored, typingAt);
+    return r.length ? r : undefined;
+  };
+
+  const spellItems = () =>
+    blocks.flatMap(b =>
+      b.type === 'p'
+        ? misspelledRanges(b, w => spellCache.current.get(w) === false, myWords, ignored).map(r => ({
+            para: b.index,
+            ...r,
+            word: paragraphText(b).slice(r.start, r.end),
+          }))
+        : [],
+    );
+
+  /** Shows misspelling `i`: selects it (the page turns to it) and fetches suggestions. */
+  const showSpell = async (items: typeof sp.items, i: number) => {
+    if (items.length === 0) {
+      setSp(x => ({...x, items, at: 0, suggestions: [], replace: '', message: 'No spelling mistakes found.'}));
+      return;
+    }
+    const k = Math.max(0, Math.min(i, items.length - 1));
+    const m = items[k];
+    flushTyping();
+    const block = blocks.findIndex(b => b.type === 'p' && b.index === m.para);
+    if (block >= 0 && (block < anchor.block || block >= end)) {
+      goTo({block, offset: 0});
+    }
+    setCaret(null);
+    setSelection({from: {para: m.para, offset: m.start}, to: {para: m.para, offset: m.end}});
+    setSp(x => ({...x, items, at: k, suggestions: [], replace: '', message: `${k + 1} of ${items.length}`}));
+    try {
+      const suggestions = (await Docx?.spellSuggest(SPELL_LANG, normal(m.word))) ?? [];
+      setSp(x => (x.items === items && x.at === k ? {...x, suggestions, replace: suggestions[0] ?? ''} : x));
+    } catch (error) {
+      log(`spell suggest failed: ${errorText(error)}`);
+    }
+  };
+
+  /** Edit ▸ Spelling…: every misspelling in the document, one at a time. */
+  const openSpelling = async () => {
+    setMenu('spell');
+    setSp(x => ({...x, items: [], message: 'Checking the whole document…'}));
+    // The list is built after the dictionary has answered for every word (the answers are
+    // kept in a ref, so they are there at once for spellItems).
+    await checkWords(blocks.flatMap(b => (b.type === 'p' ? tokens(paragraphText(b)).map(t => t.word) : [])));
+    showSpell(spellItems(), 0);
+  };
+
+  const spellChange = (all: boolean) => {
+    const m = sp.items[sp.at];
+    const to = sp.replace.trim();
+    if (!m || !to) {
+      return;
+    }
+    const targets = all ? sp.items.filter(x => x.word === m.word) : [m];
+    const {ops, skipped} = replaceAllOps(blocks, targets, to);
+    if (ops.length === 0) {
+      setSp(x => ({...x, message: 'That word is inside a field; it can’t be changed here.'}));
+      return;
+    }
+    commit(ops, all ? `spelling: all “${m.word}”` : 'spelling');
+    setSelection(null);
+    // The rest, as the document will be: later offsets in the same paragraph shift.
+    const rest = sp.items
+      .filter(x => !targets.includes(x))
+      .map(x => {
+        const before = targets.filter(t => t.para === x.para && t.end <= x.start).length;
+        const delta = before * (to.length - m.word.length);
+        return delta ? {...x, start: x.start + delta, end: x.end + delta} : x;
+      });
+    const next = rest.findIndex(x => x.para > m.para || (x.para === m.para && x.start > m.start));
+    showSpell(rest, next < 0 ? 0 : next);
+    if (skipped) {
+      setSp(x => ({...x, message: `${x.message} (${skipped} inside fields left alone)`}));
+    }
+  };
+
+  const spellSkip = (word?: string) => {
+    const m = sp.items[sp.at];
+    if (!m) {
+      return;
+    }
+    const rest = word ? sp.items.filter(x => x.word !== word) : sp.items.filter(x => x !== m);
+    const next = rest.findIndex(x => x.para > m.para || (x.para === m.para && x.start > m.start));
+    showSpell(rest, next < 0 ? 0 : next);
+  };
+
+  const spellIgnoreAll = () => {
+    const m = sp.items[sp.at];
+    if (m) {
+      setIgnored(s0 => new Set([...s0, normal(m.word)]));
+      spellSkip(m.word);
+    }
+  };
+
+  const spellAdd = () => {
+    const m = sp.items[sp.at];
+    if (!m) {
+      return;
+    }
+    const next = new Set([...myWords, normal(m.word).toLowerCase()]);
+    setMyWords(next);
+    Docx?.store(`spell-words-${SPELL_LANG}`, JSON.stringify([...next]));
+    spellSkip(m.word);
   };
 
   // ---------------------------------------------------------------- quotes from PDFs / EPUBs
@@ -2572,8 +2736,8 @@ export function Reader(): React.JSX.Element {
 
   // Settings are remembered between sessions.
   useEffect(() => {
-    Docx?.store('settings', JSON.stringify({scaleAt, newFolder, lastName, author, marginOpen: showMargin, inkColor, citeStyle}));
-  }, [scaleAt, newFolder, lastName, author, showMargin, inkColor, citeStyle]);
+    Docx?.store('settings', JSON.stringify({scaleAt, newFolder, lastName, author, marginOpen: showMargin, inkColor, citeStyle, spell: spellOn}));
+  }, [scaleAt, newFolder, lastName, author, showMargin, inkColor, citeStyle, spellOn]);
 
   // The page follows the caret when it moves (typing, arrows) — not when the page is turned.
   const followCaret = useRef(false);
@@ -3530,6 +3694,67 @@ export function Reader(): React.JSX.Element {
           </View>
         );
       }
+      case 'spell': {
+        const m = sp.items[sp.at];
+        const ctx = m ? textOf(m.para) : '';
+        const chip = (label: string, on: boolean, action: () => void) => (
+          <Pressable key={label} onPress={once(`chip:${label}`, action)} style={[styles.chip, on ? styles.chipOn : null]}>
+            <Text allowFontScaling={false} style={[styles.chipText, on ? styles.chipTextOn : null]}>
+              {label}
+            </Text>
+          </Pressable>
+        );
+        return (
+          <View style={styles.nameForm}>
+            <Text allowFontScaling={false} style={styles.presetSummary}>
+              {'English (US)'}
+            </Text>
+            {sp.message ? (
+              <Text allowFontScaling={false} style={[styles.menuText, styles.citeMessage]}>
+                {sp.message}
+              </Text>
+            ) : null}
+            {m ? (
+              <>
+                <Text allowFontScaling={false} style={[styles.paraLabel, styles.findLabel]}>
+                  {`“${m.word}”`}
+                </Text>
+                <Text allowFontScaling={false} style={styles.presetSummary} numberOfLines={2}>
+                  {`…${ctx.slice(Math.max(0, m.start - 40), m.start)}`}
+                  <Text style={styles.spellWord}>{ctx.slice(m.start, m.end)}</Text>
+                  {`${ctx.slice(m.end, m.end + 40)}…`}
+                </Text>
+                <View style={[styles.chips, styles.findLabel]}>
+                  {sp.suggestions.length
+                    ? sp.suggestions.map(sg => chip(sg, sp.replace === sg, () => setSp(x => ({...x, replace: sg}))))
+                    : (
+                      <Text allowFontScaling={false} style={styles.presetSummary}>
+                        {'No suggestions — type the right spelling below.'}
+                      </Text>
+                    )}
+                </View>
+                <TextInput style={styles.nameInput} value={sp.replace} onChangeText={replace => setSp(x => ({...x, replace}))} autoCorrect={false} autoCapitalize="none" allowFontScaling={false} />
+                <View style={styles.row}>
+                  {panelButton('Change', () => spellChange(false), !sp.replace.trim())}
+                  {panelButton('Change all', () => spellChange(true), !sp.replace.trim())}
+                </View>
+                <View style={styles.row}>
+                  {panelButton('Ignore', () => spellSkip())}
+                  {panelButton('Ignore all', spellIgnoreAll)}
+                  {panelButton('Add to dictionary', spellAdd)}
+                </View>
+                <View style={styles.row}>
+                  {panelButton('‹ Prev', () => showSpell(sp.items, sp.at - 1), sp.at === 0)}
+                  {panelButton('Next ›', () => showSpell(sp.items, sp.at + 1), sp.at >= sp.items.length - 1)}
+                  {button('Close', () => setMenu(null))}
+                </View>
+              </>
+            ) : (
+              <View style={styles.row}>{button('Close', () => setMenu(null))}</View>
+            )}
+          </View>
+        );
+      }
       case 'comment':
         return commentForm ? (
           <View style={styles.nameForm}>
@@ -3674,6 +3899,7 @@ export function Reader(): React.JSX.Element {
             {item('Word count…', () => setMenu('count'))}
             {item('Go to start', () => goTo({block: 0, offset: 0}))}
             {item('Go to end', goToEnd)}
+            {item(`${spellOn ? '✓ ' : ''}Mark misspellings`, () => setSpellOn(v => !v))}
             {hasNotes ? item(showMargin ? 'Fold the margin panel' : 'Open the margin panel', () => setShowMargin(v => !v)) : null}
           </>
         );
@@ -3745,6 +3971,7 @@ export function Reader(): React.JSX.Element {
             {item('Paste', pasteFromMenu)}
             {item('Delete', deleteFromMenu)}
             {item('Find & replace…', () => setMenu('find'))}
+            {item('Spelling…', openSpelling)}
             {item('Link…', startLink)}
             {item('Cite from Zotero…', openCite)}
             {item('Insert quote…', openQuotes)}
@@ -4029,6 +4256,7 @@ export function Reader(): React.JSX.Element {
                   key={anchor.block + i}
                   block={b}
                   selection={selectedIn(b)}
+                  spell={spellFor(b)}
                   fonts={fonts}
                   scale={textScale}
                   onFrame={onFrame(i)}
@@ -4198,6 +4426,7 @@ const styles = StyleSheet.create({
   menuDivider: {height: 3, backgroundColor: '#000', marginVertical: 4},
   findLabel: {marginTop: 10},
   italicText: {fontStyle: 'italic'},
+  spellWord: {fontWeight: '700', textDecorationLine: 'underline', color: '#000'},
   citeMessage: {marginTop: 8, fontWeight: '700'},
   findCase: {alignSelf: 'flex-start', marginTop: 10},
   menuTitle: {fontSize: 26},

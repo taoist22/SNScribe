@@ -43,6 +43,10 @@ type DocxModule = {
     /** Every paragraph's text as the screen shows it after the edits; the save is refused on any mismatch. */
     expected: string[],
   ): Promise<{dest: string; name: string; ms: number; changed: string[]}>;
+  /** The misspelled ones among `words` ([] loads the dictionary). */
+  spellCheck(lang: string, words: string[]): Promise<string[]>;
+  /** Corrections for a misspelled word, closest first. */
+  spellSuggest(lang: string, word: string): Promise<string[]>;
   /** An EPUB's own title, creators, date and publisher. */
   epubInfo(path: string): Promise<{title: string; creators: string[]; date: string; publisher: string}>;
   /** A small text file's contents (at most 16 KB). */

@@ -22,6 +22,8 @@ type Props = {
   block: Block;
   /** Selected characters of this paragraph, drawn inverted. */
   selection?: {start: number; end: number} | null;
+  /** Misspelled words: light grey and underlined (the screen can't draw Word's red squiggle). */
+  spell?: Array<{start: number; end: number}>;
   onFrame: (e: LayoutChangeEvent) => void;
   onLines?: (lines: LineBox[]) => void;
   /** The paragraph's Text: its native view is asked which character is under the pen. */
@@ -69,11 +71,19 @@ export function leadChars(b: Block): number {
   return b.type === 'p' && (b.first ?? 0) > 0 && b.runs.length > 0 ? 1 : 0;
 }
 
-type Piece = Run & {sel?: boolean; del?: boolean};
+type Piece = Run & {sel?: boolean; del?: boolean; sp?: boolean};
 
-/** The paragraph's runs with selection marked, and deleted text placed where it sits. */
-function pieces(p: ParagraphBlock, selection: {start: number; end: number} | null): Piece[] {
-  const marked: Piece[] = markSelection(p.runs, selection);
+/** The paragraph's runs with selection and misspellings marked, and deleted text placed where it sits. */
+function pieces(p: ParagraphBlock, selection: {start: number; end: number} | null, spell?: Array<{start: number; end: number}>): Piece[] {
+  let marked: Piece[] = markSelection(p.runs, selection);
+  if (spell?.length) {
+    let off = 0;
+    marked = (splitRuns(marked, spell.flatMap(r => [r.start, r.end])) as Piece[]).map(r => {
+      const s0 = off;
+      off += r.t.length;
+      return spell.some(x => s0 >= x.start && off <= x.end) && r.t.length > 0 ? {...r, sp: true} : r;
+    });
+  }
   const dels = (p.revs ?? []).filter(v => v.kind === 'del' && v.runs?.length).sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
   if (dels.length === 0) {
     return marked;
@@ -94,7 +104,7 @@ function pieces(p: ParagraphBlock, selection: {start: number; end: number} | nul
   return out;
 }
 
-function ParagraphView({p, selection, onFrame, onLines, textRef, onTextFrame, fonts, scale = 1}: Omit<Props, 'block'> & {p: ParagraphBlock}) {
+function ParagraphView({p, selection, spell, onFrame, onLines, textRef, onTextFrame, fonts, scale = 1}: Omit<Props, 'block'> & {p: ParagraphBlock}) {
   // The document's own sizes when it has them, times the reader's text size; the line
   // height follows the largest.
   // Text without a size of its own takes its style's (bs), else the kind's default.
@@ -136,7 +146,7 @@ function ParagraphView({p, selection, onFrame, onLines, textRef, onTextFrame, fo
         onLines?.(e.nativeEvent.lines.map(l => ({y: l.y, height: l.height, len: l.text.length})))
       }>
       {leadChars(p) ? <View key="first-line" style={{width: dpForTwips(p.first!, scale), height: 1}} /> : null}
-      {pieces(p, selection ?? null).map((r, i) => (
+      {pieces(p, selection ?? null, spell).map((r, i) => (
         <Text
           key={i}
           style={[
@@ -147,8 +157,9 @@ function ParagraphView({p, selection, onFrame, onLines, textRef, onTextFrame, fo
             (r.i ?? styleItalic) ? styles.italic : styles.notItalic,
             r.h ? styles.highlight : null,
             r.del ? styles.deleted : r.rv ? styles.inserted : null,
-            r.u || r.s || r.del || r.rv
-              ? {textDecorationLine: (r.u || r.rv) && (r.s || r.del) ? 'underline line-through' : r.u || r.rv ? 'underline' : 'line-through'}
+            r.sp ? styles.misspelled : null,
+            r.u || r.s || r.del || r.rv || r.sp
+              ? {textDecorationLine: (r.u || r.rv || r.sp) && (r.s || r.del) ? 'underline line-through' : r.u || r.rv || r.sp ? 'underline' : 'line-through'}
               : null,
             {fontSize: r.sup || r.sub ? Math.round(runSize(r) * 0.65) : runSize(r)},
             shownFont(family(r), fonts) ? {fontFamily: shownFont(family(r), fonts)} : null,
@@ -230,6 +241,7 @@ const styles = StyleSheet.create({
   highlight: {backgroundColor: '#cfcfcf'},
   selected: {backgroundColor: '#000', color: '#fff'},
   inserted: {color: '#333'},
+  misspelled: {backgroundColor: '#e6e6e6'},
   deleted: {color: '#777'},
   pageBreak: {height: 28, justifyContent: 'center', alignItems: 'center', borderTopWidth: 1, borderColor: '#000', borderStyle: 'dashed'},
   pageBreakText: {color: '#000', fontSize: 13},
