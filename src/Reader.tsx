@@ -37,6 +37,7 @@ import {
 } from './domain/edits';
 import {listKind, recount} from './domain/lists';
 import {PAPER_FORMATS, presetOps} from './domain/presets';
+import {docKey, parseRecovery, recoveryFor, touchRecent, type RecentDoc, type RecoveryRecord} from './domain/recovery';
 import {anchorAfter, findBreak, pageIndexOf, windowEnd, type Anchor, type BlockBox, type Break, type LineBox, type PageStart} from './domain/paging';
 import {countWords, fontsUsed, outline, paragraphText, wordCount, type DocxDocument, type ParagraphBlock, type Run} from './model/docx';
 import {ensureFileReadPermission, ensureFileWritePermission} from './pluginPermissions';
@@ -76,7 +77,9 @@ const DOUBLE_TAP_MS = 500;
 type Frame = {x: number; top: number; height: number};
 type Selection = {from: Pos; to: Pos};
 type Typing = {mode: 'insert'; at: Pos} | {mode: 'replace'; range: Range};
-type Menu = 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count' | 'page' | 'preset';
+type Menu =
+  | 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count' | 'page' | 'preset'
+  | 'recent' | 'versions' | 'recover';
 
 /** Drop-down menu width; menus are kept inside the screen. */
 const MENU_W = 340;
@@ -116,6 +119,14 @@ export function Reader(): React.JSX.Element {
   /** The whole document's page starts, counted in the background for one layout (mapKey). */
   const [pageMap, setPageMap] = useState<{key: string; pages: PageStart[]; done: boolean} | null>(null);
   const [showPages, setShowPages] = useState(false);
+  /** Fingerprint of the document file as DOCX last read or wrote it; a different one means changed elsewhere. */
+  const [diskStamp, setDiskStamp] = useState<string | null>(null);
+  /** Unsaved edits found for the document just opened, offered for restoring. */
+  const [recovery, setRecovery] = useState<RecoveryRecord | null>(null);
+  const [recent, setRecent] = useState<RecentDoc[]>([]);
+  const [versions, setVersions] = useState<Array<{path: string; time: number; bytes: number}>>([]);
+  /** Documents made with New: saves need no backup or change check on their first save. */
+  const [isNew, setIsNew] = useState(false);
   const [pageH, setPageH] = useState(0);
   const [measured, setMeasured] = useState<{key: string; brk: Break} | null>(null);
   const [edits, setEdits] = useState<{steps: Op[][]; cursor: number}>({steps: [], cursor: 0});
@@ -142,6 +153,19 @@ export function Reader(): React.JSX.Element {
       const canWrite = await ensureFileWritePermission();
       const name = await Docx?.logName().catch(() => '?');
       const refused = await log(`DOCX opened: NATIVE_BUILD=${nativeBuild()} read=${canRead} write=${canWrite} log=${name}`);
+      // Remembered between sessions: text size, New's folder, recent documents.
+      try {
+        const saved = JSON.parse((await Docx?.load('settings')) ?? '{}') as {scaleAt?: number; newFolder?: string};
+        if (typeof saved.scaleAt === 'number') {
+          setScaleAt(Math.max(0, Math.min(SCALES.length - 1, saved.scaleAt)));
+        }
+        if (saved.newFolder) {
+          setNewFolder(saved.newFolder);
+        }
+        setRecent(JSON.parse((await Docx?.load('recent')) ?? '[]') as RecentDoc[]);
+      } catch {
+        // First run, or unreadable: defaults.
+      }
       if (refused) {
         setStatus(`Log not written: ${refused}`);
       }
@@ -247,10 +271,28 @@ export function Reader(): React.JSX.Element {
   };
 
   /** Opens a document and makes its fonts available. `extra` marks a document made with New. */
-  const openPath = async (path: string, extra: Pick<DocxDocument, 'source' | 'saveTo'> = {}) => {
+  /**
+   * Opens a document. Edits always apply to a private snapshot of it as opened (`source`)
+   * and are saved over the document itself (`saveTo`), so saving again and again stays right.
+   * `created` marks a document just made with New (its blank is already the snapshot).
+   */
+  const openPath = async (path: string, created?: {source: string}) => {
     setStatus('Opening…');
-    const opened = {...(await Docx!.open(path)), ...extra};
+    const loaded = await Docx!.open(path);
+    const key = docKey(path);
+    const source = created?.source ?? (await Docx!.snapshot(path, key));
+    const stamp = await Docx!.fileStamp(path);
+    const opened: DocxDocument = {...loaded, source, saveTo: path};
     setDoc(opened);
+    setIsNew(!!created);
+    setDiskStamp(stamp);
+    const found = parseRecovery(await Docx!.load(`recovery-${key}`), path, stamp);
+    setRecovery(found);
+    setRecent(list => {
+      const next = touchRecent(list, path, opened.name);
+      Docx?.store('recent', JSON.stringify(next));
+      return next;
+    });
     setAnchor(START);
     setHistory([]);
     setContents(false);
@@ -266,10 +308,13 @@ export function Reader(): React.JSX.Element {
     setStatus(
       r.trackedChanges > 0
         ? 'This document has tracked changes, so it is read-only here. Deleted text is hidden.'
-        : extra.saveTo
+        : created
         ? 'New document. Tap the page to start typing.'
         : '',
     );
+    if (found) {
+      setMenu('recover');
+    }
     log(`opened ${opened.name}: ${opened.blocks.length} blocks in ${opened.ms} ms; ${JSON.stringify(r)}`);
     try {
       setFonts(new Set(await Docx!.fonts(fontsUsed(opened.blocks))));
@@ -332,7 +377,7 @@ export function Reader(): React.JSX.Element {
         return;
       }
       const made = await Docx!.create(name, newFolder);
-      await openPath(made.path, {source: made.source, saveTo: made.path});
+      await openPath(made.path, {source: made.source});
     } catch (error) {
       setStatus(`Could not make the document: ${errorText(error)}`);
     } finally {
@@ -1422,8 +1467,13 @@ export function Reader(): React.JSX.Element {
     setSelection(null);
   };
 
+  /**
+   * Save: over the document itself. The version on disk is backed up first (the last five
+   * are kept, File > Previous versions), and if the file changed since DOCX read it — synced
+   * from elsewhere, say — it is not overwritten: a copy is saved instead.
+   */
   const save = async () => {
-    if (!doc || !Docx) {
+    if (!doc || !Docx || !doc.source || !doc.saveTo) {
       return;
     }
     // Text being typed is part of what is saved.
@@ -1437,18 +1487,142 @@ export function Reader(): React.JSX.Element {
         setStatus('Saving needs file write permission.');
         return;
       }
-      // A document made with New saves over itself, from its pristine blank; any other
-      // document saves as a copy beside the original.
-      const res = await Docx.save(doc.source ?? doc.path, ops, doc.saveTo ?? saved.dest ?? '', expectedTexts(doc.blocks, ops));
+      const onDisk = await Docx.fileStamp(doc.saveTo);
+      if (onDisk !== diskStamp) {
+        const copy = await Docx.copyName(doc.saveTo);
+        const res = await Docx.save(doc.source, ops, copy, expectedTexts(doc.blocks, ops));
+        setStatus(`The document changed outside DOCX since it was opened, so it was not overwritten. Your version was saved as ${res.name}.`);
+        log(`save conflict: ${doc.saveTo} was ${diskStamp}, now ${onDisk}; saved ${res.dest}`);
+        return;
+      }
+      if (!isNew || saved.dest) {
+        await Docx.backup(doc.saveTo, docKey(doc.saveTo));
+      }
+      const res = await Docx.save(doc.source, ops, doc.saveTo, expectedTexts(doc.blocks, ops));
+      setDiskStamp(await Docx.fileStamp(doc.saveTo));
       setSaved({cursor, dest: res.dest});
       setDiscardArmed(false);
-      setStatus(doc.saveTo ? `Saved ${res.name}.` : `Saved as ${res.name} (next to the original, which is unchanged).`);
+      setStatus(`Saved ${res.name}.`);
     } catch (error) {
       setStatus(`Not saved: ${errorText(error)}`);
     } finally {
       setBusy(false);
     }
   };
+
+  /** Save a copy: a new <name>-edited.docx beside the document, which stays as it is. */
+  const saveCopy = async () => {
+    if (!doc || !Docx || !doc.source || !doc.saveTo) {
+      return;
+    }
+    const ops = [...applied, ...pending];
+    flushTyping();
+    setBusy(true);
+    try {
+      if (!(await ensureFileWritePermission())) {
+        setStatus('Saving needs file write permission.');
+        return;
+      }
+      const res = await Docx.save(doc.source, ops, await Docx.copyName(doc.saveTo), expectedTexts(doc.blocks, ops));
+      setStatus(`Saved a copy as ${res.name}. The document itself is unchanged.`);
+    } catch (error) {
+      setStatus(`Copy not saved: ${errorText(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // ---------------------------------------------------------------- recovery, versions, recent
+
+  // Unsaved edits are recorded a moment after each change; nothing is kept once saved.
+  useEffect(() => {
+    if (!doc?.saveTo || !Docx) {
+      return;
+    }
+    const key = `recovery-${docKey(doc.saveTo)}`;
+    const t = setTimeout(() => {
+      const rec = recoveryFor(doc.saveTo!, diskStamp, edits.steps, edits.cursor, saved.cursor, pending);
+      if (rec) {
+        Docx?.store(key, JSON.stringify(rec));
+      } else {
+        Docx?.forget(key);
+      }
+    }, 800);
+    return () => clearTimeout(t);
+  }, [doc, edits, saved, pending, diskStamp]);
+
+  const restoreRecovery = () => {
+    if (recovery) {
+      setEdits({steps: recovery.steps, cursor: recovery.steps.length});
+      setSaved({cursor: 0, dest: null});
+      setStatus('Unsaved changes restored. Save to keep them.');
+    }
+    setRecovery(null);
+    setMenu(null);
+  };
+
+  const discardRecovery = () => {
+    if (doc?.saveTo) {
+      Docx?.forget(`recovery-${docKey(doc.saveTo)}`);
+    }
+    setRecovery(null);
+    setMenu(null);
+  };
+
+  const showVersions = async () => {
+    if (!doc?.saveTo) {
+      return;
+    }
+    setVersions(await Docx!.backups(docKey(doc.saveTo)));
+    setMenu('versions');
+  };
+
+  /** Puts a previous version back as the document (the current one is backed up first), and reopens it. */
+  const restoreVersion = async (from: string) => {
+    if (!doc?.saveTo || !mayDiscard('the version')) {
+      return;
+    }
+    setBusy(true);
+    try {
+      await Docx!.backup(doc.saveTo, docKey(doc.saveTo));
+      await Docx!.copyOver(from, doc.saveTo);
+      Docx!.forget(`recovery-${docKey(doc.saveTo)}`);
+      await openPath(doc.saveTo);
+      setStatus('Previous version restored. The version it replaced is in Previous versions too.');
+    } catch (error) {
+      setStatus(`Not restored: ${errorText(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openRecent = async (r: RecentDoc) => {
+    if (!mayDiscard('the document')) {
+      return;
+    }
+    if (!(await Docx!.fileStamp(r.path))) {
+      setRecent(list => {
+        const next = list.filter(x => x.path !== r.path);
+        Docx?.store('recent', JSON.stringify(next));
+        return next;
+      });
+      setStatus(`${r.name} is no longer there; removed from Recent.`);
+      return;
+    }
+    setBusy(true);
+    try {
+      await openPath(r.path);
+    } catch (error) {
+      setStatus(`Could not open: ${errorText(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Settings are remembered between sessions.
+  useEffect(() => {
+    Docx?.store('settings', JSON.stringify({scaleAt, newFolder}));
+  }, [scaleAt, newFolder]);
 
   // The page follows the caret when it moves (typing, arrows) — not when the page is turned.
   const followCaret = useRef(false);
@@ -1595,12 +1769,46 @@ export function Reader(): React.JSX.Element {
           <>
             {item('New…', startNew)}
             {item('Open…', open)}
+            {recent.length ? item('Recent…', () => setMenu('recent')) : null}
             {doc && !readOnly ? item('Page setup…', () => setMenu('page')) : null}
             {doc && !readOnly ? item('Paper format (APA, MLA, Chicago)…', () => setMenu('preset')) : null}
             {doc && !readOnly ? item('Save', save) : null}
+            {doc && !readOnly ? item('Save a copy', saveCopy) : null}
+            {doc && !readOnly ? item('Previous versions…', showVersions) : null}
             {item('Close', close)}
           </>
         );
+      case 'recent':
+        return (
+          <>
+            {recent.map(r => item(`${r.name.replace(/\.docx$/i, '')}  ·  ${r.path.split('/').slice(-2, -1)[0] ?? ''}`, () => openRecent(r)))}
+          </>
+        );
+      case 'versions':
+        return (
+          <>
+            {versions.length === 0 ? (
+              <Text allowFontScaling={false} style={[styles.menuText, styles.folderPath]}>
+                {'No earlier versions yet. Each Save keeps the version it replaces.'}
+              </Text>
+            ) : null}
+            {versions.map(v =>
+              item(`${new Date(v.time).toLocaleString()}  ·  ${Math.max(1, Math.round(v.bytes / 1024))} KB`, () => restoreVersion(v.path)),
+            )}
+          </>
+        );
+      case 'recover':
+        return recovery ? (
+          <View style={styles.nameForm}>
+            <Text allowFontScaling={false} style={styles.menuText}>
+              {`This document has unsaved changes from ${new Date(recovery.time).toLocaleString()} (${recovery.steps.length} edit${recovery.steps.length === 1 ? '' : 's'}).`}
+            </Text>
+            <View style={styles.row}>
+              {button('Restore', restoreRecovery)}
+              {button('Discard', discardRecovery)}
+            </View>
+          </View>
+        ) : null;
       case 'para': {
         const cur = paraShown();
         const chip = (label: string, on: boolean, action: () => void) => (
@@ -2066,9 +2274,12 @@ export function Reader(): React.JSX.Element {
             <View
               style={StyleSheet.absoluteFill}
               onStartShouldSetResponder={() => {
-                // A tap on the page while a menu is open only closes the menu.
+                // A tap on the page while a menu is open only closes the menu (not the
+                // restore question, which needs an answer).
                 if (menu) {
-                  setMenu(null);
+                  if (menu !== 'recover') {
+                    setMenu(null);
+                  }
                   return false;
                 }
                 return !readOnly;

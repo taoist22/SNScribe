@@ -15,6 +15,20 @@ type DocxModule = {
   create(name: string, folder: string): Promise<{path: string; source: string}>;
   /** Folders directly inside `path`, or {error} when it can't be listed. */
   listFolders(path: string): Promise<{folders?: string[]; error?: string}>;
+  /** DOCX's private storage: JSON kept under a name. */
+  store(name: string, json: string): Promise<string | null>;
+  load(name: string): Promise<string | null>;
+  forget(name: string): Promise<boolean>;
+  /** "size:modified" of a file, or null when it is not there. */
+  fileStamp(path: string): Promise<string | null>;
+  /** A private copy of the document as opened; edits apply to it. */
+  snapshot(path: string, key: string): Promise<string>;
+  /** Backs the file up (newest five kept); resolves the backup's path. */
+  backup(path: string, key: string): Promise<string>;
+  backups(key: string): Promise<Array<{path: string; time: number; bytes: number}>>;
+  copyOver(from: string, dest: string): Promise<boolean>;
+  /** Where a copy of `path` goes: <name>-edited.docx beside it. */
+  copyName(path: string): Promise<string>;
   /** Loads what it can find of these families (plus fonts added before); resolves the families available. */
   fonts(families: string[]): Promise<string[]>;
   /** A font file the user picked: its family, loaded and remembered. */

@@ -33,7 +33,7 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
 
     companion object {
         /** Bumped with each native change; first log line, to spot stale installs. */
-        const val NATIVE_BUILD = 10
+        const val NATIVE_BUILD = 11
         private val EXPORT_DIR = File("/storage/emulated/0/EXPORT")
         private const val LOG_MAX_BYTES = 2L * 1024 * 1024
         private const val LOG_LINE_MAX = 4000
@@ -275,6 +275,118 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
                 ))
             }
             promise.resolve(result)
+        }
+    }
+
+    // ---------------------------------------------------------------- private storage, versions
+
+    /** DOCX's own folder in PluginHost's private storage: recovery, settings, snapshots, backups. */
+    private fun home(sub: String): File = File(File(reactContext.filesDir, "sn-docx"), sub).also { it.mkdirs() }
+
+    private fun safeName(name: String) = name.replace(Regex("[^A-Za-z0-9._-]"), "_").take(80)
+
+    /** Keeps [json] under [name] (recovery records, recent documents, settings). */
+    @ReactMethod
+    fun store(name: String, json: String, promise: Promise) {
+        worker.execute {
+            val r = runCatching { File(home("data"), safeName(name) + ".json").writeText(json) }
+            promise.resolve(r.exceptionOrNull()?.toString())
+        }
+    }
+
+    /** What [store] kept under [name], or null. */
+    @ReactMethod
+    fun load(name: String, promise: Promise) {
+        worker.execute {
+            promise.resolve(runCatching { File(home("data"), safeName(name) + ".json").takeIf { it.isFile }?.readText() }.getOrNull())
+        }
+    }
+
+    /** Forgets [name] (DOCX's own private file; deleting there is allowed). */
+    @ReactMethod
+    fun forget(name: String, promise: Promise) {
+        worker.execute {
+            promise.resolve(runCatching { File(home("data"), safeName(name) + ".json").delete() }.getOrDefault(false))
+        }
+    }
+
+    /** Size and last-modified time of [path]: its fingerprint, to notice changes made elsewhere. */
+    @ReactMethod
+    fun fileStamp(path: String, promise: Promise) {
+        worker.execute {
+            val f = File(path)
+            promise.resolve(if (f.isFile) "${f.length()}:${f.lastModified()}" else null)
+        }
+    }
+
+    /**
+     * A private copy of the document as it was opened. Edits are always applied to this
+     * copy, so saving over the original any number of times stays correct.
+     */
+    @ReactMethod
+    fun snapshot(path: String, key: String, promise: Promise) {
+        worker.execute {
+            try {
+                val dest = File(home("snapshots"), safeName(key) + ".docx")
+                File(path).inputStream().use { input -> FileOutputStream(dest).use { input.copyTo(it) } }
+                promise.resolve(dest.path)
+            } catch (t: Throwable) {
+                appendLog("snapshot FAILED $path: $t")
+                promise.reject("DOCX_SNAPSHOT", t.message ?: t.toString(), t)
+            }
+        }
+    }
+
+    /** Copies the current [path] into its backups before it is overwritten; keeps the newest five. */
+    @ReactMethod
+    fun backup(path: String, key: String, promise: Promise) {
+        worker.execute {
+            try {
+                val dir = home("backups/" + safeName(key))
+                val dest = File(dir, "${System.currentTimeMillis()}.docx")
+                File(path).inputStream().use { input -> FileOutputStream(dest).use { input.copyTo(it) } }
+                dir.listFiles { f -> f.name.endsWith(".docx") }.orEmpty().sortedByDescending { it.name }.drop(5).forEach { it.delete() }
+                promise.resolve(dest.path)
+            } catch (t: Throwable) {
+                appendLog("backup FAILED $path: $t")
+                promise.reject("DOCX_BACKUP", t.message ?: t.toString(), t)
+            }
+        }
+    }
+
+    /** The document's backups, newest first: [{path, time, bytes}]. */
+    @ReactMethod
+    fun backups(key: String, promise: Promise) {
+        worker.execute {
+            val list = Arguments.createArray()
+            home("backups/" + safeName(key)).listFiles { f -> f.name.endsWith(".docx") }.orEmpty().sortedByDescending { it.name }.forEach { f ->
+                list.pushMap(Arguments.createMap().apply {
+                    putString("path", f.path)
+                    putDouble("time", f.nameWithoutExtension.toDoubleOrNull() ?: f.lastModified().toDouble())
+                    putDouble("bytes", f.length().toDouble())
+                })
+            }
+            promise.resolve(list)
+        }
+    }
+
+    /** Where "Save a copy" of [path] goes: <name>-edited.docx beside it, never over a file. */
+    @ReactMethod
+    fun copyName(path: String, promise: Promise) {
+        worker.execute { promise.resolve(DocxEditor.editedCopyName(File(path)).path) }
+    }
+
+    /** Writes [from] (a backup) over [dest] (the document). */
+    @ReactMethod
+    fun copyOver(from: String, dest: String, promise: Promise) {
+        worker.execute {
+            try {
+                File(from).inputStream().use { input -> FileOutputStream(File(dest)).use { input.copyTo(it) } }
+                appendLog("restored $from over $dest")
+                promise.resolve(true)
+            } catch (t: Throwable) {
+                promise.reject("DOCX_COPY", t.message ?: t.toString(), t)
+            }
         }
     }
 
