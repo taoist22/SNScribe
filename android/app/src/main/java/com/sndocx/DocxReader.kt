@@ -232,6 +232,13 @@ object DocxReader {
         }
     }
 
+    fun alignOf(jc: String?): String = when (jc) {
+        "center" -> "center"
+        "right", "end" -> "right"
+        "both", "distribute" -> "justify"
+        else -> "left"
+    }
+
     /** Where the document's list definitions live: its numbering relationship, else word/numbering.xml. */
     fun numberingPart(rels: Document?): String {
         val root = rels?.documentElement ?: return "word/numbering.xml"
@@ -350,6 +357,9 @@ object DocxReader {
         val revisions: List<Revision> = emptyList(),
         /** In a quotation style (Quote / Intense Quote): body text, shown as a block quote. */
         val quote: Boolean = false,
+        /** Its alignment / indent are set on the paragraph itself (a style change keeps them). */
+        val ownAlign: Boolean = false,
+        val ownIndent: Boolean = false,
         /** Where comments start, end and are referenced in its text. */
         val marks: List<Mark> = emptyList(),
     ) : Block() {
@@ -389,7 +399,23 @@ object DocxReader {
         val footer: HeaderFooter? = null,
         /** Tracked changes DOCX can't review yet: formatting, paragraph marks, sections, tables. */
         val otherRevisions: Int = 0,
+        /** Style kind ("heading1", …, "normal") → how it looks here. */
+        val looks: Map<String, StyleLook> = emptyMap(),
         val comments: List<Comment> = emptyList(),
+    )
+
+    /**
+     * How a paragraph in one of the styles DOCX offers looks in this document: the style as
+     * the file defines it, or as DocxEditor creates it when the file has none. The screen
+     * applies it when a style is chosen, so it matches Word at once.
+     */
+    data class StyleLook(
+        val font: String?,
+        val size: Int?,
+        val bold: Boolean,
+        val italic: Boolean,
+        val align: String,
+        val indent: Int,
     )
 
     /** The default header or footer of the last section: its text, whether it shows a page number, alignment. */
@@ -458,6 +484,7 @@ object DocxReader {
             used.mapNotNull { id -> ctx.numbering.definition(id)?.let { id to it } }.toMap(),
             pageSetup(child(body, "sectPr")),
             otherRevisions = otherRevisions(document),
+            looks = ctx.looks(),
         )
     }
 
@@ -506,6 +533,33 @@ object DocxReader {
         var paragraphs = 0
 
         fun report() = Report(paragraphs, tables, images, tracked, comments, fields, contentControls)
+
+        fun looks(): Map<String, StyleLook> {
+            val normal = styles.paragraph("")
+            fun look(info: StyleInfo) = StyleLook(
+                font = theme.resolve(info.run.font),
+                size = info.run.size,
+                bold = info.run.bold == true,
+                italic = info.run.italic == true,
+                align = alignOf(info.jc),
+                indent = info.indent,
+            )
+            val out = LinkedHashMap<String, StyleLook>()
+            out["normal"] = look(normal)
+            // What DocxEditor.StyleIds.idFor creates when the file lacks the style.
+            val created = mapOf(
+                "heading1" to ("heading 1" to look(normal).copy(bold = true, size = 32)),
+                "heading2" to ("heading 2" to look(normal).copy(bold = true, size = 28)),
+                "heading3" to ("heading 3" to look(normal).copy(bold = true, size = 24)),
+                "title" to ("title" to look(normal).copy(bold = true, size = 56)),
+                "quote" to ("quote" to look(normal).copy(italic = true, indent = 720)),
+            )
+            for ((kind, pair) in created) {
+                val id = styles.idByName(pair.first)
+                out[kind] = if (id != null) look(styles.paragraph(id)) else pair.second
+            }
+            return out
+        }
 
         /** Counts features inside blocks the reader does not show (tables, controls). */
         fun scan(el: Element) {
@@ -573,6 +627,8 @@ object DocxReader {
                 revisions = revisions,
                 marks = marks,
                 quote = kind == "body" && (name == "quote" || name == "intense quote"),
+                ownAlign = pPr?.let { child(it, "jc") } != null,
+                ownIndent = pPr?.let { child(it, "ind") } != null,
             )
         }
 
@@ -943,6 +999,12 @@ object DocxReader {
             paraDefaults = root?.let { child(it, "docDefaults") }?.let { child(it, "pPrDefault") }
                 ?.let { child(it, "pPr") }.let { ParaFmt.of(it) }
         }
+
+        /** The id of the paragraph style named [name] (case-insensitive), or null. */
+        fun idByName(name: String): String? = raw.entries.firstOrNull { (_, s) ->
+            s.getAttributeNS(W, "type") == "paragraph" &&
+                child(s, "name")?.getAttributeNS(W, "val")?.equals(name, ignoreCase = true) == true
+        }?.key
 
         fun paragraph(id: String): StyleInfo {
             val key = id.ifEmpty { defaultParagraph ?: "" }

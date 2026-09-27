@@ -71,6 +71,9 @@ export type ParagraphBlock = {
   revs?: Revision[];
   /** In a quotation style: body text shown as a block quote. */
   quote?: boolean;
+  /** Its alignment / indent are its own (a style change keeps them). */
+  ja?: boolean;
+  ji?: boolean;
   /** Ordinal among the body's top-level paragraphs: the address edits use. */
   index: number;
   style: string;
@@ -123,6 +126,9 @@ export type ListLevel = {fmt: string; text: string; start: number} | null;
 /** A list's levels, and the numbers it restarts at. */
 export type ListDef = {levels: ListLevel[]; starts: Record<string, number>};
 
+/** A style's look in one document: font, size, bold, italic, alignment, indent (twips). */
+export type StyleLook = {bf?: string; bs?: number; sb?: boolean; si?: boolean; align: 'left' | 'center' | 'right' | 'justify'; indent: number};
+
 export type DocxDocument = {
   path: string;
   name: string;
@@ -137,6 +143,8 @@ export type DocxDocument = {
   /** Tracked formatting and paragraph changes DOCX can't review; they stay as they are. */
   otherRevisions?: number;
   comments?: Comment[];
+  /** How each offered style looks in this document (DocxReader.StyleLook), by kind. */
+  looks?: Record<string, StyleLook>;
   /** Handwritten margin notes' pictures, extracted for the screen: note id → file. */
   inks?: Record<string, string>;
   /**

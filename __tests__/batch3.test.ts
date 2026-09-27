@@ -95,3 +95,18 @@ describe('style changes show on screen', () => {
     expect(formatOps(blocks, [{para: 9, start: 0, end: 5}], 'b')[0]).toMatchObject({on: false});
   });
 });
+
+describe('a style shows as the document defines it', () => {
+  const look = {bs: 22, sb: true, align: 'center' as const, indent: 360};
+
+  it('takes size, bold, alignment and indent from the style', () => {
+    const [q] = applyOps([p(0, [{t: 'Scenario'}])], [{op: 'style', para: 0, kind: 'heading3', look}]) as ParagraphBlock[];
+    expect(q).toMatchObject({kind: 'heading', level: 3, bs: 22, sb: true, align: 'center', indent: 360});
+  });
+
+  it('keeps alignment and indent the paragraph sets itself', () => {
+    const own: ParagraphBlock = {...p(0, [{t: 'Mine'}]), align: 'right', ja: true, indent: 100, ji: true};
+    const [q] = applyOps([own], [{op: 'style', para: 0, kind: 'heading3', look}]) as ParagraphBlock[];
+    expect(q).toMatchObject({align: 'right', indent: 100});
+  });
+});

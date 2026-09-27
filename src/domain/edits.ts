@@ -6,7 +6,7 @@
 // Offsets are into a paragraph's text (runs' `t` joined; objects are one U+FFFC), the
 // same text the native reader and writer use.
 
-import {OBJECT, paragraphText, type Block, type Comment, type Mark, type PageSetup, type ParagraphBlock, type Revision, type Run} from '../model/docx';
+import {OBJECT, paragraphText, type Block, type Comment, type Mark, type PageSetup, type ParagraphBlock, type Revision, type Run, type StyleLook} from '../model/docx';
 
 export type FormatProp = 'b' | 'i' | 'u' | 'h' | 's' | 'sup' | 'sub';
 export type StyleKind = 'heading1' | 'heading2' | 'heading3' | 'title' | 'quote' | 'normal';
@@ -24,7 +24,8 @@ export const HIGHLIGHTS: Array<[string, string]> = [
 export type Op =
   /** value: for 'h', the highlight colour (Word's name). */
   | {op: 'format'; para: number; start: number; end: number; prop: FormatProp; on: boolean; value?: string}
-  | {op: 'style'; para: number; kind: StyleKind}
+  /** look: how that style looks in this document (the screen's copy; the writer ignores it). */
+  | {op: 'style'; para: number; kind: StyleKind; look?: StyleLook}
   /** Replace [start, end) with text: delete when text is '', insert when start === end. */
   | {op: 'text'; para: number; start: number; end: number; text: string}
   /** Enter: the text from `offset` on becomes a new paragraph after `para`. */
@@ -437,6 +438,21 @@ export function applyOps(blocks: Block[], ops: Op[]): Block[] {
         // The new style's font, size, bold and italic are the file's to know: take them from
         // a paragraph already in that style, else show the kind's defaults.
         const next = styleParagraph(p, op.kind);
+        if (op.look) {
+          // The style as the document defines it; alignment and indent the paragraph sets
+          // itself stay (as in Word), and a list item keeps its list's indent.
+          const l = op.look;
+          out[i] = {
+            ...next,
+            bf: l.bf,
+            bs: l.bs,
+            sb: l.sb,
+            si: l.si,
+            align: p.ja ? p.align : l.align,
+            indent: p.ji || p.num ? p.indent : l.indent,
+          };
+          break;
+        }
         const like = out.find(
           b => b.type === 'p' && b !== p && b.kind === next.kind && b.level === next.level && !!b.quote === !!next.quote && !b.num,
         ) as ParagraphBlock | undefined;
@@ -927,8 +943,8 @@ export function formatOps(blocks: Block[], ranges: Range[], prop: FormatProp): O
   return ranges.map(r => ({op: 'format', para: r.para, start: r.start, end: r.end, prop, on}));
 }
 
-export function styleOps(ranges: Range[], kind: StyleKind): Op[] {
-  return [...new Set(ranges.map(r => r.para))].map(para => ({op: 'style', para, kind}));
+export function styleOps(ranges: Range[], kind: StyleKind, look?: StyleLook): Op[] {
+  return [...new Set(ranges.map(r => r.para))].map(para => ({op: 'style', para, kind, ...(look ? {look} : {})}));
 }
 
 const isSpace = (ch: string | undefined) => ch === undefined || /\s/.test(ch);

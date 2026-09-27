@@ -196,6 +196,12 @@ export function Reader(): React.JSX.Element {
   const [caret, setCaret] = useState<Pos | null>(null);
   const [caretBox, setCaretBox] = useState<{key: string; x: number; top: number; height: number} | null>(null);
   const [typing, setTyping] = useState<Typing | null>(null);
+  /**
+   * Superscript / subscript switched on (or 'none': off) for what is typed next, as in Word:
+   * type "H", Subscript, "2", Subscript, "O". Null: typing follows the text before it.
+   * Cleared when the caret is moved.
+   */
+  const [script, setScript] = useState<'sup' | 'sub' | 'none' | null>(null);
   const [input, setInput] = useState('');
   const [discardArmed, setDiscardArmed] = useState(false);
   const started = useRef(false);
@@ -255,8 +261,13 @@ export function Reader(): React.JSX.Element {
       return [];
     }
     const r = typedRange(typing);
-    return [{op: 'text', para: r.para, start: r.start, end: r.end, text}];
-  }, [typing, input]);
+    const ops: Op[] = [{op: 'text', para: r.para, start: r.start, end: r.end, text}];
+    if (script) {
+      // 'none' writes baseline: turning superscript off turns both off.
+      ops.push({op: 'format', para: r.para, start: r.start, end: r.start + text.length, prop: script === 'none' ? 'sup' : script, on: script !== 'none'});
+    }
+    return ops;
+  }, [typing, input, script]);
   // List numbers are recounted after every edit, as Word does.
   const blocks = useMemo(() => recount(applyOps(committed, pending), doc?.lists ?? {}), [committed, pending, doc]);
   /** Where the caret is drawn: after the typed text while typing. */
@@ -890,6 +901,7 @@ export function Reader(): React.JSX.Element {
       // positions just measured stay right.
       flushTyping();
       keys.current?.focus();
+      setScript(null);
       if (tap && !doubleTap) {
         // One tap: a caret in the gap nearest the pen. The next key types there.
         setSelection(null);
@@ -1416,13 +1428,55 @@ export function Reader(): React.JSX.Element {
     setStatus(`Replaced ${ops.length}${skipped ? `; ${skipped} inside fields left alone` : ''}. Undo puts them all back.`);
   };
 
+  /**
+   * Superscript / Subscript: on a selection, formats it. With only a caret, switches it on
+   * or off for what is typed next — nothing already written changes.
+   */
+  const scriptTool = (prop: 'sup' | 'sub') => {
+    setMenu(null);
+    if (!typing && selection) {
+      format(prop, prop === 'sup' ? 'superscript' : 'subscript');
+      return;
+    }
+    if (!caretAt) {
+      setStatus('Tap where to type, or select the text first.');
+      return;
+    }
+    const now = typingScript();
+    flushTyping();
+    const next = now === prop ? 'none' : prop;
+    setScript(next);
+    setStatus(next === 'none' ? 'Back to normal text for what you type next.' : `${prop === 'sup' ? 'Superscript' : 'Subscript'} on for what you type next — choose it again to turn it off.`);
+  };
+
+  /** What typing at the caret produces now: the switch, else the text just before the caret. */
+  const typingScript = (): 'sup' | 'sub' | 'none' => {
+    if (script) {
+      return script;
+    }
+    const at = caretAt;
+    const p = at ? paragraph(at.para) : undefined;
+    if (!p || !at) {
+      return 'none';
+    }
+    let offset = 0;
+    for (const r of p.runs) {
+      const end = offset + r.t.length;
+      if (at.offset > offset && at.offset <= end) {
+        return r.sup ? 'sup' : r.sub ? 'sub' : 'none';
+      }
+      offset = end;
+    }
+    return 'none';
+  };
+
   const style = (kind: StyleKind, label: string) => {
     const paras = targetParagraphs();
     if (paras.length === 0) {
       nothingSelected();
       return;
     }
-    commit(styleOps(paras.map(para => ({para, start: 0, end: 0})), kind), label);
+    commit(styleOps(paras.map(para => ({para, start: 0, end: 0})), kind, doc?.looks?.[kind]), label);
   };
 
   /** Numbered / bulleted / not a list, for the paragraphs targeted. A list just above is continued. */
@@ -1799,6 +1853,7 @@ export function Reader(): React.JSX.Element {
 
   /** Arrows, Home, End; with Shift they extend the selection from where it started. */
   const move = async (key: string, shift: boolean) => {
+    setScript(null);
     const sel = typing ? null : selection;
     const from = cursorForKeys();
     const cur = sel ? sel.to : from;
@@ -3075,14 +3130,8 @@ export function Reader(): React.JSX.Element {
               setMenu(null);
               format('s', 'strikethrough');
             })}
-            {item(`${now.sup ? '✓ ' : ''}Superscript  x²`, () => {
-              setMenu(null);
-              format('sup', 'superscript');
-            })}
-            {item(`${now.sub ? '✓ ' : ''}Subscript  x₂`, () => {
-              setMenu(null);
-              format('sub', 'subscript');
-            })}
+            {item(`${(selection && !typing ? now.sup : typingScript() === 'sup') ? '✓ ' : ''}Superscript  x²`, () => scriptTool('sup'))}
+            {item(`${(selection && !typing ? now.sub : typingScript() === 'sub') ? '✓ ' : ''}Subscript  x₂`, () => scriptTool('sub'))}
             {fontChoices.map(f =>
               item(
                 `${f === cur ? '✓ ' : ''}${f}${fonts.has(f) ? '' : ' (not on this Supernote)'}`,

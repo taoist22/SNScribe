@@ -125,6 +125,16 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
                         putMap("inks", Arguments.createMap().apply { for ((k, v) in inks) putString(k, v) })
                     }
                     if (result.otherRevisions > 0) putInt("otherRevisions", result.otherRevisions)
+                    putMap("looks", Arguments.createMap().apply {
+                        for ((kind, l) in result.looks) putMap(kind, Arguments.createMap().apply {
+                            l.font?.let { putString("bf", it) }
+                            l.size?.let { putInt("bs", it) }
+                            if (l.bold) putBoolean("sb", true)
+                            if (l.italic) putBoolean("si", true)
+                            putString("align", l.align)
+                            putInt("indent", l.indent)
+                        })
+                    })
                     putArray("comments", Arguments.createArray().apply {
                         for (c in result.comments) pushMap(Arguments.createMap().apply {
                             putString("id", c.id)
@@ -641,6 +651,8 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
                 b.listLabel?.let { putString("list", it) }
                 if (b.sectionBreak) putBoolean("sect", true)
                 if (b.quote) putBoolean("quote", true)
+                if (b.ownAlign) putBoolean("ja", true)
+                if (b.ownIndent) putBoolean("ji", true)
                 b.numId?.let { id -> putMap("num", Arguments.createMap().apply { putInt("id", id); putInt("lvl", b.ilvl) }) }
                 b.para.let { f ->
                     f.before?.let { putInt("before", it) }

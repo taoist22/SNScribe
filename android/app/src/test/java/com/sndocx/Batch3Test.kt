@@ -64,6 +64,26 @@ class Batch3Test {
     }
 
     @Test
+    fun styleLooksComeFromTheFile() {
+        val blank = File(work, "blank-looks.docx").also { DocxBlank.write(it) }
+        val looks = DocxReader.read(blank).looks
+        assertEquals(32, looks.getValue("heading1").size)
+        assertTrue(looks.getValue("quote").italic)
+        assertEquals(720, looks.getValue("quote").indent)
+        // CT's IDS 105 template (DOCX_SAMPLES): Heading 1 is 12 pt bold centred; Heading 3
+        // is body size, bold, centred and indented — and no paragraph uses it yet.
+        val dir = System.getProperty("docx.samples").orEmpty()
+        val ids = File(dir, "IDS 105 Project Template.docx")
+        if (dir.isEmpty() || !ids.isFile) return
+        val l = DocxReader.read(ids).looks
+        assertEquals(24, l.getValue("heading1").size)
+        assertEquals("center", l.getValue("heading1").align)
+        assertEquals(22, l.getValue("heading3").size)
+        assertEquals("center", l.getValue("heading3").align)
+        assertEquals(360, l.getValue("heading3").indent)
+    }
+
+    @Test
     fun headingThreeAndQuote() {
         val out = save(listOf(Op.Style(2, "heading3"), Op.Style(3, "quote")), "b3-styles")
         val ps = paragraphs(out)
