@@ -8,7 +8,7 @@ import com.facebook.react.uimanager.ViewManager
 /** Registered by hand in MainApplication.kt — in-project packages are not autolinked. */
 class SnDocxPackage : ReactPackage {
     override fun createNativeModules(context: ReactApplicationContext): List<NativeModule> =
-        listOf(DocxModule(context), DocxTextModule(context), DocxKeysModule(context))
+        listOf(DocxModule(context), DocxTextModule(context), DocxKeysModule(context), DocxInkModule(context))
 
-    override fun createViewManagers(context: ReactApplicationContext): List<ViewManager<*, *>> = emptyList()
+    override fun createViewManagers(context: ReactApplicationContext): List<ViewManager<*, *>> = listOf(DocxInkViewManager())
 }
