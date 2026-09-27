@@ -307,6 +307,17 @@ export function applyOps(blocks: Block[], ops: Op[]): Block[] {
   }
   const out = blocks.slice();
   for (const op of ops) {
+    if (op.op === 'defaults') {
+      // The document default is the base of every paragraph without a style font/size of its own;
+      // on screen, apply it to all (styles that set their own are rare in papers).
+      for (let j = 0; j < out.length; j++) {
+        const b = out[j];
+        if (b.type === 'p') {
+          out[j] = {...b, ...(op.font ? {bf: op.font} : {}), ...(op.size ? {bs: op.size} : {})};
+        }
+      }
+      continue;
+    }
     const i = out.findIndex(b => b.type === 'p' && b.index === op.para);
     if (i < 0) {
       continue;

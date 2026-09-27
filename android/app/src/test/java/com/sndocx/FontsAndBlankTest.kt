@@ -39,6 +39,9 @@ class FontsAndBlankTest {
         val ps = paragraphs(blank)
         assertEquals(1, ps.size)
         assertEquals("", ps[0].text)
+        // Text typed here takes Calibri 11 unless it sets its own: the menus tick that.
+        assertEquals("Calibri", ps[0].baseFont)
+        assertEquals(22, ps[0].baseSize)
         val dest = File(work, "My notes.docx")
         DocxEditor.save(
             blank,

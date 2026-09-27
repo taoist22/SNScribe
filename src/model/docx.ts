@@ -52,6 +52,9 @@ export type ParagraphBlock = {
   first?: number;
   /** Starts on a new page. */
   pb?: boolean;
+  /** Font and size (half-points) text here has unless it sets its own: from the style and document defaults. */
+  bf?: string;
+  bs?: number;
 };
 
 export type TableBlock = {type: 'table'; rows: number; cols: number; preview: string};
@@ -98,6 +101,9 @@ export function fontsUsed(blocks: Block[]): string[] {
   const out = new Set<string>();
   for (const b of blocks) {
     if (b.type === 'p') {
+      if (b.bf) {
+        out.add(b.bf);
+      }
       for (const r of b.runs) {
         if (r.f) {
           out.add(r.f);

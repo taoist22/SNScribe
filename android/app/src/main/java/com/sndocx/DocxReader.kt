@@ -105,6 +105,9 @@ object DocxReader {
         val ilvl: Int = 0,
         /** Spacing, first-line indent and page break, resolved through styles and defaults. */
         val para: ParaFmt = ParaFmt(),
+        /** The font and size (half-points) text in this paragraph has unless it sets its own. */
+        val baseFont: String? = null,
+        val baseSize: Int? = null,
     ) : Block() {
         val text: String get() = runs.joinToString("") { it.text }
     }
@@ -194,7 +197,13 @@ object DocxReader {
     // ---------------------------------------------------------------- paragraphs
 
     /** The theme's heading (major) and body (minor) Latin fonts. */
-    private data class ThemeFonts(val major: String?, val minor: String?)
+    private data class ThemeFonts(val major: String?, val minor: String?) {
+        fun resolve(font: String?): String? = when (font) {
+            "+major" -> major
+            "+minor" -> minor
+            else -> font
+        }
+    }
 
     private fun themeFonts(theme: Document?): ThemeFonts {
         val a = "http://schemas.openxmlformats.org/drawingml/2006/main"
@@ -274,6 +283,8 @@ object DocxReader {
                 numId = numId?.takeIf { it > 0 && label != null },
                 ilvl = ilvl.coerceIn(0, 8),
                 para = style.para.merge(ParaFmt.of(pPr)),
+                baseFont = theme.resolve(style.run.font),
+                baseSize = style.run.size,
             )
         }
 

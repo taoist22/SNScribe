@@ -33,7 +33,7 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
 
     companion object {
         /** Bumped with each native change; first log line, to spot stale installs. */
-        const val NATIVE_BUILD = 9
+        const val NATIVE_BUILD = 10
         private val EXPORT_DIR = File("/storage/emulated/0/EXPORT")
         private const val LOG_MAX_BYTES = 2L * 1024 * 1024
         private const val LOG_LINE_MAX = 4000
@@ -396,6 +396,8 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
                     f.first?.let { putInt("first", it) }
                     if (f.pageBreakBefore == true) putBoolean("pb", true)
                 }
+                b.baseFont?.let { putString("bf", it) }
+                b.baseSize?.let { putInt("bs", it) }
                 putArray("runs", Arguments.createArray().apply {
                     for (r in b.runs) pushMap(Arguments.createMap().apply {
                         putString("t", r.text)

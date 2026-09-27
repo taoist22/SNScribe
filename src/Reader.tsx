@@ -391,28 +391,34 @@ export function Reader(): React.JSX.Element {
   };
 
   /**
-   * The run the Font and Size menus show as current: the selection's first character, or
-   * the character before the caret (what typed text would take), else the paragraph's first.
+   * The font and size the Font and Size menus tick: of the selection's first character, or
+   * the character before the caret (what typed text takes); text without its own takes the
+   * paragraph's base (its style and the document's defaults).
    */
-  const currentRun = (): Run | undefined => {
+  const current = (): {font?: string; size?: number} => {
     const sel = !typing && selection ? selection : null;
     const at = sel ? (comparePos(sel.from, sel.to) <= 0 ? sel.from : sel.to) : caretAt;
     const p = at ? paragraph(at.para) : undefined;
     if (!p || !at) {
-      return undefined;
+      return {};
     }
     let offset = 0;
+    let run: Run | undefined = p.runs[0];
     for (const r of p.runs) {
       const end = offset + r.t.length;
       if (sel ? at.offset >= offset && at.offset < end : at.offset > offset && at.offset <= end) {
-        return r;
+        run = r;
+        break;
       }
       offset = end;
     }
-    return p.runs[0];
+    return {font: run?.f ?? p.bf, size: run?.sz ?? p.bs};
   };
 
-  const fontChoices = useMemo(() => [...new Set([...fonts, ...fontsUsed(blocks)])].sort((a, b) => a.localeCompare(b)), [fonts, blocks]);
+  const fontChoices = useMemo(() => {
+    const bases = blocks.flatMap(b => (b.type === 'p' && b.bf ? [b.bf] : []));
+    return [...new Set([...fonts, ...fontsUsed(blocks), ...bases])].sort((a, b) => a.localeCompare(b));
+  }, [fonts, blocks]);
   const SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48, 72];
 
   // The page map belongs to one layout: the document with its edits, the text size, and
@@ -1861,12 +1867,9 @@ export function Reader(): React.JSX.Element {
           </>
         );
       case 'font': {
-        const cur = currentRun()?.f;
+        const cur = current().font;
         return (
           <>
-            <Text allowFontScaling={false} style={[styles.menuText, styles.folderPath]}>
-              {`Now: ${cur ?? 'the document’s default font'}`}
-            </Text>
             {fontChoices.map(f =>
               item(
                 `${f === cur ? '✓ ' : ''}${f}${fonts.has(f) ? '' : ' (not on this Supernote)'}`,
@@ -1879,12 +1882,9 @@ export function Reader(): React.JSX.Element {
         );
       }
       case 'size': {
-        const sz = currentRun()?.sz;
+        const sz = current().size;
         return (
           <>
-            <Text allowFontScaling={false} style={[styles.menuText, styles.folderPath]}>
-              {`Now: ${sz ? `${sz / 2} pt` : 'the document’s default size'}`}
-            </Text>
             {SIZES.map(pt => item(`${sz === pt * 2 ? '✓ ' : ''}${pt}`, () => applyRunStyle({size: pt * 2}, `size ${pt}`)))}
           </>
         );

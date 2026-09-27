@@ -39,3 +39,10 @@ describe('presetOps', () => {
     expect(out[2]).toMatchObject({line: 240, after: 240, first: -720});
   });
 });
+
+describe('document defaults', () => {
+  it('changes the base font and size shown for every paragraph', () => {
+    const out = applyOps(paper, [{op: 'defaults', para: -1, font: 'Georgia', size: 28}]) as ParagraphBlock[];
+    expect(out.every(q => q.bf === 'Georgia' && q.bs === 28)).toBe(true);
+  });
+});
