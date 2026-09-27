@@ -30,16 +30,40 @@ function failure(status: number): string {
   return `Zotero answered ${status}.`;
 }
 
+/** Where requests are reported (the log): never the key. */
+let report: (line: string) => void = () => {};
+export function setZoteroLog(fn: (line: string) => void): void {
+  report = fn;
+}
+
+const TIMEOUT_MS = 20000;
+
 async function get(account: ZoteroAccount, path: string): Promise<unknown> {
+  const url = `${API}/users/${encodeURIComponent(account.userId.trim())}${path}`;
+  const started = Date.now();
   let res: Response;
+  const timer = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), TIMEOUT_MS));
   try {
-    res = await fetch(`${API}/users/${encodeURIComponent(account.userId.trim())}${path}`, {
-      headers: {'Zotero-API-Key': account.apiKey.trim(), 'Zotero-API-Version': '3'},
-    });
-  } catch {
-    throw new Error('Could not reach Zotero. Is Wi-Fi on?');
+    res = await Promise.race([
+      fetch(url, {headers: {'Zotero-API-Key': account.apiKey.trim(), 'Zotero-API-Version': '3'}}),
+      timer,
+    ]);
+  } catch (error) {
+    const why = error instanceof Error ? error.message : String(error);
+    report(`zotero GET ${url} failed after ${Date.now() - started} ms: ${why}`);
+    throw new Error(why === 'timeout' ? 'Zotero did not answer in 20 seconds. Check Wi-Fi and try again.' : `Could not reach Zotero (${why}). Is Wi-Fi on?`);
   }
+  report(`zotero GET ${url} → ${res.status} in ${Date.now() - started} ms (key ${account.apiKey.trim().length} chars)`);
   if (!res.ok) {
+    let detail = '';
+    try {
+      detail = (await res.text()).slice(0, 120);
+    } catch {
+      // No body.
+    }
+    if (detail) {
+      report(`zotero said: ${detail}`);
+    }
     throw new Error(failure(res.status));
   }
   return res.json();

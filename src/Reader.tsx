@@ -58,7 +58,7 @@ import {docKey, parseRecovery, recoveryFor, touchRecent, type RecentDoc, type Re
 import {DocxInk, InkSurfaceView, activateInk, deactivateInk, isInkAvailable} from './services/ink';
 import {shownFont, withStandIns} from './domain/fonts';
 import {CITE_STYLES, htmlToPieces, inText, piecesText, referenceOps, type CiteStyle, type Source} from './domain/citations';
-import {searchZotero, testZotero, type ZoteroAccount} from './services/zotero';
+import {searchZotero, setZoteroLog, testZotero, type ZoteroAccount} from './services/zotero';
 import {anchorAfter, findBreak, pageIndexOf, windowEnd, type Anchor, type BlockBox, type Break, type LineBox, type PageStart} from './domain/paging';
 import {countWords, fontsUsed, outline, paragraphText, wordCount, type DocxDocument, type ParagraphBlock, type Run} from './model/docx';
 import {ensureFileReadPermission, ensureFileWritePermission} from './pluginPermissions';
@@ -181,7 +181,10 @@ export function Reader(): React.JSX.Element {
     narrative: boolean;
     page: string;
     busy: boolean;
-  }>({setup: false, userId: '', apiKey: '', query: '', results: null, chosen: null, narrative: false, page: '', busy: false});
+    /** The last problem or result, shown in the panel itself. */
+    message: string;
+  }>({setup: false, userId: '', apiKey: '', query: '', results: null, chosen: null, narrative: false, page: '', busy: false, message: ''});
+  useEffect(() => setZoteroLog(line => log(line)), []);
   /** Where New puts the document, and the folder being browsed to choose it. */
   const [newFolder, setNewFolder] = useState(DOCUMENTS);
   const [browse, setBrowse] = useState<{path: string; folders?: string[]; error?: string} | null>(null);
@@ -1114,25 +1117,30 @@ export function Reader(): React.JSX.Element {
     const at = caretAt;
     flushTyping();
     setCaret(at);
-    setCite(c => ({...c, setup: !zotero, userId: zotero?.userId ?? '', apiKey: '', results: null, chosen: null, page: '', busy: false}));
+    setCite(c => ({...c, setup: !zotero, userId: zotero?.userId ?? '', apiKey: '', results: null, chosen: null, page: '', busy: false, message: ''}));
     setMenu('cite');
   };
 
   const saveZotero = async () => {
     const account = {userId: cite.userId.trim(), apiKey: cite.apiKey.trim() || zotero?.apiKey || ''};
-    if (!/^\d+$/.test(account.userId) || !account.apiKey) {
-      setStatus('Enter your Zotero user ID (a number) and API key.');
+    if (!/^\d+$/.test(account.userId)) {
+      setCite(c => ({...c, message: 'The user ID is a number (on zotero.org → Settings → Security, above your keys) — not your username.'}));
       return;
     }
-    setCite(c => ({...c, busy: true}));
+    if (!account.apiKey) {
+      setCite(c => ({...c, message: 'Enter the API key.'}));
+      return;
+    }
+    setCite(c => ({...c, busy: true, message: 'Checking with Zotero…'}));
+    log(`zotero: checking user ${account.userId}`);
     try {
       await testZotero(account);
       await Docx?.store('zotero', JSON.stringify(account));
       setZotero(account);
-      setCite(c => ({...c, setup: false, apiKey: '', busy: false}));
+      setCite(c => ({...c, setup: false, apiKey: '', busy: false, message: 'Connected to your Zotero library. Search for a source below.'}));
       setStatus('Connected to your Zotero library.');
     } catch (error) {
-      setCite(c => ({...c, busy: false}));
+      setCite(c => ({...c, busy: false, message: errorText(error)}));
       setStatus(errorText(error));
     }
   };
@@ -1141,14 +1149,13 @@ export function Reader(): React.JSX.Element {
     if (!zotero || !cite.query.trim()) {
       return;
     }
-    setCite(c => ({...c, busy: true, chosen: null}));
+    setCite(c => ({...c, busy: true, chosen: null, message: 'Searching…'}));
     try {
       const results = await searchZotero(zotero, cite.query, CITE_STYLES.find(x => x.id === style)!.csl);
-      setCite(c => ({...c, results, busy: false}));
-      setStatus(results.length ? '' : `Nothing in your library matches “${cite.query.trim()}”.`);
+      const message = results.length ? '' : `Nothing in your library matches “${cite.query.trim()}”.`;
+      setCite(c => ({...c, results, busy: false, message}));
     } catch (error) {
-      setCite(c => ({...c, busy: false}));
-      setStatus(errorText(error));
+      setCite(c => ({...c, busy: false, message: errorText(error)}));
     }
   };
 
@@ -2960,6 +2967,11 @@ export function Reader(): React.JSX.Element {
               <Text allowFontScaling={false} style={styles.presetSummary}>
                 {'Kept only on this Supernote, in the plugin’s private storage.'}
               </Text>
+              {cite.message ? (
+                <Text allowFontScaling={false} style={[styles.menuText, styles.citeMessage]}>
+                  {cite.message}
+                </Text>
+              ) : null}
               <View style={styles.row}>
                 {button(cite.busy ? 'Checking…' : 'Save', saveZotero, cite.busy)}
                 {button('Cancel', () => (zotero ? setCite(c => ({...c, setup: false})) : setMenu(null)))}
@@ -2994,6 +3006,11 @@ export function Reader(): React.JSX.Element {
               />
               {button(cite.busy ? '…' : 'Search', () => searchCite(), cite.busy || !cite.query.trim())}
             </View>
+            {cite.message ? (
+              <Text allowFontScaling={false} style={[styles.menuText, styles.citeMessage]}>
+                {cite.message}
+              </Text>
+            ) : null}
             {!chosen
               ? (cite.results ?? []).map(r => (
                   <Pressable key={r.key} onPress={once(`src:${r.key}`, () => setCite(c => ({...c, chosen: r})))} style={styles.menuItem}>
@@ -3717,6 +3734,7 @@ const styles = StyleSheet.create({
   menuDivider: {height: 3, backgroundColor: '#000', marginVertical: 4},
   findLabel: {marginTop: 10},
   italicText: {fontStyle: 'italic'},
+  citeMessage: {marginTop: 8, fontWeight: '700'},
   findCase: {alignSelf: 'flex-start', marginTop: 10},
   menuTitle: {fontSize: 26},
   menuMuted: {color: '#555'},
