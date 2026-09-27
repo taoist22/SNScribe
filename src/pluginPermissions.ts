@@ -30,6 +30,13 @@ export function ensureFileReadPermission(): Promise<boolean> {
   );
 }
 
+export function ensureInternetPermission(): Promise<boolean> {
+  return ensurePermission(
+    'plugin.permission.INTERNET',
+    'Allow DOCX to search your Zotero library for citations (api.zotero.org).',
+  );
+}
+
 export function ensureFileWritePermission(): Promise<boolean> {
   return ensurePermission(
     'plugin.permission.FILE:WRITE',

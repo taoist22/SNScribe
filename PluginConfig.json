@@ -1,6 +1,6 @@
 {
   "name": "DOCX",
-  "desc": "Read Word documents (.docx) on Supernote. Editing comes in later versions.",
+  "desc": "Read and edit Word documents (.docx) on Supernote.",
   "iconPath": "assets/docx.png",
   "versionName": "0.1.0",
   "versionCode": "1",
@@ -9,6 +9,7 @@
   "jsMainPath": "index",
   "uses-permissions": [
     "plugin.permission.FILE:READ",
-    "plugin.permission.FILE:WRITE"
+    "plugin.permission.FILE:WRITE",
+    "plugin.permission.INTERNET"
   ]
 }

@@ -61,7 +61,7 @@ import {CITE_STYLES, htmlToPieces, inText, piecesText, referenceOps, type CiteSt
 import {searchZotero, setZoteroLog, testZotero, type ZoteroAccount} from './services/zotero';
 import {anchorAfter, findBreak, pageIndexOf, windowEnd, type Anchor, type BlockBox, type Break, type LineBox, type PageStart} from './domain/paging';
 import {countWords, fontsUsed, outline, paragraphText, wordCount, type DocxDocument, type ParagraphBlock, type Run} from './model/docx';
-import {ensureFileReadPermission, ensureFileWritePermission} from './pluginPermissions';
+import {ensureFileReadPermission, ensureFileWritePermission, ensureInternetPermission} from './pluginPermissions';
 import {Docx, DocxKeys, DocxText, errorText, log, nativeBuild, type KeyPress} from './services/native';
 
 /**
@@ -1131,6 +1131,11 @@ export function Reader(): React.JSX.Element {
       setCite(c => ({...c, message: 'Enter the API key.'}));
       return;
     }
+    // Without it the Supernote blocks the request before it leaves (CT: "Could not reach Zotero").
+    if (!(await ensureInternetPermission())) {
+      setCite(c => ({...c, message: 'DOCX needs permission to use the internet to reach Zotero. Allow it when asked.'}));
+      return;
+    }
     setCite(c => ({...c, busy: true, message: 'Checking with Zotero…'}));
     log(`zotero: checking user ${account.userId}`);
     try {
@@ -1147,6 +1152,10 @@ export function Reader(): React.JSX.Element {
 
   const searchCite = async (style = citeStyle) => {
     if (!zotero || !cite.query.trim()) {
+      return;
+    }
+    if (!(await ensureInternetPermission())) {
+      setCite(c => ({...c, message: 'DOCX needs permission to use the internet to reach Zotero. Allow it when asked.'}));
       return;
     }
     setCite(c => ({...c, busy: true, chosen: null, message: 'Searching…'}));
