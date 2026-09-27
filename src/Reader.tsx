@@ -19,7 +19,9 @@ import {
   deletionRange,
   expectedTexts,
   formatOps,
+  joinProblem,
   rangesBetween,
+  splitProblem,
   styleOps,
   textEditProblem,
   wordAround,
@@ -452,12 +454,28 @@ export function Reader(): React.JSX.Element {
         setStatus(problem ?? 'Paragraph not found.');
         return;
       }
-      const d = deletionRange(paragraphText(p), r.start, r.end);
+      // Within one paragraph, also tidy the space a deleted word leaves.
+      const d = ranges.length === 1 ? deletionRange(paragraphText(p), r.start, r.end) : r;
       ops.push({op: 'text', para: r.para, start: d.start, end: d.end, text: ''});
+    }
+    // Across paragraphs, what is left joins into one, as in Word: last onto first.
+    const first = selection.from.para < selection.to.para ? selection.from.para : selection.to.para;
+    const last = selection.from.para < selection.to.para ? selection.to.para : selection.from.para;
+    for (let para = last; para > first; para--) {
+      const problem = joinProblem(blocks, para);
+      if (problem) {
+        setStatus(`${problem} Delete within the text on one side of it.`);
+        return;
+      }
+      ops.push({op: 'join', para});
+    }
+    if (ops.length === 0) {
+      return;
     }
     commit(ops, 'delete');
     setSelection(null);
-    setCaret(ranges.length ? {para: ranges[0].para, offset: ops[0].op === 'text' ? ops[0].start : 0} : null);
+    const start = ops[0].op === 'text' ? ops[0].start : 0;
+    setCaret(ranges.length ? {para: ranges[0].para, offset: start} : null);
   };
 
   const startReplace = () => {
@@ -505,16 +523,23 @@ export function Reader(): React.JSX.Element {
     }
   };
 
-  /** Enter: commit and keep typing after the new text. */
+  /** Enter: commit what was typed, start a new paragraph at the caret, keep typing there. */
   const enter = () => {
-    if (!typing) {
+    if (!typing || !caretAt) {
       return;
     }
-    const r = typedRange(typing);
-    const at = {para: r.para, offset: pending.length > 0 ? r.start + clean(input).length : r.start};
+    const at = caretAt;
+    const p = paragraph(at.para);
+    const problem = p ? splitProblem(p, at.offset) : 'Paragraph not found.';
     flushTyping();
     setSelection(null);
-    setTyping({mode: 'insert', at});
+    if (problem) {
+      setStatus(problem);
+      setTyping({mode: 'insert', at});
+      return;
+    }
+    commit([{op: 'split', para: at.para, offset: at.offset}], 'new paragraph');
+    setTyping({mode: 'insert', at: {para: at.para + 1, offset: 0}});
   };
 
   /** Done: commit and leave the caret after the new text. */
@@ -544,7 +569,19 @@ export function Reader(): React.JSX.Element {
     }
     const at = typing.at;
     const p = paragraph(at.para);
-    if (!p || at.offset === 0) {
+    if (!p) {
+      return;
+    }
+    if (at.offset === 0) {
+      // At the start of a paragraph: join it onto the one before, caret at the join.
+      const problem = joinProblem(blocks, at.para);
+      if (problem) {
+        setStatus(problem);
+        return;
+      }
+      const prev = paragraph(at.para - 1)!;
+      commit([{op: 'join', para: at.para}], 'join paragraphs');
+      setTyping({mode: 'insert', at: {para: at.para - 1, offset: paragraphText(prev).length}});
       return;
     }
     const problem = textEditProblem(p, at.offset - 1, at.offset);
@@ -674,7 +711,7 @@ export function Reader(): React.JSX.Element {
               caretHidden
             />
             <Text allowFontScaling={false} style={styles.caretHint} numberOfLines={1}>
-              {typing.mode === 'insert' ? 'Typing — tap elsewhere or Done to finish.' : 'Type to replace the selection.'}
+              {typing.mode === 'insert' ? 'Typing — Enter for a new paragraph; tap elsewhere or Done to finish.' : 'Type to replace the selection.'}
             </Text>
             {button('Done', done)}
             {button('Cancel', cancelTyping)}

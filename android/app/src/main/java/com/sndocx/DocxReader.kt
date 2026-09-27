@@ -60,6 +60,8 @@ object DocxReader {
         val indentTwips: Int,
         val listLabel: String?,
         val runs: List<Run>,
+        /** Its paragraph mark carries a section break (w:sectPr): it must not be joined away. */
+        val sectionBreak: Boolean = false,
     ) : Block() {
         val text: String get() = runs.joinToString("") { it.text }
     }
@@ -189,6 +191,7 @@ object DocxReader {
                 indentTwips = indent,
                 listLabel = label,
                 runs = mergeAdjacent(runs),
+                sectionBreak = pPr?.let { child(it, "sectPr") } != null,
             )
         }
 
@@ -320,6 +323,21 @@ object DocxReader {
             }
         }
     }
+
+    /**
+     * How many characters of paragraph text [el] (a paragraph child, at any depth) holds —
+     * exactly what [segments] would count for it.
+     */
+    fun lengthOf(el: Element): Int = when {
+        el.namespaceURI != W -> if (el.localName == "AlternateContent") 1 else 0
+        el.localName == "r" -> runText(el).length
+        el.localName in CONTAINERS -> elementChildren(el).sumOf { lengthOf(it) }
+        el.localName == "sdt" -> child(el, "sdtContent")?.let { c -> elementChildren(c).sumOf { lengthOf(it) } } ?: 0
+        else -> 0
+    }
+
+    /** Inline containers [walk] descends into (sdt is handled through its sdtContent). */
+    val CONTAINERS = setOf("hyperlink", "ins", "moveTo", "fldSimple", "smartTag", "customXml")
 
     fun runText(r: Element): String = buildString { for (c in elementChildren(r)) append(textOf(c)) }
 

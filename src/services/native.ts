@@ -16,8 +16,8 @@ type DocxModule = {
     src: string,
     ops: object[],
     dest: string,
-    /** Paragraph index → the text the screen shows after the edits; the save is refused on any mismatch. */
-    expected: Record<number, string>,
+    /** Every paragraph's text as the screen shows it after the edits; the save is refused on any mismatch. */
+    expected: string[],
   ): Promise<{dest: string; name: string; ms: number; changed: string[]}>;
 };
 

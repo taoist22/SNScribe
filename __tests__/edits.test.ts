@@ -3,6 +3,8 @@ import {
   applyOps,
   deletionRange,
   expectedTexts,
+  joinProblem,
+  splitProblem,
   shiftPos,
   textEditProblem,
   formatOps,
@@ -153,7 +155,7 @@ describe('text edits', () => {
 
   it('computes the texts to cross-check on save', () => {
     const ops: Op[] = [{op: 'text', para: 1, start: 0, end: 5, text: 'Simple'}];
-    expect(expectedTexts(doc, ops)).toEqual({1: 'Simple then bold note' + OBJECT + ' end.'});
+    expect(expectedTexts(doc, ops)).toEqual(['A Title', 'Simple then bold note' + OBJECT + ' end.']);
   });
 });
 
@@ -169,5 +171,49 @@ describe('shiftPos', () => {
   });
   it('handles a plain insertion', () => {
     expect(shiftPos({para: 2, offset: 11}, {para: 2, start: 10, end: 10}, 3)).toEqual({para: 2, offset: 14});
+  });
+});
+
+describe('paragraphs', () => {
+  const three: Block[] = [
+    para(0, [{t: 'Heading'}], 'heading'),
+    para(1, [{t: 'First '}, {t: 'bold', b: true}, {t: ' end.'}]),
+    para(2, [{t: 'Second.'}]),
+  ];
+  const texts = (bs: Block[]) => bs.filter(b => b.type === 'p').map(b => paragraphText(b as ParagraphBlock));
+  const indexes = (bs: Block[]) => bs.filter(b => b.type === 'p').map(b => (b as ParagraphBlock).index);
+
+  it('splits, keeping run formatting, and renumbers what follows', () => {
+    const out = applyOps(three, [{op: 'split', para: 1, offset: 8}]); // "First bo" | "ld end."
+    expect(texts(out)).toEqual(['Heading', 'First bo', 'ld end.', 'Second.']);
+    expect(indexes(out)).toEqual([0, 1, 2, 3]);
+    expect((out[2] as ParagraphBlock).runs[0]).toMatchObject({t: 'ld', b: true});
+  });
+
+  it('gives a body paragraph after Enter at the end of a heading', () => {
+    const out = applyOps(three, [{op: 'split', para: 0, offset: 7}]);
+    expect(out[1]).toMatchObject({kind: 'body', index: 1, runs: []});
+    expect(out[0]).toMatchObject({kind: 'heading'});
+  });
+
+  it('joins onto the previous paragraph and renumbers', () => {
+    const out = applyOps(three, [{op: 'join', para: 2}]);
+    expect(texts(out)).toEqual(['Heading', 'First bold end.Second.']);
+    expect(indexes(out)).toEqual([0, 1]);
+  });
+
+  it('round-trips split then join', () => {
+    expect(texts(applyOps(three, [{op: 'split', para: 1, offset: 3}, {op: 'join', para: 2}]))).toEqual(texts(three));
+  });
+
+  it('refuses joins across a table or a section break, and splits inside fields', () => {
+    expect(joinProblem(doc, 1)).toMatch(/table/);
+    expect(joinProblem(three, 0)).toMatch(/no paragraph before/);
+    const sect: Block[] = [{...(three[1] as ParagraphBlock), sect: true}, {...(three[2] as ParagraphBlock)}];
+    expect(joinProblem(sect, 2)).toMatch(/section break/);
+    const field = para(5, [{t: 'Page '}, {t: '12', k: true}, {t: '3', k: true}]);
+    expect(splitProblem(field, 6)).toMatch(/field/);
+    expect(splitProblem(field, 7)).toMatch(/field/);
+    expect(splitProblem(field, 5)).toBeNull();
   });
 });

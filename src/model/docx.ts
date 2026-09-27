@@ -35,6 +35,8 @@ export type ParagraphBlock = {
   /** List label ("1.", "•"), when the paragraph is in a list. */
   list?: string;
   runs: Run[];
+  /** Its paragraph mark ends a section: nothing may be joined onto it. */
+  sect?: boolean;
 };
 
 export type TableBlock = {type: 'table'; rows: number; cols: number; preview: string};

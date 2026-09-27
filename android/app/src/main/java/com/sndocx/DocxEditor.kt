@@ -47,6 +47,15 @@ object DocxEditor {
          * replaced character, or when inserting, of the character before it (Word's rule).
          */
         data class Text(val para: Int, val start: Int, val end: Int, val text: String) : Op()
+
+        /**
+         * Splits a paragraph at [offset] (Enter): the text before stays as paragraph [para],
+         * the rest becomes paragraph [para] + 1, and later paragraphs move down one.
+         */
+        data class Split(val para: Int, val offset: Int) : Op()
+
+        /** Joins paragraph [para] onto the end of [para] - 1 (Backspace at its start). */
+        data class Join(val para: Int) : Op()
     }
 
     data class Saved(val dest: File, val changedParts: List<String>, val notes: List<String>)
@@ -71,7 +80,7 @@ object DocxEditor {
      * written to [dest], so [dest] never holds an unverified file. Throws with the reason
      * when anything fails; [dest] is then untouched.
      */
-    fun save(src: File, ops: List<Op>, dest: File, workDir: File, expected: Map<Int, String> = emptyMap()): Saved {
+    fun save(src: File, ops: List<Op>, dest: File, workDir: File, expected: List<String> = emptyList()): Saved {
         require(src.length() <= DocxReader.MAX_DOCX_BYTES) { "too large: ${src.length()} bytes" }
         val notes = ArrayList<String>()
         val changed = ArrayList<String>()
@@ -111,18 +120,30 @@ object DocxEditor {
      * Every paragraph's text is exactly what the ops say (original + text edits as string
      * splices) and what the screen expected; every untouched part is byte-identical.
      */
-    private fun verify(src: File, written: File, changed: List<String>, ops: List<Op>, expected: Map<Int, String>) {
+    private fun verify(src: File, written: File, changed: List<String>, ops: List<Op>, expected: List<String>) {
         val before = DocxReader.read(src).blocks.filterIsInstance<DocxReader.Paragraph>()
         val after = DocxReader.read(written).blocks.filterIsInstance<DocxReader.Paragraph>()
-        check(before.size == after.size) { "verify: paragraph count ${before.size} → ${after.size}" }
-        val want = before.associate { it.index to it.text }.toMutableMap()
-        for (op in ops) if (op is Op.Text) {
-            val t = want[op.para] ?: continue
-            want[op.para] = t.substring(0, op.start) + op.text + t.substring(op.end)
+        // The same edits on plain strings: what every paragraph must now say.
+        val want = before.map { it.text }.toMutableList()
+        for (op in ops) when (op) {
+            is Op.Text -> want[op.para] = want[op.para].let { it.substring(0, op.start) + op.text + it.substring(op.end) }
+            is Op.Split -> want[op.para].let {
+                want[op.para] = it.substring(0, op.offset)
+                want.add(op.para + 1, it.substring(op.offset))
+            }
+            is Op.Join -> {
+                want[op.para - 1] = want[op.para - 1] + want[op.para]
+                want.removeAt(op.para)
+            }
+            else -> {}
         }
-        for (p in after) {
-            check(p.text == want[p.index]) { "verify: paragraph ${p.index} does not have the text the edits describe" }
-            expected[p.index]?.let { check(p.text == it) { "verify: paragraph ${p.index} differs from what the screen showed" } }
+        check(after.size == want.size) { "verify: ${after.size} paragraphs, the edits describe ${want.size}" }
+        after.forEachIndexed { i, p ->
+            check(p.text == want[i]) { "verify: paragraph $i does not have the text the edits describe" }
+        }
+        if (expected.isNotEmpty()) {
+            check(expected.size == after.size) { "verify: the screen showed ${expected.size} paragraphs, the file has ${after.size}" }
+            after.forEachIndexed { i, p -> check(p.text == expected[i]) { "verify: paragraph $i differs from what the screen showed" } }
         }
         val ha = hashes(src)
         val hb = hashes(written)
@@ -136,25 +157,26 @@ object DocxEditor {
 
     /** Applies [ops] to the DOM. Returns whether styles.xml was changed (a style was added). */
     fun apply(document: Document, styles: Document?, ops: List<Op>, notes: MutableList<String>): Boolean {
-        val paragraphs = bodyParagraphs(document)
+        var paragraphs = bodyParagraphs(document)
         val styleIds = StyleIds(styles)
         for (op in ops) {
-            val p = paragraphs.getOrNull(
-                when (op) {
-                    is Op.Format -> op.para
-                    is Op.Style -> op.para
-                    is Op.Text -> op.para
-                },
-            )
-            if (p == null) {
-                notes.add("skipped $op: no such paragraph")
-                continue
+            val index = when (op) {
+                is Op.Format -> op.para
+                is Op.Style -> op.para
+                is Op.Text -> op.para
+                is Op.Split -> op.para
+                is Op.Join -> op.para
             }
+            val p = checkNotNull(paragraphs.getOrNull(index)) { "no paragraph $index for $op" }
             when (op) {
                 is Op.Format -> format(document, p, op, notes)
                 is Op.Style -> setStyle(document, p, styleIds.idFor(op.kind))
                 is Op.Text -> replaceText(document, p, op, notes)
+                is Op.Split -> splitParagraph(document, p, op, styleIds, notes)
+                is Op.Join -> joinParagraph(checkNotNull(paragraphs.getOrNull(index - 1)) { "nothing before paragraph $index to join onto" }, p, op, notes)
             }
+            // Splits and joins renumber the paragraphs after them.
+            if (op is Op.Split || op is Op.Join) paragraphs = bodyParagraphs(document)
         }
         return styleIds.added
     }
@@ -258,6 +280,124 @@ object DocxEditor {
         }
         notes.add("text p${op.para} [${op.start},${op.end}) → ${op.text.length} chars")
     }
+
+    /**
+     * Enter: splits [p] at [op.offset]. A new paragraph holding everything before the offset
+     * is inserted in front of [p], with a copy of [p]'s properties; [p] itself keeps the rest
+     * and its paragraph mark — so a section break (w:sectPr) stays at the end, where Word
+     * keeps it. Links and other containers across the offset are divided in two.
+     * Refused inside a field or content control.
+     */
+    private fun splitParagraph(document: Document, p: Element, op: Op.Split, styleIds: StyleIds, notes: MutableList<String>) {
+        val segs = DocxReader.segments(p)
+        val total = segs.sumOf { it.length }
+        require(op.offset in 0..total) { "split at ${op.offset} outside paragraph ${op.para} (length $total)" }
+        check(!insideLocked(segs, op.offset)) { "paragraph ${op.para}: can't start a new paragraph inside a field or content control" }
+        val styleBefore = child(p, "pPr")?.let { child(it, "pStyle") }?.getAttributeNS(W, "val")
+
+        splitAt(p, op.offset)
+        val first = document.createElementNS(W, "w:p")
+        child(p, "pPr")?.let { pPr ->
+            val copy = pPr.cloneNode(true) as Element
+            child(copy, "sectPr")?.let { copy.removeChild(it) }
+            first.appendChild(copy)
+        }
+        moveBefore(p, first, op.offset)
+        p.parentNode.insertBefore(first, p)
+
+        // Enter at the end of a heading: the new paragraph takes the style's "next" style.
+        if (op.offset == total && styleBefore != null) {
+            val next = styleIds.nextOf(styleBefore)
+            if (next != null && next != styleBefore) setStyle(document, p, next.takeUnless { styleIds.isDefault(it) })
+        }
+        notes.add("split p${op.para} at ${op.offset}")
+    }
+
+    /**
+     * Moves the content of [from] that lies before character [cut] into [to], in order.
+     * A child straddling [cut] (after splitAt, only a container such as a hyperlink can) is
+     * divided: its first part, a shallow copy, goes to [to]. Zero-length markers before
+     * [cut] (bookmarks, comment starts) move with the text before them.
+     */
+    private fun moveBefore(from: Element, to: Element, cut: Int) {
+        var pos = 0
+        for (c in elementChildren(from)) {
+            if (c.localName == "pPr" && c.namespaceURI == W) continue
+            if (pos >= cut) break
+            val len = DocxReader.lengthOf(c)
+            if (pos + len <= cut) {
+                from.removeChild(c)
+                to.appendChild(c)
+                pos += len
+                continue
+            }
+            val piece = c.cloneNode(false) as Element
+            if (c.localName == "sdt") {
+                // Guarded by the locked check; kept for safety: an sdt is never divided.
+                error("can't divide a content control")
+            }
+            moveBefore(c, piece, cut - pos)
+            to.appendChild(piece)
+            break
+        }
+    }
+
+    /** Whether [offset] lies inside field or content-control text (so Enter there is refused). */
+    private fun insideLocked(segs: List<DocxReader.Segment>, offset: Int): Boolean {
+        var pos = 0
+        var before: DocxReader.Segment? = null
+        var after: DocxReader.Segment? = null
+        for (seg in segs) {
+            val s = pos
+            pos += seg.length
+            if (seg.length == 0) continue
+            if (seg.locked && offset > s && offset < pos) return true
+            if (pos == offset) before = seg
+            if (s == offset && after == null) after = seg
+        }
+        return before?.locked == true && after?.locked == true
+    }
+
+    /**
+     * Backspace at the start of [p]: its content moves onto the end of [prev], which keeps
+     * its own properties, and [p] is removed. Refused when a table or other block sits
+     * between them, or when [prev] ends a section (they are in different sections). A
+     * section break on [p] moves to the joined paragraph.
+     */
+    private fun joinParagraph(prev: Element, p: Element, op: Op.Join, notes: MutableList<String>) {
+        val between = ArrayList<Element>()
+        var n = prev.nextSibling
+        while (n != null && n !== p) {
+            if (n is Element) {
+                check(n.localName in BODY_MARKERS) { "paragraph ${op.para}: a table or other block lies before it; can't join" }
+                between.add(n)
+            }
+            n = n.nextSibling
+        }
+        checkNotNull(n) { "paragraph ${op.para} is not after the one it joins" }
+        check(child(prev, "pPr")?.let { child(it, "sectPr") } == null) {
+            "paragraph ${op.para}: a section break separates these paragraphs; can't join"
+        }
+        for (el in between) prev.appendChild(el)
+        for (c in elementChildren(p)) {
+            if (c.localName == "pPr" && c.namespaceURI == W) continue
+            prev.appendChild(c)
+        }
+        // If [p] ended a section, both paragraphs were in that section: the joined paragraph
+        // now ends it. sectPr goes last in pPr, before any pPrChange.
+        child(p, "pPr")?.let { child(it, "sectPr") }?.let { sect ->
+            val pPr = child(prev, "pPr") ?: prev.ownerDocument.createElementNS(W, "w:pPr").also { prev.insertBefore(it, prev.firstChild) }
+            pPr.insertBefore(sect, child(pPr, "pPrChange"))
+        }
+        p.parentNode.removeChild(p)
+        notes.add("join p${op.para} onto p${op.para - 1}")
+    }
+
+    /** Body-level elements that carry no content and may sit between two joined paragraphs. */
+    private val BODY_MARKERS = setOf(
+        "bookmarkStart", "bookmarkEnd", "commentRangeStart", "commentRangeEnd", "proofErr",
+        "permStart", "permEnd", "moveFromRangeStart", "moveFromRangeEnd", "moveToRangeStart", "moveToRangeEnd",
+    )
 
     /** The run segment holding character [ch], or null (out of range or not a text run). */
     private fun sourceRun(segs: List<DocxReader.Segment>, ch: Int): DocxReader.Segment? {
@@ -369,6 +509,8 @@ object DocxEditor {
             private set
         private val byName = HashMap<String, String>()
         private val ids = HashSet<String>()
+        private val next = HashMap<String, String>()
+        private var defaultId: String? = null
 
         init {
             styles?.documentElement?.let { root ->
@@ -376,9 +518,16 @@ object DocxEditor {
                     val id = s.getAttributeNS(W, "styleId")
                     ids.add(id)
                     child(s, "name")?.getAttributeNS(W, "val")?.lowercase()?.let { byName.putIfAbsent(it, id) }
+                    child(s, "next")?.getAttributeNS(W, "val")?.takeIf { it.isNotEmpty() }?.let { next[id] = it }
+                    if (s.getAttributeNS(W, "default").let { it == "1" || it == "true" }) defaultId = id
                 }
             }
         }
+
+        /** The style Word gives the paragraph after one in [id] (heading → Normal). */
+        fun nextOf(id: String): String? = next[id]
+
+        fun isDefault(id: String): Boolean = id == defaultId
 
         /** Null means "Normal": remove pStyle so the paragraph takes the default style. */
         fun idFor(kind: String): String? {

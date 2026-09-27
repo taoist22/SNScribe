@@ -15,7 +15,11 @@ export type Op =
   | {op: 'format'; para: number; start: number; end: number; prop: FormatProp; on: boolean}
   | {op: 'style'; para: number; kind: StyleKind}
   /** Replace [start, end) with text: delete when text is '', insert when start === end. */
-  | {op: 'text'; para: number; start: number; end: number; text: string};
+  | {op: 'text'; para: number; start: number; end: number; text: string}
+  /** Enter: the text from `offset` on becomes a new paragraph after `para`. */
+  | {op: 'split'; para: number; offset: number}
+  /** Backspace at the start of `para`: it joins onto the end of `para` - 1. */
+  | {op: 'join'; para: number};
 
 /** A position between characters of paragraph `para` (Paragraph.index). */
 export type Pos = {para: number; offset: number};
@@ -158,17 +162,54 @@ export function shiftPos(p: Pos, r: Range, len: number): Pos {
   return {para: p.para, offset: r.start + len};
 }
 
-/** Paragraph texts after `ops`, for the paragraphs they touch: sent with Save as a cross-check. */
-export function expectedTexts(blocks: Block[], ops: Op[]): Record<number, string> {
-  const after = applyOps(blocks, ops);
-  const touched = new Set(ops.map(o => o.para));
-  const out: Record<number, string> = {};
-  for (const b of after) {
-    if (b.type === 'p' && touched.has(b.index)) {
-      out[b.index] = paragraphText(b);
+/** Every paragraph's text after `ops`, in order: sent with Save as a cross-check. */
+export function expectedTexts(blocks: Block[], ops: Op[]): string[] {
+  return applyOps(blocks, ops)
+    .filter((b): b is ParagraphBlock => b.type === 'p')
+    .map(paragraphText);
+}
+
+/** Paragraph indexes after position `from` in `blocks` move by `delta` (splits and joins renumber). */
+function renumber(blocks: Block[], from: number, delta: number): void {
+  for (let j = from; j < blocks.length; j++) {
+    const b = blocks[j];
+    if (b.type === 'p') {
+      blocks[j] = {...b, index: b.index + delta};
     }
   }
-  return out;
+}
+
+/**
+ * Mirrors DocxEditor.splitParagraph: both halves keep the paragraph's properties; the
+ * section break stays with the second; Enter at the end of a heading or title gives a
+ * body paragraph (Word's "next" style, approximately — the file uses the real one).
+ */
+function split(out: Block[], i: number, op: Extract<Op, {op: 'split'}>): void {
+  const p = out[i] as ParagraphBlock;
+  const len = paragraphText(p).length;
+  const runs = splitRuns(p.runs, [op.offset]);
+  let offset = 0;
+  const before: Run[] = [];
+  const after: Run[] = [];
+  for (const r of runs) {
+    (offset < op.offset ? before : after).push(r);
+    offset += r.t.length;
+  }
+  const first: ParagraphBlock = {...p, runs: before, sect: undefined};
+  let second: ParagraphBlock = {...p, index: p.index + 1, runs: after};
+  if (op.offset === len && p.kind !== 'body') {
+    second = {...second, kind: 'body', level: 0, style: ''};
+  }
+  out.splice(i, 1, first, second);
+  renumber(out, i + 2, 1);
+}
+
+/** Mirrors DocxEditor.joinParagraph: the first paragraph's properties, both texts. */
+function join(out: Block[], i: number): void {
+  const p = out[i] as ParagraphBlock;
+  const prev = out[i - 1] as ParagraphBlock;
+  out.splice(i - 1, 2, {...prev, runs: [...prev.runs, ...p.runs], sect: prev.sect || p.sect});
+  renumber(out, i, -1);
 }
 
 /** The document with `ops` applied, in order. Untouched blocks keep their identity. */
@@ -177,17 +218,73 @@ export function applyOps(blocks: Block[], ops: Op[]): Block[] {
     return blocks;
   }
   const out = blocks.slice();
-  const at = new Map<number, number>();
-  blocks.forEach((b, i) => b.type === 'p' && at.set(b.index, i));
   for (const op of ops) {
-    const i = at.get(op.para);
-    if (i === undefined) {
+    const i = out.findIndex(b => b.type === 'p' && b.index === op.para);
+    if (i < 0) {
       continue;
     }
     const p = out[i] as ParagraphBlock;
-    out[i] = op.op === 'format' ? formatParagraph(p, op) : op.op === 'style' ? styleParagraph(p, op.kind) : editText(p, op);
+    switch (op.op) {
+      case 'format':
+        out[i] = formatParagraph(p, op);
+        break;
+      case 'style':
+        out[i] = styleParagraph(p, op.kind);
+        break;
+      case 'text':
+        out[i] = editText(p, op);
+        break;
+      case 'split':
+        split(out, i, op);
+        break;
+      case 'join':
+        if (i > 0 && out[i - 1].type === 'p') {
+          join(out, i);
+        }
+        break;
+    }
   }
   return out;
+}
+
+/** Why Enter can't split `p` at `offset` (inside a field or form control), or null. */
+export function splitProblem(p: ParagraphBlock, offset: number): string | null {
+  let pos = 0;
+  let before: Run | null = null;
+  let after: Run | null = null;
+  for (const r of p.runs) {
+    const s = pos;
+    pos += r.t.length;
+    if (r.t.length === 0) {
+      continue;
+    }
+    if (r.k && offset > s && offset < pos) {
+      return 'A new paragraph can\'t start inside a field or form control.';
+    }
+    if (pos === offset) {
+      before = r;
+    }
+    if (s === offset && !after) {
+      after = r;
+    }
+  }
+  return before?.k && after?.k ? 'A new paragraph can\'t start inside a field or form control.' : null;
+}
+
+/** Why paragraph `para` can't be joined onto the one before it, or null. Mirrors the native refusal. */
+export function joinProblem(blocks: Block[], para: number): string | null {
+  const i = blocks.findIndex(b => b.type === 'p' && b.index === para);
+  if (i <= 0) {
+    return 'There is no paragraph before this one.';
+  }
+  const prev = blocks[i - 1];
+  if (prev.type !== 'p') {
+    return 'A table or other block sits before this paragraph, so it can\'t be joined to it.';
+  }
+  if (prev.sect) {
+    return 'A section break (page layout change) separates these paragraphs.';
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------- selections

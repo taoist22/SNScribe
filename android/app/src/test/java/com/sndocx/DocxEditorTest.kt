@@ -132,6 +132,60 @@ class DocxEditorTest {
         }
     }
 
+    @Test
+    fun splitsAndJoinsParagraphs() {
+        val src = File(fixtures, "probe-fixture.docx")
+        val before = paragraphs(src)
+        val t1 = before[1].text
+        val cut = t1.indexOf("a bold phrase") + 2 // inside the bold run: "a " | "bold phrase…"
+        val (dest, _) = save(
+            src,
+            listOf(
+                Op.Split(1, cut),
+                Op.Split(0, before[0].text.length), // Enter at the end of the heading
+                Op.Join(4), // the old paragraph 2 (now 4) back onto the second half of paragraph 1 (now 3)
+            ),
+        )
+        val after = paragraphs(dest)
+        assertEquals(before.size + 1, after.size)
+        assertEquals(before[0].text, after[0].text)
+        assertEquals("", after[1].text)
+        assertEquals("body", after[1].kind) // heading → its "next" style
+        assertEquals(t1.substring(0, cut), after[2].text)
+        assertEquals(t1.substring(cut) + before[2].text, after[3].text)
+        assertTrue(after[3].runs.first().bold) // "bold phrase" kept its formatting
+    }
+
+    @Test
+    fun refusesToJoinAcrossATable() {
+        val src = File(fixtures, "probe-fixture.docx")
+        // Paragraph 4 comes after the table.
+        val failure = runCatching { DocxEditor.save(src, listOf(Op.Join(4)), File(work, "no.docx"), File(work, "tmp")) }
+        assertTrue(failure.exceptionOrNull()?.message.orEmpty().contains("table"))
+    }
+
+    /**
+     * Stress (paragraphs): on every real document, split every editable paragraph in the
+     * middle (links included) — once keeping the splits, once joining each back at once.
+     */
+    @Test
+    fun splitsAndJoinsRealDocuments() {
+        val dir = System.getProperty("docx.samples").orEmpty()
+        if (dir.isEmpty()) return
+        val files = File(dir).listFiles { f -> f.name.endsWith(".docx") }.orEmpty().sortedBy { it.name }
+        for (f in files) {
+            val ps = paragraphs(f).filter { p -> p.text.length >= 4 && p.runs.none { it.locked } }
+            // Highest index first, so earlier indexes stay valid.
+            val splits = ps.sortedByDescending { it.index }.map { Op.Split(it.index, it.text.length / 2) }
+            val roundTrip = ps.sortedByDescending { it.index }.flatMap { listOf(Op.Split(it.index, it.text.length / 2), Op.Join(it.index + 1)) }
+            val (kept, _) = save(f, splits)
+            val (back, _) = save(f, roundTrip)
+            assertEquals(paragraphs(f).size + splits.size, paragraphs(kept).size)
+            assertEquals(paragraphs(f).map { it.text }, paragraphs(back).map { it.text })
+            println("${f.name}: ${splits.size} splits kept, ${roundTrip.size} split+join ops round-tripped")
+        }
+    }
+
     /**
      * Stress: on every real document in DOCX_SAMPLES, bold the first word, highlight the
      * middle third and italicise the end of every paragraph, and make paragraph 1 a
