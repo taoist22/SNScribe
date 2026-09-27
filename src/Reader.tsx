@@ -26,6 +26,7 @@ import {
   formatOps,
   fromShown,
   headerFooterAfter,
+  inksAfter,
   joinProblem,
   linkProblem,
   linkSpan,
@@ -48,7 +49,6 @@ import {
 import {listKind, recount} from './domain/lists';
 import {PAPER_FORMATS, presetOps} from './domain/presets';
 import {docKey, parseRecovery, recoveryFor, touchRecent, type RecentDoc, type RecoveryRecord} from './domain/recovery';
-import {parseNotes, placeNote, reanchor, type InkNote} from './domain/notes';
 import {DocxInk, InkSurfaceView, activateInk, deactivateInk, isInkAvailable} from './services/ink';
 import {anchorAfter, findBreak, pageIndexOf, windowEnd, type Anchor, type BlockBox, type Break, type LineBox, type PageStart} from './domain/paging';
 import {countWords, fontsUsed, outline, paragraphText, wordCount, type DocxDocument, type ParagraphBlock, type Run} from './model/docx';
@@ -87,6 +87,8 @@ const MARGIN_GAP = 14;
 const CARD_H = 84;
 /** The pen pad's header row (fixed: the surface below it must never move). */
 const PAD_HEAD = 64;
+/** The pen pad's writing column: margin-shaped. */
+const PAD_W = 420;
 const START: Anchor = {block: 0, offset: 0};
 /** Pen travel below this (dp) is a tap: it selects the word under the pen. */
 const TAP_SLOP = 12;
@@ -99,7 +101,7 @@ type Typing = {mode: 'insert'; at: Pos} | {mode: 'replace'; range: Range};
 type HfLine = {text: string; align: 'left' | 'center' | 'right'; page: boolean};
 
 type Menu =
-  | 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count' | 'page' | 'preset' | 'header' | 'link' | 'thread' | 'comment' | 'note' | 'notes'
+  | 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count' | 'page' | 'preset' | 'header' | 'link' | 'thread' | 'comment' | 'note'
   | 'recent' | 'versions' | 'recover';
 
 /** Drop-down menu width; menus are kept inside the screen. */
@@ -141,8 +143,6 @@ export function Reader(): React.JSX.Element {
   const [thread, setThread] = useState<string | null>(null);
   const [replyText, setReplyText] = useState('');
   const [commentForm, setCommentForm] = useState<{fromPara: number; from: number; toPara: number; to: number; text: string; quote: string} | null>(null);
-  /** Handwritten notes of the open document (private; beside the file, never in it). */
-  const [notes, setNotes] = useState<InkNote[]>([]);
   /** The pen pad, open for a note on these words. */
   const [pad, setPad] = useState<{para: number; at: number; quote: string} | null>(null);
   const [noteOpen, setNoteOpen] = useState<string | null>(null);
@@ -337,7 +337,6 @@ export function Reader(): React.JSX.Element {
     setDoc(opened);
     setIsNew(!!created);
     setDiskStamp(stamp);
-    setNotes(parseNotes(await Docx!.load(`notes-${key}`)));
     setPad(null);
     const found = parseRecovery(await Docx!.load(`recovery-${key}`), path, stamp);
     setRecovery(found);
@@ -561,11 +560,9 @@ export function Reader(): React.JSX.Element {
   // Includes what is being typed: the count follows typing once it pauses.
   const comments = useMemo(() => commentsAfter(doc?.comments, applied), [doc, applied]);
   const hasChanges = blocks.some(b => b.type === 'p' && !!b.revs?.length);
-  const placedNotes = useMemo(
-    () => notes.map(n => ({note: n, at: placeNote(n, blocks)})),
-    [notes, blocks],
-  );
-  const hasNotes = hasChanges || blocks.some(b => b.type === 'p' && !!b.marks?.length) || placedNotes.some(n => n.at);
+  const inks = useMemo(() => inksAfter(doc?.inks, applied), [doc, applied]);
+  const hasNotes =
+    hasChanges || blocks.some(b => b.type === 'p' && (!!b.marks?.length || b.runs.some(r => r.obj === 'ink')));
   const marginOn = showMargin && hasNotes && !showPages && !contents;
   // The text column: the page less the margin column when it shows.
   const textW = marginOn ? Math.max(200, pageW - MARGIN_W - MARGIN_GAP) : pageW;
@@ -953,14 +950,10 @@ export function Reader(): React.JSX.Element {
 
   // ---------------------------------------------------------------- handwritten notes
 
-  const storeNotes = (list: InkNote[]) => {
-    setNotes(list);
-    if (doc) {
-      Docx?.store(`notes-${docKey(doc.saveTo ?? doc.path)}`, JSON.stringify(list));
-    }
-  };
-
-  /** Handwritten note…: on the selection's words, or the word at the caret (or its empty line). */
+  /**
+   * Handwritten note…: a narrow pen pad; the ink goes into the Word file as a picture in the
+   * right margin beside the selected words (or the caret), where Word shows and prints it.
+   */
   const startNote = () => {
     setMenu(null);
     const ranges = !typing && selection ? rangesBetween(blocks, selection.from, selection.to).filter(r => r.end > r.start) : [];
@@ -969,11 +962,18 @@ export function Reader(): React.JSX.Element {
       const r = ranges[0];
       at = {para: r.para, at: r.start, quote: textOf(r.para).slice(r.start, r.end).slice(0, 200)};
     } else if (caretAt) {
+      flushTyping();
       const w = targets()[0];
       at = w ? {para: w.para, at: w.start, quote: textOf(w.para).slice(w.start, w.end)} : {para: caretAt.para, at: caretAt.offset, quote: ''};
     }
     if (!at) {
       setStatus('Select the words the note is about, or tap where it goes.');
+      return;
+    }
+    const p = paragraph(at.para);
+    const problem = p ? textEditProblem(p, at.at, at.at) : 'Paragraph not found.';
+    if (problem) {
+      setStatus(problem);
       return;
     }
     done();
@@ -1003,6 +1003,7 @@ export function Reader(): React.JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pad !== null]);
 
+  /** Keep: the ink becomes a picture (private storage until saved) and an edit that places it. */
   const saveNote = async () => {
     if (!pad || !doc || !DocxInk) {
       return;
@@ -1015,37 +1016,24 @@ export function Reader(): React.JSX.Element {
         setStatus('Write the note first, or Cancel.');
         return;
       }
-      storeNotes([...notes, {id, path: res.path, width: res.width ?? 1, height: res.height ?? 1, ...pad, created: new Date().toISOString()}]);
+      commit([{op: 'ink', para: pad.para, at: pad.at, id, png: res.path, width: res.width ?? 1, height: res.height ?? 1}], 'handwritten note');
       setPad(null);
-      setStatus('Note kept. It stays on this Supernote, beside the document; the Word file is unchanged.');
+      setStatus('Note added in the right margin. Save to put it in the Word file.');
     } catch (error) {
-      setStatus(`The note could not be kept: ${errorText(error)}`);
+      setStatus(`The note could not be added: ${errorText(error)}`);
       log(`ink save failed: ${errorText(error)}`);
     }
   };
 
   const deleteNote = (id: string) => {
-    const n = notes.find(x => x.id === id);
-    if (n) {
-      DocxInk?.remove(n.path);
-    }
-    storeNotes(notes.filter(x => x.id !== id));
+    const b = blocks.find(x => x.type === 'p' && x.runs.some(r => r.obj === 'ink' && r.ink === id)) as ParagraphBlock | undefined;
     setNoteOpen(null);
     setMenu(null);
-    setStatus('Note deleted.');
-  };
-
-  const goToNote = (n: InkNote) => {
-    const at = placeNote(n, blocks);
-    if (!at) {
-      setStatus('This note\'s words are no longer in the document.');
+    if (!b) {
       return;
     }
-    setMenu(null);
-    const block = blocks.findIndex(b => b.type === 'p' && b.index === at.para);
-    if (block >= 0) {
-      jump(block);
-    }
+    commit([{op: 'inkDelete', para: b.index, id}], 'delete note');
+    setStatus('Note deleted. Undo brings it back.');
   };
 
   // ---------------------------------------------------------------- comments
@@ -1927,8 +1915,6 @@ export function Reader(): React.JSX.Element {
       const res = await Docx.save(doc.source, ops, doc.saveTo, expectedTexts(doc.blocks, ops));
       setDiskStamp(await Docx.fileStamp(doc.saveTo));
       setSaved({cursor, dest: res.dest});
-      // Notes remember where their words now are, so the next open finds them directly.
-      storeNotes(reanchor(notes, blocks));
       setDiscardArmed(false);
       setStatus(`Saved ${res.name}.`);
     } catch (error) {
@@ -2160,18 +2146,25 @@ export function Reader(): React.JSX.Element {
       move?: boolean;
       replies?: number;
       h?: number;
-      note?: InkNote;
+      src?: string;
     };
     const cards: Card[] = [];
     const inkW = MARGIN_W - 20;
-    for (const {note: n, at} of placedNotes) {
-      const i = at ? window.findIndex(b => b.type === 'p' && b.index === at.para) : -1;
-      const y = i >= 0 && at ? yOf(i, at.at) : null;
-      if (y !== null && y >= -4 && y < visible) {
-        const h = Math.max(40, Math.min(170, (inkW * n.height) / Math.max(1, n.width))) + 8;
-        cards.push({key: `n:${n.id}`, y: Math.max(0, y), para: at!.para, id: n.id, kind: 'ink', author: '', text: '', h, note: n});
+    window.forEach((b, i) => {
+      if (b.type !== 'p') {
+        return;
       }
-    }
+      let offset = 0;
+      for (const r of b.runs) {
+        if (r.obj === 'ink' && r.ink) {
+          const y = yOf(i, offset);
+          if (y !== null && y >= -4 && y < visible) {
+            cards.push({key: `n:${r.ink}`, y: Math.max(0, y), para: b.index, id: r.ink, kind: 'ink', author: '', text: '', h: 120, src: inks[r.ink]});
+          }
+        }
+        offset += r.t.length;
+      }
+    });
     const threads = new Set(comments.filter(c => !c.parent).map(c => c.id));
     window.forEach((b, i) => {
       if (b.type !== 'p') {
@@ -2238,7 +2231,7 @@ export function Reader(): React.JSX.Element {
     return (
       <View style={[styles.margin, {height: pageH, left: PAD + textW + MARGIN_GAP, top: PAD}]}>
         {placed.map(c =>
-          c.kind === 'ink' && c.note ? (
+          c.kind === 'ink' ? (
             <Pressable
               key={c.key}
               onPress={once(`note:${c.id}`, () => {
@@ -2246,7 +2239,13 @@ export function Reader(): React.JSX.Element {
                 setMenu('note');
               })}
               style={[styles.inkCard, {top: c.top, height: c.h}]}>
-              <Image source={{uri: `file://${c.note.path}`}} resizeMode="contain" style={{width: inkW, height: (c.h ?? CARD_H) - 8}} />
+              {c.src ? (
+                <Image source={{uri: `file://${c.src}`}} resizeMode="contain" style={{width: inkW, height: (c.h ?? CARD_H) - 8}} />
+              ) : (
+                <Text allowFontScaling={false} style={styles.cardBody}>
+                  {'✎ Handwritten note'}
+                </Text>
+              )}
             </Pressable>
           ) : c.kind === 'comment' ? (
             <Pressable key={c.key} onPress={once(`thread:${c.id}`, () => openThread(c.id))} style={[styles.card, styles.commentCard, {top: c.top}]}>
@@ -2660,21 +2659,15 @@ export function Reader(): React.JSX.Element {
           </View>
         ) : null;
       case 'note': {
-        const n = notes.find(x => x.id === noteOpen);
-        return n ? (
+        const src = noteOpen ? inks[noteOpen] : undefined;
+        return noteOpen ? (
           <View style={styles.nameForm}>
-            {n.quote ? (
-              <Text allowFontScaling={false} style={styles.cardHead} numberOfLines={2}>
-                {`On “${n.quote.slice(0, 80)}”`}
-              </Text>
-            ) : null}
-            <Image
-              source={{uri: `file://${n.path}`}}
-              resizeMode="contain"
-              style={{width: MENU_W - 32, height: Math.min(420, ((MENU_W - 32) * n.height) / Math.max(1, n.width)), marginVertical: 10}}
-            />
+            <Text allowFontScaling={false} style={styles.cardHead}>
+              {'Handwritten note · in the right margin of the Word file'}
+            </Text>
+            {src ? <Image source={{uri: `file://${src}`}} resizeMode="contain" style={{width: MENU_W - 32, height: 300, marginVertical: 10}} /> : null}
             <View style={styles.row}>
-              {button('Delete note', () => deleteNote(n.id))}
+              {button('Delete note', () => deleteNote(noteOpen))}
               {button('Close', () => {
                 setNoteOpen(null);
                 setMenu(null);
@@ -2683,22 +2676,6 @@ export function Reader(): React.JSX.Element {
           </View>
         ) : null;
       }
-      case 'notes':
-        return (
-          <View>
-            <Text allowFontScaling={false} style={[styles.presetSummary, styles.folderPath]}>
-              {'Kept on this Supernote beside the document — not in the Word file.'}
-            </Text>
-            {placedNotes.map(({note: n, at}) => (
-              <Pressable key={n.id} onPress={once(`note:${n.id}`, () => goToNote(n))} style={styles.menuItem}>
-                <Image source={{uri: `file://${n.path}`}} resizeMode="contain" style={{width: MENU_W - 40, height: Math.min(90, ((MENU_W - 40) * n.height) / Math.max(1, n.width))}} />
-                <Text allowFontScaling={false} style={styles.presetSummary} numberOfLines={1}>
-                  {at ? (n.quote ? `On “${n.quote.slice(0, 60)}”` : 'On an empty line') : `Its words are gone${n.quote ? ` (“${n.quote.slice(0, 40)}”)` : ''} — tap Delete in the note to remove it`}
-                </Text>
-              </Pressable>
-            ))}
-          </View>
-        );
       case 'thread': {
         const ids = thread ? threadIds(comments, thread).map(String) : [];
         const items = comments.filter(c => ids.includes(c.id));
@@ -2796,7 +2773,6 @@ export function Reader(): React.JSX.Element {
             {item('Go to start', () => goTo({block: 0, offset: 0}))}
             {item('Go to end', goToEnd)}
             {hasNotes ? item(showMargin ? 'Hide margin (notes, comments, changes)' : 'Show margin (notes, comments, changes)', () => setShowMargin(v => !v)) : null}
-            {notes.length ? item(`Handwritten notes (${notes.length})…`, () => setMenu('notes')) : null}
           </>
         );
       case 'folder':
@@ -3133,8 +3109,16 @@ export function Reader(): React.JSX.Element {
               {button('Keep note', saveNote)}
               {button('Cancel', () => setPad(null))}
             </View>
-            {/* Fixed size and position: the pen engine must never see its host move. */}
-            <InkSurfaceView style={{width: pageW + PAD * 2, height: pageH + PAD * 2 - PAD_HEAD}} />
+            <View style={styles.padBody}>
+              {/* Fixed size and position: the pen engine must never see its host move. Narrow,
+                  like the margin it goes into, so the writing stays legible when it shrinks. */}
+              <View style={styles.padSurface}>
+                <InkSurfaceView style={{width: PAD_W, height: pageH + PAD * 2 - PAD_HEAD - 28}} />
+              </View>
+              <Text allowFontScaling={false} style={[styles.panelNote, styles.padHint]}>
+                {'Write in the box. The note goes in the right margin of the Word file, beside these words, about 1 inch wide — Word shows and prints it.'}
+              </Text>
+            </View>
           </View>
         ) : null}
         {menu ? (
@@ -3255,6 +3239,9 @@ const styles = StyleSheet.create({
   cardText: {flex: 1},
   inkCard: {position: 'absolute', left: 8, right: 0, borderWidth: 1, borderColor: '#000', borderRadius: 6, padding: 3, backgroundColor: '#fff', alignItems: 'center'},
   pad: {position: 'absolute', left: 0, top: 0, backgroundColor: '#fff'},
+  padBody: {flexDirection: 'row', padding: 12},
+  padSurface: {borderWidth: 2, borderColor: '#000'},
+  padHint: {flex: 1, marginLeft: 16, marginTop: 0},
   padHead: {height: PAD_HEAD, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, borderBottomWidth: 1, borderColor: '#000'},
   commentCard: {borderStyle: 'dashed', paddingRight: 8},
   commentInput: {height: 110, textAlignVertical: 'top', paddingTop: 8, marginVertical: 8},

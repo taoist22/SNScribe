@@ -188,6 +188,50 @@ object DocxReader {
     fun lastParaId(comment: Element): String? =
         elementChildren(comment).lastOrNull { it.localName == "p" }?.getAttributeNS(W14, "paraId")?.takeIf { it.isNotEmpty() }
 
+    const val WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+    const val A = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    /** docPr name of a handwritten note DOCX puts in the margin; the note id follows. */
+    const val INK_NAME = "DOCX ink note "
+
+    /** The note id of a w:drawing that is one of DOCX's handwritten margin notes, else null. */
+    fun inkNoteId(drawing: Element): String? {
+        val docPr = drawing.getElementsByTagNameNS(WP, "docPr")
+        if (docPr.length == 0) return null
+        val name = (docPr.item(0) as Element).getAttribute("name")
+        return if (name.startsWith(INK_NAME)) name.removePrefix(INK_NAME).takeIf { it.isNotEmpty() } else null
+    }
+
+    /** The picture part of each handwritten margin note in [document]: note id → part name. */
+    fun inkImages(document: Document, rels: Document?): Map<String, String> {
+        val out = LinkedHashMap<String, String>()
+        val drawings = document.getElementsByTagNameNS(W, "drawing")
+        for (i in 0 until drawings.length) {
+            val d = drawings.item(i) as Element
+            val id = inkNoteId(d) ?: continue
+            val blip = d.getElementsByTagNameNS(A, "blip").item(0) as? Element ?: continue
+            relById(rels, blip.getAttributeNS(R_NS, "embed"))?.let { out[id] = it }
+        }
+        return out
+    }
+
+    /** Copies each handwritten note's picture out of [file] into [dir]; note id → file path. */
+    fun extractInk(file: File, dir: File): Map<String, String> {
+        ZipFile(file).use { zip ->
+            val document = zip.getEntry(DOCUMENT_PART)?.let { parse(readEntry(zip, it)) } ?: return emptyMap()
+            val rels = zip.getEntry(DOCUMENT_RELS)?.let { parse(readEntry(zip, it)) }
+            val out = LinkedHashMap<String, String>()
+            for ((id, part) in inkImages(document, rels)) {
+                val entry = zip.getEntry(part) ?: continue
+                checkEntryName(part)
+                dir.mkdirs()
+                val dest = File(dir, id.replace(Regex("[^A-Za-z0-9_-]"), "_") + ".png")
+                dest.writeBytes(readEntry(zip, entry))
+                out[id] = dest.path
+            }
+            return out
+        }
+    }
+
     /** Where the document's list definitions live: its numbering relationship, else word/numbering.xml. */
     fun numberingPart(rels: Document?): String {
         val root = rels?.documentElement ?: return "word/numbering.xml"
@@ -225,6 +269,8 @@ object DocxReader {
         val size: Int? = null,
         /** Inside a tracked insertion (w:ins / w:moveTo): its w:id. */
         val rev: String? = null,
+        /** A handwritten note DOCX put in the margin (obj "ink"): its note id. */
+        val ink: String? = null,
     )
 
     /**
@@ -572,7 +618,7 @@ object DocxReader {
             val charStyle = rPr?.let { child(it, "rStyle") }?.getAttributeNS(W, "val")
             val fmt = base.merge(styles.character(charStyle)).merge(Fmt.of(rPr))
             val isLink = link || charStyle.equals("Hyperlink", ignoreCase = true)
-            fun add(text: String, obj: String? = null) {
+            fun add(text: String, obj: String? = null, ink: String? = null) {
                 if (text.isEmpty()) return
                 out.add(
                     Run(
@@ -593,6 +639,7 @@ object DocxReader {
                         },
                         size = fmt.size,
                         rev = rev,
+                        ink = ink,
                     ),
                 )
             }
@@ -606,12 +653,14 @@ object DocxReader {
                 if (t[0] == OBJECT) {
                     add(text.toString())
                     text.clear()
-                    val kind = when (c.localName) {
-                        "drawing", "pict" -> "image".also { images++ }
-                        "footnoteReference", "endnoteReference" -> "note"
+                    val ink = if (c.localName == "drawing") inkNoteId(c) else null
+                    val kind = when {
+                        ink != null -> "ink"
+                        c.localName == "drawing" || c.localName == "pict" -> "image".also { images++ }
+                        c.localName == "footnoteReference" || c.localName == "endnoteReference" -> "note"
                         else -> "object"
                     }
-                    add(t, kind)
+                    add(t, kind, ink)
                 } else {
                     text.append(t)
                 }

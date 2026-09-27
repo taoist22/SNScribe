@@ -17,7 +17,10 @@ export type Run = {
   /** Inside a hyperlink. */
   l?: boolean;
   sup?: boolean;
-  obj?: 'image' | 'note' | 'object';
+  /** 'ink': a handwritten note DOCX put in the right margin (its anchor character). */
+  obj?: 'image' | 'note' | 'object' | 'ink';
+  /** For obj 'ink': the note's id. */
+  ink?: string;
   /** Inside a field or content control: formattable, but its text is not editable. */
   k?: boolean;
   /** Font family (theme fonts resolved). */
@@ -126,6 +129,8 @@ export type DocxDocument = {
   /** Tracked formatting and paragraph changes DOCX can't review; they stay as they are. */
   otherRevisions?: number;
   comments?: Comment[];
+  /** Handwritten margin notes' pictures, extracted for the screen: note id → file. */
+  inks?: Record<string, string>;
   /**
    * The default header and footer of the last section, as DOCX can edit them. `other`: it
    * also has a logo or table, which stays; text and alignment are then of its page-number line.

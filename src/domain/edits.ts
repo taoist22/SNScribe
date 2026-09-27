@@ -74,7 +74,14 @@ export type Op =
       parent?: number;
     }
   /** Delete these comments (a thread: the comment and its replies). para is -1. */
-  | {op: 'uncomment'; para: -1; ids: number[]};
+  | {op: 'uncomment'; para: -1; ids: number[]}
+  /**
+   * A handwritten note `id` in the right margin beside character `at` of `para`: the
+   * picture `png` (width×height px). Its anchor is one object character in the text.
+   */
+  | {op: 'ink'; para: number; at: number; id: string; png: string; width: number; height: number}
+  /** Remove handwritten note `id` from the document (its anchor and picture). */
+  | {op: 'inkDelete'; para: number; id: string};
 
 /** A position between characters of paragraph `para` (Paragraph.index). */
 export type Pos = {para: number; offset: number};
@@ -427,6 +434,41 @@ export function applyOps(blocks: Block[], ops: Op[]): Block[] {
       case 'link':
         out[i] = {...p, runs: setLink(p.runs, op.start, op.end, true)};
         break;
+      case 'ink': {
+        let offset = 0;
+        const runs: Run[] = [];
+        let placed = false;
+        for (const r of splitRuns(p.runs, [op.at])) {
+          if (!placed && offset >= op.at) {
+            runs.push({t: OBJECT, obj: 'ink', ink: op.id});
+            placed = true;
+          }
+          runs.push(r);
+          offset += r.t.length;
+        }
+        if (!placed) {
+          runs.push({t: OBJECT, obj: 'ink', ink: op.id});
+        }
+        out[i] = withMarks(withRevs({...p, runs}, shiftDeletions(p.revs, op.at, op.at, 1)), shiftMarks(p.marks, op.at, op.at, 1));
+        break;
+      }
+      case 'inkDelete': {
+        let offset = 0;
+        let at = -1;
+        for (const r of p.runs) {
+          if (r.obj === 'ink' && r.ink === op.id) {
+            at = offset;
+          }
+          offset += r.t.length;
+        }
+        if (at >= 0) {
+          out[i] = withMarks(
+            withRevs({...p, runs: p.runs.filter(r => !(r.obj === 'ink' && r.ink === op.id))}, shiftDeletions(p.revs, at, at + 1, 0)),
+            shiftMarks(p.marks, at, at + 1, 0),
+          );
+        }
+        break;
+      }
       case 'unlink': {
         const span = linkSpan(p, op.start, op.end);
         if (span) {
@@ -501,6 +543,17 @@ export function commentsAfter(comments: Comment[] | undefined, ops: Op[]): Comme
     } else if (op.op === 'uncomment') {
       const ids = new Set(op.ids.map(String));
       out = out.filter(c => !ids.has(c.id));
+    }
+  }
+  return out;
+}
+
+/** Every handwritten note's picture after the edits: the document's, plus those added. */
+export function inksAfter(inks: Record<string, string> | undefined, ops: Op[]): Record<string, string> {
+  const out = {...(inks ?? {})};
+  for (const op of ops) {
+    if (op.op === 'ink') {
+      out[op.id] = op.png;
     }
   }
   return out;

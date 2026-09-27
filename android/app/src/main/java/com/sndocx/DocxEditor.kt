@@ -137,6 +137,12 @@ object DocxEditor {
 
         /** Deletes these comments (a thread is its comment and all its replies). */
         data class CommentDelete(val ids: List<Int>) : Op()
+
+        /** A handwritten note [id]: the PNG [png] ([width]×[height] px) in the right margin, anchored at [at]. */
+        data class InkAdd(val para: Int, val at: Int, val id: String, val png: String, val width: Int, val height: Int) : Op()
+
+        /** Removes handwritten note [id] (in paragraph [para]). */
+        data class InkDelete(val para: Int, val id: String) : Op()
     }
 
     data class Saved(val dest: File, val changedParts: List<String>, val notes: List<String>)
@@ -184,11 +190,41 @@ object DocxEditor {
         private val parsed = HashMap<String, Document>()
         val dirty = LinkedHashSet<String>()
         val added = LinkedHashMap<String, Document>()
+        val addedBinary = LinkedHashMap<String, ByteArray>()
+        val removed = LinkedHashSet<String>()
 
         fun part(name: String): Document? =
             added[name] ?: parsed[name] ?: zip?.getEntry(name)?.let { DocxReader.parse(DocxReader.readEntry(zip, it)) }?.also { parsed[name] = it }
 
-        fun exists(name: String) = added.containsKey(name) || zip?.getEntry(name) != null
+        fun exists(name: String) = added.containsKey(name) || addedBinary.containsKey(name) ||
+            (name !in removed && zip?.getEntry(name) != null)
+
+        /** Adds a binary part (a picture); its extension gets a Default content type if it has none. */
+        fun addBinary(name: String, bytes: ByteArray, extension: String, contentType: String) {
+            addedBinary[name] = bytes
+            val types = part(CONTENT_TYPES) ?: error("no $CONTENT_TYPES")
+            val root = types.documentElement
+            val has = elementChildren(root).any { it.localName == "Default" && it.getAttribute("Extension").equals(extension, ignoreCase = true) }
+            if (!has) {
+                val d = types.createElementNS(root.namespaceURI, "Default")
+                d.setAttribute("Extension", extension)
+                d.setAttribute("ContentType", contentType)
+                root.insertBefore(d, root.firstChild)
+                touch(CONTENT_TYPES)
+            }
+        }
+
+        /** Removes a part from the package (one added this session simply goes). */
+        fun remove(name: String) {
+            if (added.remove(name) == null && addedBinary.remove(name) == null) removed.add(name)
+        }
+
+        /** Removes document relationship [id]. */
+        fun unrelate(id: String) {
+            val rels = part(DocxReader.DOCUMENT_RELS) ?: return
+            elementChildren(rels.documentElement).filter { it.getAttribute("Id") == id }.forEach { rels.documentElement.removeChild(it) }
+            touch(DocxReader.DOCUMENT_RELS)
+        }
 
         /** Marks an existing part changed (it will be re-serialized). */
         fun touch(name: String) {
@@ -203,6 +239,7 @@ object DocxEditor {
 
         /** A free part name like word/header3.xml. */
         fun freeName(stem: String, ext: String = "xml"): String {
+            // (Removed names are not reused: a part name maps to one picture per session.)
             var n = 1
             while (exists("$stem$n.$ext")) n++
             return "$stem$n.$ext"
@@ -248,6 +285,7 @@ object DocxEditor {
         val notes = ArrayList<String>()
         val changed = ArrayList<String>()
         var addedNames: Set<String> = emptySet()
+        var removedNames: Set<String> = emptySet()
         workDir.mkdirs()
         val temp = File(workDir, "saving-${System.nanoTime()}.docx")
         try {
@@ -274,16 +312,20 @@ object DocxEditor {
                 ZipOutputStream(FileOutputStream(temp)).use { out ->
                     for (entry in zip.entries()) {
                         DocxReader.checkEntryName(entry.name)
+                        if (entry.name in pkg.removed) continue
                         val bytes = if (entry.name in pkg.dirty) serialize(pkg.part(entry.name)!!) else DocxReader.readEntry(zip, entry)
                         putEntry(out, entry, bytes)
                     }
                     for ((name, doc) in pkg.added) putEntry(out, ZipEntry(name).apply { method = ZipEntry.DEFLATED }, serialize(doc))
+                    for ((name, bytes) in pkg.addedBinary) putEntry(out, ZipEntry(name).apply { method = ZipEntry.DEFLATED }, bytes)
                 }
                 changed.addAll(pkg.dirty)
                 changed.addAll(pkg.added.keys)
-                addedNames = pkg.added.keys.toSet()
+                changed.addAll(pkg.addedBinary.keys)
+                addedNames = pkg.added.keys + pkg.addedBinary.keys
+                removedNames = pkg.removed.toSet()
             }
-            verify(src, temp, changed, effects, expected, addedNames)
+            verify(src, temp, changed, effects, expected, addedNames, removedNames)
             copy(temp, dest)
             return Saved(dest, changed, notes)
         } finally {
@@ -295,7 +337,7 @@ object DocxEditor {
      * Every paragraph's text is exactly what the ops say (original + text edits as string
      * splices) and what the screen expected; every untouched part is byte-identical.
      */
-    private fun verify(src: File, written: File, changed: List<String>, ops: List<Op>, expected: List<String>, added: Set<String>) {
+    private fun verify(src: File, written: File, changed: List<String>, ops: List<Op>, expected: List<String>, added: Set<String>, removed: Set<String> = emptySet()) {
         val before = DocxReader.read(src).blocks.filterIsInstance<DocxReader.Paragraph>()
         val after = DocxReader.read(written).blocks.filterIsInstance<DocxReader.Paragraph>()
         // The same edits on plain strings: what every paragraph must now say.
@@ -322,9 +364,9 @@ object DocxEditor {
         }
         val ha = hashes(src)
         val hb = hashes(written)
-        check(hb.keys == ha.keys + added) { "verify: package parts differ: ${ha.keys - hb.keys} / ${hb.keys - ha.keys}" }
+        check(hb.keys == ha.keys - removed + added) { "verify: package parts differ: ${ha.keys - hb.keys} / ${hb.keys - ha.keys}" }
         for ((name, hash) in ha) {
-            if (name !in changed) check(hb[name] == hash) { "verify: $name changed but was not edited" }
+            if (name !in changed && name !in removed) check(hb[name] == hash) { "verify: $name changed but was not edited" }
         }
     }
 
@@ -368,6 +410,15 @@ object DocxEditor {
                 deleteComments(document, pkg, op, notes)
                 continue
             }
+            if (op is Op.InkAdd || op is Op.InkDelete) {
+                val i = if (op is Op.InkAdd) op.para else (op as Op.InkDelete).para
+                val p = checkNotNull(paragraphs.getOrNull(i)) { "no paragraph $i for $op" }
+                val old = paragraphText(p)
+                if (op is Op.InkAdd) addInk(document, p, pkg, op, notes) else deleteInk(document, pkg, op as Op.InkDelete, notes)
+                val new = paragraphText(p)
+                if (old != new) effects?.add(Op.Text(i, 0, old.length, new))
+                continue
+            }
             if (op is Op.Revision) {
                 // Text changes, as plain splices, for verify.
                 val targets = if (op.para < 0) paragraphs.indices.toList() else listOf(op.para)
@@ -394,7 +445,7 @@ object DocxEditor {
                 is Op.ParaProps -> op.para
                 is Op.Link -> op.para
                 is Op.Unlink -> op.para
-                is Op.PageSetup, is Op.Defaults, is Op.HeaderFooter, is Op.Revision, is Op.CommentAdd, is Op.CommentDelete -> error("unreachable")
+                is Op.PageSetup, is Op.Defaults, is Op.HeaderFooter, is Op.Revision, is Op.CommentAdd, is Op.CommentDelete, is Op.InkAdd, is Op.InkDelete -> error("unreachable")
             }
             val p = checkNotNull(paragraphs.getOrNull(index)) { "no paragraph $index for $op" }
             when (op) {
@@ -408,7 +459,7 @@ object DocxEditor {
                 is Op.ParaProps -> paraProps(document, p, op, notes)
                 is Op.Link -> link(document, p, op, pkg, styleIds, notes)
                 is Op.Unlink -> unlink(p, op, notes)
-                is Op.PageSetup, is Op.Defaults, is Op.HeaderFooter, is Op.Revision, is Op.CommentAdd, is Op.CommentDelete -> {}
+                is Op.PageSetup, is Op.Defaults, is Op.HeaderFooter, is Op.Revision, is Op.CommentAdd, is Op.CommentDelete, is Op.InkAdd, is Op.InkDelete -> {}
             }
             // Splits and joins renumber the paragraphs after them.
             if (op is Op.Split || op is Op.Join) paragraphs = bodyParagraphs(document)
@@ -884,6 +935,59 @@ object DocxEditor {
             }
             offset += len
         }
+    }
+
+    // ---------------------------------------------------------------- handwritten margin notes
+
+    private const val REL_IMAGE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+    private const val EMU_PER_INCH = 914400L
+
+    /**
+     * A handwritten note in the right margin: the picture [Op.InkAdd.png] as a floating
+     * image anchored at character [Op.InkAdd.at] — beside that line, moving with it, not
+     * pushing text (wrapNone). Word shows it (Office 365 checked, 2026-09-26); its anchor is
+     * one U+FFFC in the paragraph's text, like any drawing.
+     */
+    private fun addInk(document: Document, p: Element, pkg: Pkg, op: Op.InkAdd, notes: MutableList<String>) {
+        val bytes = File(op.png).readBytes()
+        check(bytes.size > 8 && bytes[1] == 'P'.code.toByte()) { "not a PNG: ${op.png}" }
+        val part = pkg.freeName("word/media/sndocx-ink-", "png")
+        pkg.addBinary(part, bytes, "png", "image/png")
+        val rId = pkg.relate(REL_IMAGE, part.removePrefix("word/"), external = false)
+
+        // As wide as the right margin allows (at least 0.8″, at most 1.6″), height to scale.
+        val right = child(child(document.documentElement, "body") ?: document.documentElement, "sectPr")
+            ?.let { child(it, "pgMar") }?.getAttributeNS(W, "right")?.toIntOrNull() ?: 1440
+        val inches = (right / 1440.0 - 0.1).coerceIn(0.8, 1.6)
+        val cx = (inches * EMU_PER_INCH).toLong()
+        val cy = (cx * op.height / maxOf(1, op.width)).coerceAtLeast(EMU_PER_INCH / 10)
+        var maxDocPr = 0
+        val prs = document.getElementsByTagNameNS(DocxReader.WP, "docPr")
+        for (i in 0 until prs.length) maxDocPr = maxOf(maxDocPr, (prs.item(i) as Element).getAttribute("id").toIntOrNull() ?: 0)
+        val docPr = maxDocPr + 1
+        val xml = """<w:r xmlns:w="$W" xmlns:wp="${DocxReader.WP}" xmlns:a="${DocxReader.A}" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="$R_NS"><w:rPr><w:noProof/></w:rPr><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="${251659264 + docPr}" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="rightMargin"><wp:posOffset>45720</wp:posOffset></wp:positionH><wp:positionV relativeFrom="line"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="$cx" cy="$cy"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapNone/><wp:docPr id="$docPr" name="${DocxReader.INK_NAME}${op.id}" descr="Handwritten note"/><wp:cNvGraphicFramePr/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="$docPr" name="Handwritten note ${op.id}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="$rId"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="$cx" cy="$cy"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"""
+        val run = document.importNode(DocxReader.parse(xml.toByteArray()).documentElement, true) as Element
+        // Namespaces are declared on the document root already, or the serializer adds them.
+        for (prefix in listOf("w", "wp", "a", "pic", "r")) run.removeAttributeNS("http://www.w3.org/2000/xmlns/", prefix)
+        placeAt(p, op.at, run, before = true)
+        notes.add("ink note ${op.id} at p${op.para}:${op.at} → $part (${"%.2f".format(inches)}″)")
+    }
+
+    /** Removes handwritten note [Op.InkDelete.id]: its anchor, and its picture when nothing else shows it. */
+    private fun deleteInk(document: Document, pkg: Pkg, op: Op.InkDelete, notes: MutableList<String>) {
+        val drawings = document.getElementsByTagNameNS(W, "drawing")
+        val d = (0 until drawings.length).map { drawings.item(it) as Element }.firstOrNull { DocxReader.inkNoteId(it) == op.id }
+            ?: error("no handwritten note ${op.id}")
+        val rId = (d.getElementsByTagNameNS(DocxReader.A, "blip").item(0) as? Element)?.getAttributeNS(R_NS, "embed")
+        val run = d.parentNode as Element
+        run.removeChild(d)
+        if (elementChildren(run).all { it.localName == "rPr" }) run.parentNode.removeChild(run)
+        if (rId != null) {
+            val blips = document.getElementsByTagNameNS(DocxReader.A, "blip")
+            val stillUsed = (0 until blips.length).any { (blips.item(it) as Element).getAttributeNS(R_NS, "embed") == rId }
+            if (!stillUsed) pkg.target(rId)?.let { part -> pkg.unrelate(rId); pkg.remove(part) }
+        }
+        notes.add("ink note ${op.id} deleted")
     }
 
     // ---------------------------------------------------------------- comments

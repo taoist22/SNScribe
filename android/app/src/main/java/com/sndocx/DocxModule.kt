@@ -118,6 +118,12 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
                     putDouble("bytes", file.length().toDouble())
                     putDouble("ms", ms.toDouble())
                     putMap("report", report(result.report))
+                    // Handwritten margin notes: their pictures, for the margin column.
+                    runCatching {
+                        DocxReader.extractInk(file, File(reactContext.filesDir, "sn-docx/ink/" + Integer.toHexString(file.path.hashCode())))
+                    }.onFailure { appendLog("ink pictures not read: $it") }.getOrNull()?.takeIf { it.isNotEmpty() }?.let { inks ->
+                        putMap("inks", Arguments.createMap().apply { for ((k, v) in inks) putString(k, v) })
+                    }
                     if (result.otherRevisions > 0) putInt("otherRevisions", result.otherRevisions)
                     putArray("comments", Arguments.createArray().apply {
                         for (c in result.comments) pushMap(Arguments.createMap().apply {
@@ -263,6 +269,8 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
             parent = if (m.hasKey("parent") && !m.isNull("parent")) m.getInt("parent") else null,
         )
         "uncomment" -> DocxEditor.Op.CommentDelete(m.getArray("ids")?.let { a -> (0 until a.size()).map { a.getInt(it) } }.orEmpty())
+        "ink" -> DocxEditor.Op.InkAdd(m.getInt("para"), m.getInt("at"), m.getString("id") ?: "", m.getString("png") ?: "", m.getInt("width"), m.getInt("height"))
+        "inkDelete" -> DocxEditor.Op.InkDelete(m.getInt("para"), m.getString("id") ?: "")
         "revision" -> DocxEditor.Op.Revision(m.getInt("para"), m.getString("id") ?: "", m.getBoolean("accept"))
         "list" -> DocxEditor.Op.ListItem(m.getInt("para"), m.getString("kind") ?: "none", m.getString("listId") ?: "")
             else -> throw IllegalArgumentException("unknown op ${m.getString("op")}")
@@ -611,6 +619,7 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
             r.font?.let { putString("f", it) }
             r.size?.let { putInt("sz", it) }
             r.rev?.let { putString("rv", it) }
+            r.ink?.let { putString("ink", it) }
         })
     }
 

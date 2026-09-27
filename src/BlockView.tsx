@@ -33,7 +33,7 @@ type Props = {
   scale?: number;
 };
 
-const SYMBOL: Record<string, string> = {image: '▣', note: '*', object: '◇'};
+const SYMBOL: Record<string, string> = {image: '▣', note: '*', object: '◇', ink: '✎'};
 /** The list number's box: the number sits in the list's hanging space, as in Word. */
 const LIST_LABEL_W = 28;
 
