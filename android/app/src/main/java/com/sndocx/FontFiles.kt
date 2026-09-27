@@ -113,7 +113,11 @@ object FontFiles {
         return names.flatMap { listOf("$it.ttf", "$it.otf", "$it.TTF", "$it.OTF") }
     }
 
-    /** The first existing file for [family] in [style] under [dirs], or null. */
+    /**
+     * The file for [family] in [style] under [dirs], or null: by its usual file names first,
+     * then by the family and style written inside the font files there (and one folder down,
+     * as a download's "static" folder) — so a font is found however its file is named.
+     */
     fun find(family: String, style: Int, dirs: List<String> = DIRS): File? {
         for (dir in dirs) {
             for (name in candidates(family, style)) {
@@ -121,7 +125,37 @@ object FontFiles {
                 if (f.isFile) return f
             }
         }
-        return null
+        return index(dirs)[family.lowercase() to style]
+    }
+
+    private var indexed: Pair<List<String>, Map<Pair<String, Int>, File>>? = null
+
+    /** family (lower case) and style → file, from the fonts' own name tables. Built once per session. */
+    @Synchronized
+    fun index(dirs: List<String> = DIRS): Map<Pair<String, Int>, File> {
+        indexed?.takeIf { it.first == dirs }?.let { return it.second }
+        val out = HashMap<Pair<String, Int>, File>()
+        fun scan(dir: File, depth: Int) {
+            val files = dir.listFiles() ?: return
+            for (f in files.sortedBy { it.name }) {
+                if (f.isDirectory) {
+                    if (depth > 0) scan(f, depth - 1)
+                    continue
+                }
+                if (!f.name.lowercase().let { it.endsWith(".ttf") || it.endsWith(".otf") }) continue
+                // A variable font file stands for its regular (or italic) style.
+                val i = info(f) ?: continue
+                out.putIfAbsent(i.family.lowercase() to styleIndex(i.bold, i.italic), f)
+            }
+        }
+        for (d in dirs) scan(File(d), 1)
+        indexed = dirs to out
+        return out
+    }
+
+    /** Forget the index (fonts were added). */
+    fun reindex() {
+        indexed = null
     }
 
     private fun tag(f: RandomAccessFile, at: Long): String {

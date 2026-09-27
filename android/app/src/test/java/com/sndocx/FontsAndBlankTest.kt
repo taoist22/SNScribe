@@ -111,4 +111,16 @@ class FontsAndBlankTest {
             assertNotNull(runs)
         }
     }
+
+    @Test
+    fun findsAFontByItsOwnNameWhateverTheFileIsCalled() {
+        val src = File("/System/Library/Fonts/Supplemental/Times New Roman Bold.ttf")
+        if (!src.isFile) return
+        val dir = java.nio.file.Files.createTempDirectory("fonts-index").toFile()
+        val sub = File(dir, "static").also { it.mkdirs() }
+        src.copyTo(File(sub, "SomeDownload-VariableName.ttf"))
+        FontFiles.reindex()
+        assertEquals("SomeDownload-VariableName.ttf", FontFiles.find("Times New Roman", 1, listOf(dir.path))?.name)
+        assertEquals(null, FontFiles.find("Times New Roman", 2, listOf(dir.path)))
+    }
 }

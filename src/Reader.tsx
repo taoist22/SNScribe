@@ -55,6 +55,7 @@ import {listKind, recount} from './domain/lists';
 import {PAPER_FORMATS, presetOps} from './domain/presets';
 import {docKey, parseRecovery, recoveryFor, touchRecent, type RecentDoc, type RecoveryRecord} from './domain/recovery';
 import {DocxInk, InkSurfaceView, activateInk, deactivateInk, isInkAvailable} from './services/ink';
+import {shownFont, withStandIns} from './domain/fonts';
 import {anchorAfter, findBreak, pageIndexOf, windowEnd, type Anchor, type BlockBox, type Break, type LineBox, type PageStart} from './domain/paging';
 import {countWords, fontsUsed, outline, paragraphText, wordCount, type DocxDocument, type ParagraphBlock, type Run} from './model/docx';
 import {ensureFileReadPermission, ensureFileWritePermission} from './pluginPermissions';
@@ -405,7 +406,7 @@ export function Reader(): React.JSX.Element {
     }
     log(`opened ${opened.name}: ${opened.blocks.length} blocks in ${opened.ms} ms; ${JSON.stringify(r)}`);
     try {
-      setFonts(new Set(await Docx!.fonts(fontsUsed(opened.blocks))));
+      setFonts(new Set(await Docx!.fonts(withStandIns(fontsUsed(opened.blocks)))));
     } catch (error) {
       log(`fonts failed: ${errorText(error)}`);
     }
@@ -3134,9 +3135,9 @@ export function Reader(): React.JSX.Element {
             {item(`${(selection && !typing ? now.sub : typingScript() === 'sub') ? '✓ ' : ''}Subscript  x₂`, () => scriptTool('sub'))}
             {fontChoices.map(f =>
               item(
-                `${f === cur ? '✓ ' : ''}${f}${fonts.has(f) ? '' : ' (not on this Supernote)'}`,
+                `${f === cur ? '✓ ' : ''}${f}${fonts.has(f) ? '' : shownFont(f, fonts) ? ` (shown as ${shownFont(f, fonts)})` : ' (not on this Supernote)'}`,
                 () => applyRunStyle({font: f}, `font ${f}`),
-                fonts.has(f) ? {fontFamily: f} : styles.menuMuted,
+                shownFont(f, fonts) ? {fontFamily: shownFont(f, fonts)} : styles.menuMuted,
               ),
             )}
             {item('Add font files…', addFont, styles.menuAction)}

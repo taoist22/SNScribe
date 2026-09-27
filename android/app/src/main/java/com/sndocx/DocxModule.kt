@@ -570,6 +570,8 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
     fun fonts(families: ReadableArray, promise: Promise) {
         worker.execute {
             restore()
+            // Fonts may have been copied to the device since the last look.
+            FontFiles.reindex()
             for (i in 0 until families.size()) {
                 val family = families.getString(i) ?: continue
                 if (loaded.containsKey(family)) continue

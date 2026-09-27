@@ -1,6 +1,7 @@
 import React from 'react';
 import {StyleSheet, Text, View, type LayoutChangeEvent, type TextLayoutEventData, type NativeSyntheticEvent} from 'react-native';
 import {markSelection, splitRuns} from './domain/edits';
+import {shownFont} from './domain/fonts';
 import {OBJECT, type Block, type ParagraphBlock, type Run} from './model/docx';
 import type {LineBox} from './domain/paging';
 
@@ -27,7 +28,7 @@ type Props = {
   textRef?: (t: Text | null) => void;
   /** The paragraph Text's position inside the block frame (list rows shift it right). */
   onTextFrame?: (e: LayoutChangeEvent) => void;
-  /** Font families loaded on this device; other fonts show in the default font. */
+  /** Font families loaded on this device; others show in their loaded stand-in (domain/fonts), else the default font. */
   fonts?: Set<string>;
   /** Text size factor chosen by the reader (A− / A+); 1 = the document's sizes. */
   scale?: number;
@@ -145,7 +146,7 @@ function ParagraphView({p, selection, onFrame, onLines, textRef, onTextFrame, fo
               ? {textDecorationLine: (r.u || r.rv) && (r.s || r.del) ? 'underline line-through' : r.u || r.rv ? 'underline' : 'line-through'}
               : null,
             {fontSize: r.sup || r.sub ? Math.round(runSize(r) * 0.65) : runSize(r)},
-            family(r) && fonts?.has(family(r)!) ? {fontFamily: family(r)} : null,
+            shownFont(family(r), fonts) ? {fontFamily: shownFont(family(r), fonts)} : null,
             r.sel ? styles.selected : null,
           ]}>
           {runText(r)}
