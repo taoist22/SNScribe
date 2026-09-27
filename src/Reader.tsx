@@ -1,5 +1,6 @@
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
+  Keyboard,
   PixelRatio,
   Pressable,
   ScrollView,
@@ -46,9 +47,12 @@ import {Docx, DocxText, errorText, log, nativeBuild} from './services/native';
  * through the pages already seen.
  *
  * Editing: the pen selects words (the paragraph's own TextView reports the character under
- * the pen, via DocxText); a tap places a caret and typing starts there, a double tap
- * selects a word. Typed text shows in the page as it is typed — a pending edit on top of
- * the committed ones — and becomes one undo step when typing ends. Buttons turn
+ * the pen, via DocxText); a tap places a caret, a double tap selects a word. One invisible
+ * text field keeps the keyboard (Bluetooth or on-screen, incl. handwriting) connected
+ * from the first tap until Done, and the first key decides what it does: typing at the
+ * caret, typing over or deleting the selection, Enter for a new paragraph. Typed text shows
+ * in the page as it is typed — a pending edit on top of the committed ones — and becomes
+ * one undo step when typing ends. Buttons turn
  * the selection into edits (domain/edits), one undo step per button press. The page shows
  * the original with the first `cursor` steps applied — Undo/Redo move the cursor — and Save
  * hands the same edits to the native writer, which saves a verified copy beside the
@@ -334,10 +338,8 @@ export function Reader(): React.JSX.Element {
   const penTo = useRef<{x: number; y: number} | null>(null);
   const selecting = useRef(false);
   const lastTap = useRef<{x: number; y: number; at: number} | null>(null);
-  /** Typing opens this long after a tap, unless a second tap (a double tap) cancels it. */
-  const pendingType = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const blocksNow = useRef(blocks);
-  blocksNow.current = blocks;
+  /** The invisible field that receives the keyboard. Focused on the first tap, kept until Done. */
+  const keys = useRef<TextInput>(null);
 
   const release = async () => {
     const a = penFrom.current;
@@ -354,10 +356,6 @@ export function Reader(): React.JSX.Element {
       const prev = lastTap.current;
       const doubleTap = tap && !!prev && now - prev.at < DOUBLE_TAP_MS && Math.hypot(a.x - prev.x, a.y - prev.y) < TAP_SLOP * 2;
       lastTap.current = tap && !doubleTap ? {x: a.x, y: a.y, at: now} : null;
-      if (pendingType.current) {
-        clearTimeout(pendingType.current);
-        pendingType.current = null;
-      }
       const ha = await hit(a.x, a.y);
       const hb = tap ? ha : await hit(b.x, b.y);
       if (typeof ha === 'string' || typeof hb === 'string') {
@@ -367,16 +365,12 @@ export function Reader(): React.JSX.Element {
       // Anything typed so far is committed first. The page already showed it, so the
       // positions just measured stay right.
       flushTyping();
+      keys.current?.focus();
       if (tap && !doubleTap) {
-        // One tap: a caret in the gap nearest the pen, and typing there shortly after.
-        const at = {para: ha.para, offset: ha.offset};
+        // One tap: a caret in the gap nearest the pen. The next key types there.
         setSelection(null);
-        setCaret(at);
+        setCaret({para: ha.para, offset: ha.offset});
         setStatus('');
-        pendingType.current = setTimeout(() => {
-          pendingType.current = null;
-          startInsertAt(at);
-        }, DOUBLE_TAP_MS);
         return;
       }
       // Order by the character under each end, then snap both ends to whole words.
@@ -441,9 +435,10 @@ export function Reader(): React.JSX.Element {
 
   const paragraph = (para: number) => blocks.find(b => b.type === 'p' && b.index === para) as ParagraphBlock | undefined;
 
-  const remove = () => {
+  /** Deletes the selection (joining paragraphs it spans). Returns where the caret is left. */
+  const remove = (): Pos | null => {
     if (!selection) {
-      return;
+      return null;
     }
     const ranges = rangesBetween(blocks, selection.from, selection.to);
     const ops: Op[] = [];
@@ -452,7 +447,7 @@ export function Reader(): React.JSX.Element {
       const problem = p && textEditProblem(p, r.start, r.end);
       if (!p || problem) {
         setStatus(problem ?? 'Paragraph not found.');
-        return;
+        return null;
       }
       // Within one paragraph, also tidy the space a deleted word leaves.
       const d = ranges.length === 1 ? deletionRange(paragraphText(p), r.start, r.end) : r;
@@ -465,17 +460,19 @@ export function Reader(): React.JSX.Element {
       const problem = joinProblem(blocks, para);
       if (problem) {
         setStatus(`${problem} Delete within the text on one side of it.`);
-        return;
+        return null;
       }
       ops.push({op: 'join', para});
     }
     if (ops.length === 0) {
-      return;
+      return null;
     }
     commit(ops, 'delete');
     setSelection(null);
-    const start = ops[0].op === 'text' ? ops[0].start : 0;
-    setCaret(ranges.length ? {para: ranges[0].para, offset: start} : null);
+    const first0 = ops[0];
+    const at = {para: first, offset: first0.op === 'text' && first0.para === first ? first0.start : paragraphText(paragraph(first)!).length};
+    setCaret(at);
+    return at;
   };
 
   const startReplace = () => {
@@ -496,18 +493,7 @@ export function Reader(): React.JSX.Element {
     }
     setInput('');
     setTyping({mode: 'replace', range: r});
-  };
-
-  /** Typing at a caret. Reads the latest blocks: it may run after an edit was committed. */
-  const startInsertAt = (at: Pos) => {
-    const p = blocksNow.current.find(b => b.type === 'p' && b.index === at.para) as ParagraphBlock | undefined;
-    const problem = p ? textEditProblem(p, at.offset, at.offset) : 'Paragraph not found.';
-    if (problem) {
-      setStatus(problem);
-      return;
-    }
-    setInput('');
-    setTyping({mode: 'insert', at});
+    keys.current?.focus();
   };
 
   /** Commits what was typed (one undo step) and ends typing. */
@@ -542,22 +528,38 @@ export function Reader(): React.JSX.Element {
     setTyping({mode: 'insert', at: {para: at.para + 1, offset: 0}});
   };
 
-  /** Done: commit and leave the caret after the new text. */
+  /** Done: commit, leave the caret after the new text, and put the keyboard away. */
   const done = () => {
     const at = caretAt;
     flushTyping();
     setCaret(at);
+    keys.current?.blur();
+    Keyboard.dismiss();
   };
 
+  /** Cancel: drop what was typed; the caret goes back to where typing began. */
   const cancelTyping = () => {
+    const at = typing ? {para: typedRange(typing).para, offset: typedRange(typing).start} : caret;
     setTyping(null);
     setInput('');
-    setCaret(null);
+    setCaret(at);
   };
 
-  /** Backspace with nothing typed: delete the selection being replaced, or the character before the caret. */
+  /**
+   * Backspace the text field can't handle itself (nothing typed in it): deletes the
+   * selection, or the character before the caret, or joins onto the previous paragraph.
+   */
   const backspace = () => {
-    if (!typing || input !== '') {
+    if (input !== '') {
+      return;
+    }
+    if (!typing) {
+      if (selection) {
+        remove();
+      } else if (caret) {
+        setTyping({mode: 'insert', at: caret});
+        backspaceAt(caret);
+      }
       return;
     }
     if (typing.mode === 'replace') {
@@ -567,7 +569,11 @@ export function Reader(): React.JSX.Element {
       setTyping({mode: 'insert', at: {para: r.para, offset: r.start}});
       return;
     }
-    const at = typing.at;
+    backspaceAt(typing.at);
+  };
+
+  /** Backspace at a caret while typing: the character before it, or a paragraph join. */
+  const backspaceAt = (at: Pos) => {
     const p = paragraph(at.para);
     if (!p) {
       return;
@@ -591,6 +597,67 @@ export function Reader(): React.JSX.Element {
     }
     commit([{op: 'text', para: at.para, start: at.offset - 1, end: at.offset, text: ''}], 'backspace');
     setTyping({mode: 'insert', at: {para: at.para, offset: at.offset - 1}});
+  };
+
+  /** Every change of the invisible field: the first key decides what it does. */
+  const onKeysText = (text: string) => {
+    if (typing) {
+      setInput(text);
+      return;
+    }
+    if (text === '') {
+      return;
+    }
+    if (selection) {
+      const ranges = rangesBetween(blocks, selection.from, selection.to);
+      const r = ranges[0];
+      const p = r && paragraph(r.para);
+      if (ranges.length === 1 && p && !textEditProblem(p, r.start, r.end)) {
+        setTyping({mode: 'replace', range: r}); // type over the selection
+        setInput(text);
+        return;
+      }
+      const at = remove(); // across paragraphs: delete (and join), then type where it leaves off
+      if (at) {
+        setTyping({mode: 'insert', at});
+        setInput(text);
+      }
+      return;
+    }
+    if (caret) {
+      const p = paragraph(caret.para);
+      const problem = p ? textEditProblem(p, caret.offset, caret.offset) : 'Paragraph not found.';
+      if (problem) {
+        setStatus(problem);
+        return;
+      }
+      setTyping({mode: 'insert', at: caret});
+      setInput(text);
+    }
+  };
+
+  /** Enter: a new paragraph at the caret (replacing the selection, if any). */
+  const onEnter = () => {
+    if (typing) {
+      enter();
+      return;
+    }
+    let at = caret;
+    if (selection) {
+      at = remove();
+    } else if (at) {
+      const p = paragraph(at.para);
+      const problem = p ? splitProblem(p, at.offset) : 'Paragraph not found.';
+      if (problem) {
+        setStatus(problem);
+        return;
+      }
+    }
+    if (!at) {
+      return;
+    }
+    commit([{op: 'split', para: at.para, offset: at.offset}], 'new paragraph');
+    setCaret({para: at.para + 1, offset: 0});
   };
 
   const undo = () => {
@@ -678,6 +745,23 @@ export function Reader(): React.JSX.Element {
 
   return (
     <View style={styles.root}>
+      {doc && !readOnly ? (
+        // Invisible: it only receives the keystrokes, which show in the page itself. Always
+        // mounted, so selecting with the pen or pressing a button never drops the keyboard.
+        <TextInput
+          ref={keys}
+          style={styles.hiddenInput}
+          value={input}
+          onChangeText={onKeysText}
+          onKeyPress={e => e.nativeEvent.key === 'Backspace' && backspace()}
+          blurOnSubmit={false}
+          onSubmitEditing={onEnter}
+          autoCapitalize="none"
+          autoCorrect={false}
+          spellCheck={false}
+          caretHidden
+        />
+      ) : null}
       <View style={styles.header}>
         {button('Open', open)}
         <Text allowFontScaling={false} style={styles.title} numberOfLines={1}>
@@ -696,20 +780,6 @@ export function Reader(): React.JSX.Element {
       <View style={styles.bar}>
         {doc && typing && !contents ? (
           <View style={styles.typing}>
-            {/* Invisible: it only receives the keystrokes, which show in the page itself. */}
-            <TextInput
-              style={styles.hiddenInput}
-              value={input}
-              onChangeText={setInput}
-              onKeyPress={e => e.nativeEvent.key === 'Backspace' && backspace()}
-              autoFocus
-              blurOnSubmit={false}
-              onSubmitEditing={enter}
-              autoCapitalize="none"
-              autoCorrect={false}
-              spellCheck={false}
-              caretHidden
-            />
             <Text allowFontScaling={false} style={styles.caretHint} numberOfLines={1}>
               {typing.mode === 'insert' ? 'Typing — Enter for a new paragraph; tap elsewhere or Done to finish.' : 'Type to replace the selection.'}
             </Text>
@@ -732,9 +802,9 @@ export function Reader(): React.JSX.Element {
         ) : doc && caret && !contents ? (
           <View style={styles.caretRow}>
             <Text allowFontScaling={false} style={styles.caretHint}>
-              {'Caret placed — start typing.'}
+              {'Type to insert at the caret.'}
             </Text>
-            {button('✕', () => setCaret(null))}
+            {button('Done', done)}
           </View>
         ) : (
           <Text allowFontScaling={false} style={styles.statusText} numberOfLines={2}>
