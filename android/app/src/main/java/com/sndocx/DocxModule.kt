@@ -119,6 +119,18 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
                     putDouble("ms", ms.toDouble())
                     putMap("report", report(result.report))
                     if (result.otherRevisions > 0) putInt("otherRevisions", result.otherRevisions)
+                    putArray("comments", Arguments.createArray().apply {
+                        for (c in result.comments) pushMap(Arguments.createMap().apply {
+                            putString("id", c.id)
+                            putString("author", c.author)
+                            putString("initials", c.initials)
+                            putString("date", c.date)
+                            putString("text", c.text)
+                            c.parent?.let { putString("parent", it) }
+                            if (c.done) putBoolean("done", true)
+                            if (c.pictures > 0) putInt("pictures", c.pictures)
+                        })
+                    })
                     result.page?.let { pg ->
                         putMap("page", Arguments.createMap().apply {
                             putInt("width", pg.width); putInt("height", pg.height)
@@ -240,7 +252,18 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
             )
             "link" -> DocxEditor.Op.Link(m.getInt("para"), m.getInt("start"), m.getInt("end"), m.getString("url") ?: "")
             "unlink" -> DocxEditor.Op.Unlink(m.getInt("para"), m.getInt("start"), m.getInt("end"))
-            "revision" -> DocxEditor.Op.Revision(m.getInt("para"), m.getString("id") ?: "", m.getBoolean("accept"))
+            "comment" -> DocxEditor.Op.CommentAdd(
+            id = m.getInt("id"),
+            fromPara = m.getInt("fromPara"), from = m.getInt("from"),
+            toPara = m.getInt("toPara"), to = m.getInt("to"),
+            text = m.getString("text") ?: "",
+            author = m.getString("author") ?: "",
+            initials = m.getString("initials") ?: "",
+            date = m.getString("date") ?: "",
+            parent = if (m.hasKey("parent") && !m.isNull("parent")) m.getInt("parent") else null,
+        )
+        "uncomment" -> DocxEditor.Op.CommentDelete(m.getArray("ids")?.let { a -> (0 until a.size()).map { a.getInt(it) } }.orEmpty())
+        "revision" -> DocxEditor.Op.Revision(m.getInt("para"), m.getString("id") ?: "", m.getBoolean("accept"))
         "list" -> DocxEditor.Op.ListItem(m.getInt("para"), m.getString("kind") ?: "none", m.getString("listId") ?: "")
             else -> throw IllegalArgumentException("unknown op ${m.getString("op")}")
         }
@@ -626,6 +649,13 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
                             putArray("runs", runs(v.runs))
                         }
                         if (v.move) putBoolean("move", true)
+                    })
+                })
+                if (b.marks.isNotEmpty()) putArray("marks", Arguments.createArray().apply {
+                    for (k in b.marks) pushMap(Arguments.createMap().apply {
+                        putString("id", k.id)
+                        putString("kind", k.kind)
+                        putInt("at", k.at)
                     })
                 })
             }

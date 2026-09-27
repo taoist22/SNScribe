@@ -21,6 +21,7 @@ import {
   comparePos,
   deletionRange,
   expectedTexts,
+  commentsAfter,
   formatOps,
   fromShown,
   headerFooterAfter,
@@ -28,11 +29,13 @@ import {
   linkProblem,
   linkSpan,
   linkUrl,
+  nextCommentId,
   pageAfter,
   rangesBetween,
   splitProblem,
   styleOps,
   textEditProblem,
+  threadIds,
   toShown,
   wordAround,
   type FormatProp,
@@ -91,7 +94,7 @@ type Typing = {mode: 'insert'; at: Pos} | {mode: 'replace'; range: Range};
 type HfLine = {text: string; align: 'left' | 'center' | 'right'; page: boolean};
 
 type Menu =
-  | 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count' | 'page' | 'preset' | 'header' | 'link'
+  | 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count' | 'page' | 'preset' | 'header' | 'link' | 'thread' | 'comment'
   | 'recent' | 'versions' | 'recover';
 
 /** Drop-down menu width; menus are kept inside the screen. */
@@ -129,6 +132,12 @@ export function Reader(): React.JSX.Element {
   /** Header & footer form: each line as edited, and as it was when the form opened. */
   const [hfForm, setHfForm] = useState<{header: HfLine; footer: HfLine; was: {header: HfLine; footer: HfLine}} | null>(null);
   const [linkForm, setLinkForm] = useState<{para: number; start: number; end: number; url: string} | null>(null);
+  /** The comment thread open in the panel (its first comment's id). */
+  const [thread, setThread] = useState<string | null>(null);
+  const [replyText, setReplyText] = useState('');
+  const [commentForm, setCommentForm] = useState<{fromPara: number; from: number; toPara: number; to: number; text: string; quote: string} | null>(null);
+  /** The name comments are signed with (remembered). */
+  const [author, setAuthor] = useState('');
   /** Where New puts the document, and the folder being browsed to choose it. */
   const [newFolder, setNewFolder] = useState(DOCUMENTS);
   const [browse, setBrowse] = useState<{path: string; folders?: string[]; error?: string} | null>(null);
@@ -177,9 +186,12 @@ export function Reader(): React.JSX.Element {
       const refused = await log(`DOCX opened: NATIVE_BUILD=${nativeBuild()} read=${canRead} write=${canWrite} log=${name}`);
       // Remembered between sessions: text size, New's folder, recent documents.
       try {
-        const saved = JSON.parse((await Docx?.load('settings')) ?? '{}') as {scaleAt?: number; newFolder?: string; lastName?: string};
+        const saved = JSON.parse((await Docx?.load('settings')) ?? '{}') as {scaleAt?: number; newFolder?: string; lastName?: string; author?: string};
         if (typeof saved.lastName === 'string') {
           setLastName(saved.lastName);
+        }
+        if (typeof saved.author === 'string') {
+          setAuthor(saved.author);
         }
         if (typeof saved.scaleAt === 'number') {
           setScaleAt(Math.max(0, Math.min(SCALES.length - 1, saved.scaleAt)));
@@ -531,7 +543,9 @@ export function Reader(): React.JSX.Element {
   // The page map belongs to one layout: the document with its edits, the text size, and
   // the page's size. It is recounted a moment after that settles, and not while typing.
   // Includes what is being typed: the count follows typing once it pauses.
-  const hasNotes = blocks.some(b => b.type === 'p' && !!b.revs?.length);
+  const comments = useMemo(() => commentsAfter(doc?.comments, applied), [doc, applied]);
+  const hasChanges = blocks.some(b => b.type === 'p' && !!b.revs?.length);
+  const hasNotes = hasChanges || blocks.some(b => b.type === 'p' && !!b.marks?.length);
   const marginOn = showMargin && hasNotes && !showPages && !contents;
   // The text column: the page less the margin column when it shows.
   const textW = marginOn ? Math.max(200, pageW - MARGIN_W - MARGIN_GAP) : pageW;
@@ -910,6 +924,102 @@ export function Reader(): React.JSX.Element {
   };
 
   const nothingSelected = () => setStatus('Select some text first, or tap inside a word.');
+
+  // ---------------------------------------------------------------- comments
+
+  const initialsOf = (name: string) =>
+    name
+      .split(/\s+/)
+      .filter(Boolean)
+      .map(w => w[0].toUpperCase())
+      .join('')
+      .slice(0, 3);
+
+  /** Comment…: on the selection, or at the caret. */
+  const startComment = () => {
+    const ranges = !typing && selection ? rangesBetween(blocks, selection.from, selection.to) : [];
+    let form: {fromPara: number; from: number; toPara: number; to: number} | null = null;
+    if (ranges.length > 0) {
+      const a = ranges[0];
+      const z = ranges[ranges.length - 1];
+      form = {fromPara: a.para, from: a.start, toPara: z.para, to: z.end};
+    } else if (caretAt) {
+      flushTyping();
+      form = {fromPara: caretAt.para, from: caretAt.offset, toPara: caretAt.para, to: caretAt.offset};
+    }
+    if (!form) {
+      setMenu(null);
+      setStatus('Select the words to comment on, or tap where the comment goes.');
+      return;
+    }
+    const quote = ranges.map(r => textOf(r.para).slice(r.start, r.end)).join(' ');
+    setCommentForm({...form, text: '', quote});
+    setMenu('comment');
+  };
+
+  const addComment = () => {
+    if (!commentForm) {
+      return;
+    }
+    const text = commentForm.text.trim();
+    if (!text) {
+      setStatus('Write the comment first.');
+      return;
+    }
+    const {quote: _q, text: _t, ...at} = commentForm;
+    const name = author.trim();
+    commit(
+      [{op: 'comment', para: -1, id: nextCommentId(comments), ...at, text, author: name, initials: initialsOf(name), date: new Date().toISOString().replace(/\.\d+Z$/, 'Z')}],
+      'comment',
+    );
+    setCommentForm(null);
+    setMenu(null);
+    setStatus('Comment added. It is saved with the document as a Word comment.');
+  };
+
+  const openThread = (id: string) => {
+    setThread(id);
+    setReplyText('');
+    setMenu('thread');
+  };
+
+  const reply = () => {
+    const text = replyText.trim();
+    if (!thread || !text) {
+      return;
+    }
+    const name = author.trim();
+    commit(
+      [
+        {
+          op: 'comment',
+          para: -1,
+          id: nextCommentId(comments),
+          fromPara: 0,
+          from: 0,
+          toPara: 0,
+          to: 0,
+          text,
+          author: name,
+          initials: initialsOf(name),
+          date: new Date().toISOString().replace(/\.\d+Z$/, 'Z'),
+          parent: Number(thread),
+        },
+      ],
+      'reply',
+    );
+    setReplyText('');
+  };
+
+  const deleteThread = () => {
+    if (!thread) {
+      return;
+    }
+    commit([{op: 'uncomment', para: -1, ids: threadIds(comments, thread)}], 'delete comment');
+    setThread(null);
+    setMenu(null);
+    setStatus('Comment deleted. Undo brings it back.');
+  };
 
   // ---------------------------------------------------------------- tracked changes
 
@@ -1814,8 +1924,8 @@ export function Reader(): React.JSX.Element {
 
   // Settings are remembered between sessions.
   useEffect(() => {
-    Docx?.store('settings', JSON.stringify({scaleAt, newFolder, lastName}));
-  }, [scaleAt, newFolder, lastName]);
+    Docx?.store('settings', JSON.stringify({scaleAt, newFolder, lastName, author}));
+  }, [scaleAt, newFolder, lastName, author]);
 
   // The page follows the caret when it moves (typing, arrows) — not when the page is turned.
   const followCaret = useRef(false);
@@ -1914,13 +2024,35 @@ export function Reader(): React.JSX.Element {
 
   /** The margin: a card beside the line of each tracked change on this page. */
   const marginColumn = () => {
-    type Card = {key: string; y: number; para: number; id: string; kind: 'ins' | 'del'; author: string; text: string; move?: boolean};
+    type Card = {key: string; y: number; para: number; id: string; kind: 'ins' | 'del' | 'comment'; author: string; text: string; move?: boolean; replies?: number};
     const cards: Card[] = [];
+    const threads = new Set(comments.filter(c => !c.parent).map(c => c.id));
     window.forEach((b, i) => {
-      if (b.type !== 'p' || !b.revs) {
+      if (b.type !== 'p') {
         return;
       }
-      for (const v of b.revs) {
+      for (const m of b.marks ?? []) {
+        // A thread's card sits at its start (or, with no range, at its reference mark).
+        const hasStart = (b.marks ?? []).some(x => x.id === m.id && x.kind === 'start');
+        if (!threads.has(m.id) || (m.kind !== 'start' && !(m.kind === 'ref' && !hasStart))) {
+          continue;
+        }
+        const c = comments.find(x => x.id === m.id)!;
+        const y = yOf(i, m.at);
+        if (y !== null && y >= -4 && y < visible) {
+          cards.push({
+            key: `c:${m.id}`,
+            y: Math.max(0, y),
+            para: b.index,
+            id: m.id,
+            kind: 'comment',
+            author: c.author,
+            text: c.text || (c.pictures ? '✎ handwritten note' : ''),
+            replies: threadIds(comments, m.id).length - 1,
+          });
+        }
+      }
+      for (const v of b.revs ?? []) {
         let at = v.at ?? 0;
         let text = (v.runs ?? []).map(r => r.t).join('');
         if (v.kind === 'ins') {
@@ -1958,7 +2090,19 @@ export function Reader(): React.JSX.Element {
     }
     return (
       <View style={[styles.margin, {height: pageH, left: PAD + textW + MARGIN_GAP, top: PAD}]}>
-        {placed.map(c => (
+        {placed.map(c =>
+          c.kind === 'comment' ? (
+            <Pressable key={c.key} onPress={once(`thread:${c.id}`, () => openThread(c.id))} style={[styles.card, styles.commentCard, {top: c.top}]}>
+              <View style={styles.cardText}>
+                <Text allowFontScaling={false} style={styles.cardHead} numberOfLines={1}>
+                  {`Comment · ${c.author || 'Unknown'}${c.replies ? `  ·  ${c.replies} repl${c.replies === 1 ? 'y' : 'ies'}` : ''}`}
+                </Text>
+                <Text allowFontScaling={false} style={styles.cardBody} numberOfLines={2}>
+                  {c.text}
+                </Text>
+              </View>
+            </Pressable>
+          ) : (
           <View key={c.key} style={[styles.card, {top: c.top}]}>
             <View style={styles.cardText}>
               <Text allowFontScaling={false} style={styles.cardHead} numberOfLines={1}>
@@ -1979,7 +2123,8 @@ export function Reader(): React.JSX.Element {
               </Text>
             </Pressable>
           </View>
-        ))}
+          ),
+        )}
         {hidden > 0 ? (
           <Text allowFontScaling={false} style={[styles.cardMore, {top: pageH - 26}]}>
             {`+${hidden} more on this page (turn the page or hide some by reviewing)`}
@@ -2327,6 +2472,75 @@ export function Reader(): React.JSX.Element {
           </View>
         );
       }
+      case 'comment':
+        return commentForm ? (
+          <View style={styles.nameForm}>
+            <Text allowFontScaling={false} style={styles.menuText} numberOfLines={2}>
+              {commentForm.quote ? `Comment on “${commentForm.quote.slice(0, 80)}”` : 'Comment at the caret'}
+            </Text>
+            <TextInput
+              style={[styles.nameInput, styles.commentInput]}
+              value={commentForm.text}
+              onChangeText={text => setCommentForm(f => (f ? {...f, text} : f))}
+              autoFocus
+              multiline
+              allowFontScaling={false}
+              placeholder="Write or type the comment"
+            />
+            <View style={[styles.row, styles.presetName]}>
+              <Text allowFontScaling={false} style={styles.menuText}>
+                {'Your name'}
+              </Text>
+              <TextInput style={styles.nameInput} value={author} onChangeText={setAuthor} allowFontScaling={false} autoCorrect={false} />
+            </View>
+            <View style={styles.row}>
+              {button('Add comment', addComment)}
+              {button('Cancel', () => {
+                setCommentForm(null);
+                setMenu(null);
+              })}
+            </View>
+          </View>
+        ) : null;
+      case 'thread': {
+        const ids = thread ? threadIds(comments, thread).map(String) : [];
+        const items = comments.filter(c => ids.includes(c.id));
+        return (
+          <View style={styles.nameForm}>
+            {items.map((c, i) => (
+              <View key={c.id} style={i > 0 ? styles.threadReply : null}>
+                <Text allowFontScaling={false} style={styles.cardHead}>
+                  {`${c.author || 'Unknown'}${c.date ? `  ·  ${c.date.slice(0, 10)}` : ''}`}
+                </Text>
+                <Text allowFontScaling={false} style={styles.menuText}>
+                  {c.text || (c.pictures ? '' : '(empty)')}
+                </Text>
+                {c.pictures ? (
+                  <Text allowFontScaling={false} style={styles.panelNote}>
+                    {'✎ A picture or handwritten note — it shows in Word.'}
+                  </Text>
+                ) : null}
+              </View>
+            ))}
+            <TextInput
+              style={[styles.nameInput, styles.commentInput]}
+              value={replyText}
+              onChangeText={setReplyText}
+              multiline
+              allowFontScaling={false}
+              placeholder="Reply"
+            />
+            <View style={styles.row}>
+              {button('Reply', reply, !replyText.trim())}
+              {button('Delete comment', deleteThread)}
+              {button('Close', () => {
+                setThread(null);
+                setMenu(null);
+              })}
+            </View>
+          </View>
+        );
+      }
       case 'link':
         return linkForm ? (
           <View style={styles.nameForm}>
@@ -2384,7 +2598,7 @@ export function Reader(): React.JSX.Element {
             {item('Word count…', () => setMenu('count'))}
             {item('Go to start', () => goTo({block: 0, offset: 0}))}
             {item('Go to end', goToEnd)}
-            {hasNotes ? item(showMargin ? 'Hide margin (changes)' : 'Show margin (changes)', () => setShowMargin(v => !v)) : null}
+            {hasNotes ? item(showMargin ? 'Hide margin (comments, changes)' : 'Show margin (comments, changes)', () => setShowMargin(v => !v)) : null}
           </>
         );
       case 'folder':
@@ -2455,11 +2669,12 @@ export function Reader(): React.JSX.Element {
             {item('Paste', pasteFromMenu)}
             {item('Delete', deleteFromMenu)}
             {item('Link…', startLink)}
-            {hasNotes ? item('Accept all changes', () => {
+            {item('Comment…', startComment)}
+            {hasChanges ? item('Accept all changes', () => {
               setMenu(null);
               review(-1, '*', true);
             }) : null}
-            {hasNotes ? item('Reject all changes', () => {
+            {hasChanges ? item('Reject all changes', () => {
               setMenu(null);
               review(-1, '*', false);
             }) : null}
@@ -2825,6 +3040,9 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff',
   },
   cardText: {flex: 1},
+  commentCard: {borderStyle: 'dashed', paddingRight: 8},
+  commentInput: {height: 110, textAlignVertical: 'top', paddingTop: 8, marginVertical: 8},
+  threadReply: {marginTop: 10, paddingLeft: 14, borderLeftWidth: 2, borderColor: '#000'},
   cardHead: {color: '#000', fontSize: 14, fontWeight: '700'},
   cardBody: {color: '#333', fontSize: 15, marginTop: 2},
   cardInserted: {textDecorationLine: 'underline'},

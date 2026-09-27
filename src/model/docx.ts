@@ -42,8 +42,25 @@ export type Revision = {
   move?: boolean;
 };
 
+/** A comment anchor at text offset `at`: where its range starts, ends, and its reference mark. */
+export type Mark = {id: string; kind: 'start' | 'end' | 'ref'; at: number};
+
+/** A Word comment. `parent`: the comment it replies to. `pictures`: pictures in it (a handwritten note). */
+export type Comment = {
+  id: string;
+  author: string;
+  initials: string;
+  date: string;
+  text: string;
+  parent?: string;
+  done?: boolean;
+  pictures?: number;
+};
+
 export type ParagraphBlock = {
   type: 'p';
+  /** Comment anchors in its text. */
+  marks?: Mark[];
   /** Tracked insertions and deletions in its text, in reading order. */
   revs?: Revision[];
   /** Ordinal among the body's top-level paragraphs: the address edits use. */
@@ -108,6 +125,7 @@ export type DocxDocument = {
   page?: PageSetup;
   /** Tracked formatting and paragraph changes DOCX can't review; they stay as they are. */
   otherRevisions?: number;
+  comments?: Comment[];
   /**
    * The default header and footer of the last section, as DOCX can edit them. `other`: it
    * also has a logo or table, which stays; text and alignment are then of its page-number line.

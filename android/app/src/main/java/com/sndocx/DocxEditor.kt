@@ -117,6 +117,26 @@ object DocxEditor {
          * −1 with [id] "*" does every text insertion and deletion in the document's paragraphs.
          */
         data class Revision(val para: Int, val id: String, val accept: Boolean) : Op()
+
+        /**
+         * A new comment [id] on the text from ([fromPara], [from]) to ([toPara], [to]), or a
+         * reply to comment [parent] (its range is the parent's; the positions are ignored).
+         */
+        data class CommentAdd(
+            val id: Int,
+            val fromPara: Int,
+            val from: Int,
+            val toPara: Int,
+            val to: Int,
+            val text: String,
+            val author: String,
+            val initials: String,
+            val date: String,
+            val parent: Int? = null,
+        ) : Op()
+
+        /** Deletes these comments (a thread is its comment and all its replies). */
+        data class CommentDelete(val ids: List<Int>) : Op()
     }
 
     data class Saved(val dest: File, val changedParts: List<String>, val notes: List<String>)
@@ -340,6 +360,14 @@ object DocxEditor {
                 headerFooter(document, pkg, op, notes)
                 continue
             }
+            if (op is Op.CommentAdd) {
+                addComment(document, paragraphs, pkg, op, notes)
+                continue
+            }
+            if (op is Op.CommentDelete) {
+                deleteComments(document, pkg, op, notes)
+                continue
+            }
             if (op is Op.Revision) {
                 // Text changes, as plain splices, for verify.
                 val targets = if (op.para < 0) paragraphs.indices.toList() else listOf(op.para)
@@ -366,7 +394,7 @@ object DocxEditor {
                 is Op.ParaProps -> op.para
                 is Op.Link -> op.para
                 is Op.Unlink -> op.para
-                is Op.PageSetup, is Op.Defaults, is Op.HeaderFooter, is Op.Revision -> error("unreachable")
+                is Op.PageSetup, is Op.Defaults, is Op.HeaderFooter, is Op.Revision, is Op.CommentAdd, is Op.CommentDelete -> error("unreachable")
             }
             val p = checkNotNull(paragraphs.getOrNull(index)) { "no paragraph $index for $op" }
             when (op) {
@@ -380,7 +408,7 @@ object DocxEditor {
                 is Op.ParaProps -> paraProps(document, p, op, notes)
                 is Op.Link -> link(document, p, op, pkg, styleIds, notes)
                 is Op.Unlink -> unlink(p, op, notes)
-                is Op.PageSetup, is Op.Defaults, is Op.HeaderFooter, is Op.Revision -> {}
+                is Op.PageSetup, is Op.Defaults, is Op.HeaderFooter, is Op.Revision, is Op.CommentAdd, is Op.CommentDelete -> {}
             }
             // Splits and joins renumber the paragraphs after them.
             if (op is Op.Split || op is Op.Join) paragraphs = bodyParagraphs(document)
@@ -856,6 +884,258 @@ object DocxEditor {
             }
             offset += len
         }
+    }
+
+    // ---------------------------------------------------------------- comments
+
+    private const val COMMENTS_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"
+    private const val COMMENTS_EXT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml"
+    private const val REL_COMMENTS_IDS = "http://schemas.microsoft.com/office/2016/09/relationships/commentsIds"
+    private const val REL_COMMENTS_EXTENSIBLE = "http://schemas.microsoft.com/office/2018/08/relationships/commentsExtensible"
+    private const val W16CID = "http://schemas.microsoft.com/office/word/2016/wordml/cid"
+    private const val W16CEX = "http://schemas.microsoft.com/office/word/2018/wordml/cex"
+    private const val XMLNS = "http://www.w3.org/2000/xmlns/"
+    private const val MC = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+
+    private fun newPart(qualifiedRoot: String, ns: String, extra: List<Pair<String, String>>, ignorable: String): Document {
+        val doc = javax.xml.parsers.DocumentBuilderFactory.newInstance().apply { isNamespaceAware = true }.newDocumentBuilder().newDocument()
+        val root = doc.createElementNS(ns, qualifiedRoot)
+        for ((prefix, uri) in extra) root.setAttributeNS(XMLNS, "xmlns:$prefix", uri)
+        root.setAttributeNS(XMLNS, "xmlns:mc", MC)
+        root.setAttributeNS(MC, "mc:Ignorable", ignorable)
+        doc.appendChild(root)
+        return doc
+    }
+
+    /** Declares prefix→uri on the root when missing, and lists it as ignorable (Word 2010+ markup). */
+    private fun declare(root: Element, prefix: String, uri: String) {
+        if (root.getAttributeNodeNS(XMLNS, prefix) == null) root.setAttributeNS(XMLNS, "xmlns:$prefix", uri)
+        if (root.getAttributeNodeNS(XMLNS, "mc") == null) root.setAttributeNS(XMLNS, "xmlns:mc", MC)
+        val ignorable = root.getAttributeNS(MC, "Ignorable").split(' ').filter { it.isNotEmpty() }
+        if (prefix !in ignorable) root.setAttributeNS(MC, "mc:Ignorable", (ignorable + prefix).joinToString(" "))
+    }
+
+    private fun commentsPath(pkg: Pkg, create: Boolean): String? {
+        DocxReader.relTarget(pkg.part(DocxReader.DOCUMENT_RELS), DocxReader.REL_COMMENTS)?.takeIf { pkg.exists(it) }?.let { return it }
+        if (!create) return null
+        val name = "word/comments.xml"
+        check(!pkg.exists(name)) { "unreadable $name" }
+        pkg.add(
+            name,
+            newPart("w:comments", W, listOf("w" to W, "r" to R_NS, "w14" to DocxReader.W14, "w15" to DocxReader.W15), "w14 w15"),
+            COMMENTS_TYPE,
+            DocxReader.REL_COMMENTS,
+        )
+        return name
+    }
+
+    private fun extendedPath(pkg: Pkg, create: Boolean): String? {
+        DocxReader.relTarget(pkg.part(DocxReader.DOCUMENT_RELS), DocxReader.REL_COMMENTS_EXTENDED)?.takeIf { pkg.exists(it) }?.let { return it }
+        if (!create) return null
+        val name = "word/commentsExtended.xml"
+        check(!pkg.exists(name)) { "unreadable $name" }
+        pkg.add(name, newPart("w15:commentsEx", DocxReader.W15, listOf("w15" to DocxReader.W15), "w15"), COMMENTS_EXT_TYPE, DocxReader.REL_COMMENTS_EXTENDED)
+        return name
+    }
+
+    /** A paragraph id (8 hex digits below 0x80000000) not used in [taken]; the same inputs give the same id. */
+    private fun paraId(seed: Int, taken: MutableSet<String>): String {
+        var n = (seed.toLong() * 2654435761L and 0x7FFFFFFFL)
+        while (true) {
+            val id = String.format("%08X", n.coerceAtLeast(1))
+            if (taken.add(id)) return id
+            n = (n + 1) and 0x7FFFFFFFL
+        }
+    }
+
+    private fun usedParaIds(vararg docs: Document?): MutableSet<String> {
+        val out = HashSet<String>()
+        for (d in docs) {
+            val all = d?.getElementsByTagNameNS("*", "p") ?: continue
+            for (i in 0 until all.length) (all.item(i) as Element).getAttributeNS(DocxReader.W14, "paraId").takeIf { it.isNotEmpty() }?.let { out.add(it) }
+        }
+        return out
+    }
+
+    private fun byId(doc: Document, tag: String, id: String): List<Element> {
+        val all = doc.getElementsByTagNameNS(W, tag)
+        return (0 until all.length).map { all.item(it) as Element }.filter { it.getAttributeNS(W, "id") == id }
+    }
+
+    private fun referenceRun(document: Document, id: String): Element {
+        val r = document.createElementNS(W, "w:r")
+        val ref = document.createElementNS(W, "w:commentReference")
+        ref.setAttributeNS(W, "w:id", id)
+        r.appendChild(ref)
+        return r
+    }
+
+    /** Puts [node] at character [offset] of [p]: before the text there ([before]) or after the text that ends there. */
+    private fun placeAt(p: Element, offset: Int, node: Element, before: Boolean) {
+        splitAt(p, offset)
+        var pos = 0
+        var after: Element? = null
+        for (seg in DocxReader.segments(p)) {
+            val len = seg.length
+            if (len == 0) continue
+            if (before && pos == offset) {
+                seg.el.parentNode.insertBefore(node, seg.el)
+                return
+            }
+            pos += len
+            if (pos == offset) after = seg.el
+            if (!before && pos == offset) {
+                seg.el.parentNode.insertBefore(node, seg.el.nextSibling)
+                return
+            }
+            if (pos > offset) break
+        }
+        if (after != null) {
+            after.parentNode.insertBefore(node, after.nextSibling)
+        } else if (offset == 0) {
+            // An empty paragraph (or a start before everything): right after its properties.
+            val pPr = child(p, "pPr")
+            p.insertBefore(node, pPr?.nextSibling ?: p.firstChild)
+        } else {
+            p.appendChild(node)
+        }
+    }
+
+    /**
+     * Adds a comment: its text in comments.xml, and in the document a range around
+     * [from, to) with its reference mark after. A reply ([Op.CommentAdd.parent]) shares its
+     * parent's range and is threaded to it in commentsExtended.
+     */
+    private fun addComment(document: Document, paragraphs: List<Element>, pkg: Pkg, op: Op.CommentAdd, notes: MutableList<String>) {
+        val id = op.id.toString()
+        val cPath = commentsPath(pkg, create = true)!!
+        val comments = pkg.part(cPath)!!
+        check(byId(comments, "comment", id).isEmpty()) { "comment $id already exists" }
+        val croot = comments.documentElement
+        declare(croot, "w14", DocxReader.W14)
+        pkg.touch(cPath)
+        val taken = usedParaIds(comments, document)
+
+        val c = comments.createElementNS(W, "w:comment")
+        c.setAttributeNS(W, "w:id", id)
+        c.setAttributeNS(W, "w:author", op.author.ifBlank { "DOCX" })
+        c.setAttributeNS(W, "w:date", op.date)
+        c.setAttributeNS(W, "w:initials", op.initials)
+        val lines = op.text.split('\n').ifEmpty { listOf("") }
+        lines.forEachIndexed { i, line ->
+            val p = comments.createElementNS(W, "w:p")
+            p.setAttributeNS(DocxReader.W14, "w14:paraId", paraId(op.id * 31 + i, taken))
+            p.setAttributeNS(DocxReader.W14, "w14:textId", "77777777")
+            if (i == 0) {
+                val r = comments.createElementNS(W, "w:r")
+                r.appendChild(comments.createElementNS(W, "w:annotationRef"))
+                p.appendChild(r)
+            }
+            if (line.isNotEmpty()) {
+                val r = comments.createElementNS(W, "w:r")
+                val t = comments.createElementNS(W, "w:t")
+                t.setAttributeNS(XMLConstants.XML_NS_URI, "xml:space", "preserve")
+                t.textContent = line
+                r.appendChild(t)
+                p.appendChild(r)
+            }
+            c.appendChild(p)
+        }
+        croot.appendChild(c)
+
+        val parent = op.parent?.toString()
+        val extPath = extendedPath(pkg, create = parent != null)
+        if (extPath != null) {
+            val ext = pkg.part(extPath)!!
+            pkg.touch(extPath)
+            fun entry(para: String, parentPara: String?) {
+                val e = ext.createElementNS(DocxReader.W15, "w15:commentEx")
+                e.setAttributeNS(DocxReader.W15, "w15:paraId", para)
+                parentPara?.let { e.setAttributeNS(DocxReader.W15, "w15:paraIdParent", it) }
+                e.setAttributeNS(DocxReader.W15, "w15:done", "0")
+                ext.documentElement.appendChild(e)
+            }
+            val parentPara = parent?.let { pid ->
+                val pc = byId(comments, "comment", pid).firstOrNull() ?: error("no comment $pid to reply to")
+                DocxReader.lastParaId(pc) ?: paraId(op.id * 31 + 17, taken).also { newId ->
+                    elementChildren(pc).last { it.localName == "p" }.setAttributeNS(DocxReader.W14, "w14:paraId", newId)
+                }.also { pp ->
+                    val has = elementChildren(ext.documentElement).any { it.getAttributeNS(DocxReader.W15, "paraId") == pp }
+                    if (!has) entry(pp, null)
+                }
+            }
+            entry(DocxReader.lastParaId(c)!!, parentPara)
+        }
+
+        if (parent != null) {
+            // Beside the parent's own marks.
+            val starts = byId(document, "commentRangeStart", parent)
+            val ends = byId(document, "commentRangeEnd", parent)
+            val refs = byId(document, "commentReference", parent)
+            starts.firstOrNull()?.let { s -> s.parentNode.insertBefore(document.createElementNS(W, "w:commentRangeStart").apply { setAttributeNS(W, "w:id", id) }, s.nextSibling) }
+            val endAt = ends.firstOrNull()
+            if (endAt != null) {
+                val e = document.createElementNS(W, "w:commentRangeEnd").apply { setAttributeNS(W, "w:id", id) }
+                val afterRef = refs.firstOrNull()?.parentNode?.takeIf { it.parentNode === endAt.parentNode && it.previousSibling === endAt }
+                val anchor = afterRef ?: endAt
+                anchor.parentNode.insertBefore(e, anchor.nextSibling)
+                e.parentNode.insertBefore(referenceRun(document, id), e.nextSibling)
+            } else {
+                val refRun = refs.firstOrNull()?.parentNode ?: error("comment $parent has no place in the document")
+                refRun.parentNode.insertBefore(referenceRun(document, id), refRun.nextSibling)
+            }
+            notes.add("reply $id to $parent")
+            return
+        }
+        val first = checkNotNull(paragraphs.getOrNull(op.fromPara)) { "no paragraph ${op.fromPara}" }
+        val last = checkNotNull(paragraphs.getOrNull(op.toPara)) { "no paragraph ${op.toPara}" }
+        val end = document.createElementNS(W, "w:commentRangeEnd").apply { setAttributeNS(W, "w:id", id) }
+        placeAt(last, op.to, end, before = false)
+        end.parentNode.insertBefore(referenceRun(document, id), end.nextSibling)
+        val start = document.createElementNS(W, "w:commentRangeStart").apply { setAttributeNS(W, "w:id", id) }
+        if (first === last && op.from == op.to) end.parentNode.insertBefore(start, end) else placeAt(first, op.from, start, before = true)
+        notes.add("comment $id on p${op.fromPara}:${op.from}–p${op.toPara}:${op.to}")
+    }
+
+    /** Deletes comments [ids]: their text, their thread entries, and their marks in the document. */
+    private fun deleteComments(document: Document, pkg: Pkg, op: Op.CommentDelete, notes: MutableList<String>) {
+        val cPath = commentsPath(pkg, create = false) ?: error("the document has no comments")
+        val comments = pkg.part(cPath)!!
+        val rels = pkg.part(DocxReader.DOCUMENT_RELS)
+        val paraIds = HashSet<String>()
+        for (id in op.ids.map { it.toString() }) {
+            val c = byId(comments, "comment", id).firstOrNull() ?: error("no comment $id")
+            elementChildren(c).filter { it.localName == "p" }.forEach { p -> p.getAttributeNS(DocxReader.W14, "paraId").takeIf { it.isNotEmpty() }?.let { paraIds.add(it) } }
+            c.parentNode.removeChild(c)
+            for (tag in listOf("commentRangeStart", "commentRangeEnd")) byId(document, tag, id).forEach { it.parentNode.removeChild(it) }
+            for (ref in byId(document, "commentReference", id)) {
+                val run = ref.parentNode as Element
+                run.removeChild(ref)
+                if (elementChildren(run).all { it.localName == "rPr" }) run.parentNode.removeChild(run)
+            }
+        }
+        pkg.touch(cPath)
+        extendedPath(pkg, create = false)?.let { path ->
+            val ext = pkg.part(path)!!
+            elementChildren(ext.documentElement).filter { it.getAttributeNS(DocxReader.W15, "paraId") in paraIds }.forEach { ext.documentElement.removeChild(it) }
+            pkg.touch(path)
+        }
+        // Word's newer id parts: drop the entries of the deleted comments.
+        val durable = HashSet<String>()
+        DocxReader.relTarget(rels, REL_COMMENTS_IDS)?.takeIf { pkg.exists(it) }?.let { path ->
+            val ids = pkg.part(path)!!
+            elementChildren(ids.documentElement).filter { it.getAttributeNS(W16CID, "paraId") in paraIds }.forEach {
+                durable.add(it.getAttributeNS(W16CID, "durableId"))
+                ids.documentElement.removeChild(it)
+            }
+            pkg.touch(path)
+        }
+        DocxReader.relTarget(rels, REL_COMMENTS_EXTENSIBLE)?.takeIf { pkg.exists(it) && durable.isNotEmpty() }?.let { path ->
+            val cex = pkg.part(path)!!
+            elementChildren(cex.documentElement).filter { it.getAttributeNS(W16CEX, "durableId") in durable }.forEach { cex.documentElement.removeChild(it) }
+            pkg.touch(path)
+        }
+        notes.add("deleted comments ${op.ids}")
     }
 
     private const val R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"

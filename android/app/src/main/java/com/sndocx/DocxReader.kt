@@ -35,7 +35,7 @@ object DocxReader {
     fun themePart(rels: Document?): String = relTarget(rels, "http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme")
         ?: "word/theme/theme1.xml"
 
-    private fun relTarget(rels: Document?, type: String): String? {
+    fun relTarget(rels: Document?, type: String): String? {
         var n = rels?.documentElement?.firstChild
         while (n != null) {
             if (n is Element && n.localName == "Relationship" && n.getAttribute("Type") == type && n.getAttribute("TargetMode") != "External") {
@@ -144,6 +144,50 @@ object DocxReader {
     /** Whether a header or footer holds more than text and fields: pictures, shapes, tables, controls. */
     fun hasOtherContent(part: Document): Boolean = part.documentElement?.let(::hasOther) ?: false
 
+    const val REL_COMMENTS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments"
+    const val REL_COMMENTS_EXTENDED = "http://schemas.microsoft.com/office/2011/relationships/commentsExtended"
+    const val W14 = "http://schemas.microsoft.com/office/word/2010/wordml"
+    const val W15 = "http://schemas.microsoft.com/office/word/2012/wordml"
+
+    /**
+     * The comments, in file order. Replies and "done" come from commentsExtended, which
+     * links a comment's last paragraph (w14:paraId) to its parent's.
+     */
+    fun comments(part: Document, extended: Document?): List<Comment> {
+        val byPara = HashMap<String, String>() // last paragraph's paraId → comment id
+        val raw = elementChildren(part.documentElement).filter { it.localName == "comment" && it.namespaceURI == W }
+        for (c in raw) {
+            lastParaId(c)?.let { byPara[it] = c.getAttributeNS(W, "id") }
+        }
+        val parentOf = HashMap<String, String>()
+        val done = HashSet<String>()
+        extended?.documentElement?.let { root ->
+            for (e in elementChildren(root).filter { it.localName == "commentEx" }) {
+                val id = byPara[e.getAttributeNS(W15, "paraId")] ?: continue
+                byPara[e.getAttributeNS(W15, "paraIdParent")]?.let { parentOf[id] = it }
+                if (e.getAttributeNS(W15, "done") == "1") done.add(id)
+            }
+        }
+        return raw.map { c ->
+            val id = c.getAttributeNS(W, "id")
+            val paras = elementChildren(c).filter { it.localName == "p" }
+            Comment(
+                id = id,
+                author = c.getAttributeNS(W, "author"),
+                initials = c.getAttributeNS(W, "initials"),
+                date = c.getAttributeNS(W, "date"),
+                text = paras.joinToString("\n") { p -> segments(p).filter { it.isRun }.joinToString("") { runText(it.el) }.replace(OBJECT.toString(), "") }.trim(),
+                parent = parentOf[id],
+                done = id in done,
+                pictures = c.getElementsByTagNameNS(W, "drawing").length + c.getElementsByTagNameNS(W, "pict").length,
+            )
+        }
+    }
+
+    /** The w14:paraId of a comment's last paragraph (what commentsExtended refers to). */
+    fun lastParaId(comment: Element): String? =
+        elementChildren(comment).lastOrNull { it.localName == "p" }?.getAttributeNS(W14, "paraId")?.takeIf { it.isNotEmpty() }
+
     /** Where the document's list definitions live: its numbering relationship, else word/numbering.xml. */
     fun numberingPart(rels: Document?): String {
         val root = rels?.documentElement ?: return "word/numbering.xml"
@@ -188,6 +232,24 @@ object DocxReader {
      * "del": text that is deleted but not yet accepted — not part of the paragraph's text;
      * it sits before character [at] and reads [runs]. [move]: a move (moveTo/moveFrom).
      */
+    /** A comment anchor at text offset [at]: kind "start", "end" or "ref" (the comment's reference mark). */
+    data class Mark(val id: String, val kind: String, val at: Int)
+
+    /**
+     * A comment (word/comments.xml). [parent]: the comment it replies to (commentsExtended);
+     * [pictures]: how many pictures it holds (a handwritten note is one).
+     */
+    data class Comment(
+        val id: String,
+        val author: String,
+        val initials: String,
+        val date: String,
+        val text: String,
+        val parent: String? = null,
+        val done: Boolean = false,
+        val pictures: Int = 0,
+    )
+
     data class Revision(
         val id: String,
         val kind: String,
@@ -224,6 +286,8 @@ object DocxReader {
         val baseSize: Int? = null,
         /** Tracked insertions and deletions in its text, in reading order. */
         val revisions: List<Revision> = emptyList(),
+        /** Where comments start, end and are referenced in its text. */
+        val marks: List<Mark> = emptyList(),
     ) : Block() {
         val text: String get() = runs.joinToString("") { it.text }
     }
@@ -261,6 +325,7 @@ object DocxReader {
         val footer: HeaderFooter? = null,
         /** Tracked changes DOCX can't review yet: formatting, paragraph marks, sections, tables. */
         val otherRevisions: Int = 0,
+        val comments: List<Comment> = emptyList(),
     )
 
     /** The default header or footer of the last section: its text, whether it shows a page number, alignment. */
@@ -287,7 +352,10 @@ object DocxReader {
                 val target = relById(rels, ref.getAttributeNS(R_NS, "id")) ?: return null
                 return headerFooter(part(target) ?: return null)
             }
-            return result.copy(header = hf("headerReference"), footer = hf("footerReference"))
+            val comments = relTarget(rels, REL_COMMENTS)?.let { part(it) }?.let { c ->
+                comments(c, relTarget(rels, REL_COMMENTS_EXTENDED)?.let { part(it) })
+            }.orEmpty()
+            return result.copy(header = hf("headerReference"), footer = hf("footerReference"), comments = comments)
         }
     }
 
@@ -419,7 +487,8 @@ object DocxReader {
             val runs = ArrayList<Run>()
             collectRuns(p, style.run, runs)
             val revisions = ArrayList<Revision>()
-            collectRevisions(p, style.run, intArrayOf(0), revisions)
+            val marks = ArrayList<Mark>()
+            collectRevisions(p, style.run, intArrayOf(0), revisions, marks)
             return Paragraph(
                 index = index,
                 styleId = styleId,
@@ -436,6 +505,7 @@ object DocxReader {
                 baseFont = theme.resolve(style.run.font),
                 baseSize = style.run.size,
                 revisions = revisions,
+                marks = marks,
             )
         }
 
@@ -443,7 +513,7 @@ object DocxReader {
          * Tracked changes in reading order, mirroring [walk]: insertions where they start,
          * deletions with their position in the paragraph's text ([at], kept in [offset]).
          */
-        private fun collectRevisions(parent: Element, base: Fmt, offset: IntArray, out: MutableList<Revision>) {
+        private fun collectRevisions(parent: Element, base: Fmt, offset: IntArray, out: MutableList<Revision>, marks: MutableList<Mark>) {
             fun meta(el: Element, kind: String, at: Int = -1, runs: List<Run> = emptyList()) = Revision(
                 id = el.getAttributeNS(W, "id"),
                 kind = kind,
@@ -459,10 +529,15 @@ object DocxReader {
                     continue
                 }
                 when (el.localName) {
-                    "r" -> offset[0] += runText(el).length
+                    "r" -> {
+                        offset[0] += runText(el).length
+                        child(el, "commentReference")?.let { marks.add(Mark(it.getAttributeNS(W, "id"), "ref", offset[0])) }
+                    }
+                    "commentRangeStart" -> marks.add(Mark(el.getAttributeNS(W, "id"), "start", offset[0]))
+                    "commentRangeEnd" -> marks.add(Mark(el.getAttributeNS(W, "id"), "end", offset[0]))
                     "ins", "moveTo" -> {
                         if (lengthOf(el) > 0) out.add(meta(el, "ins"))
-                        collectRevisions(el, base, offset, out)
+                        collectRevisions(el, base, offset, out, marks)
                     }
                     "del", "moveFrom" -> {
                         val deleted = ArrayList<Run>()
@@ -471,8 +546,8 @@ object DocxReader {
                         }
                         if (deleted.isNotEmpty()) out.add(meta(el, "del", offset[0], mergeAdjacent(deleted)))
                     }
-                    "hyperlink", "fldSimple", "smartTag", "customXml" -> collectRevisions(el, base, offset, out)
-                    "sdt" -> child(el, "sdtContent")?.let { collectRevisions(it, base, offset, out) }
+                    "hyperlink", "fldSimple", "smartTag", "customXml" -> collectRevisions(el, base, offset, out, marks)
+                    "sdt" -> child(el, "sdtContent")?.let { collectRevisions(it, base, offset, out, marks) }
                 }
             }
         }

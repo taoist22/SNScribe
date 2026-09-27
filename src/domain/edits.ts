@@ -6,7 +6,7 @@
 // Offsets are into a paragraph's text (runs' `t` joined; objects are one U+FFFC), the
 // same text the native reader and writer use.
 
-import {OBJECT, paragraphText, type Block, type PageSetup, type ParagraphBlock, type Revision, type Run} from '../model/docx';
+import {OBJECT, paragraphText, type Block, type Comment, type Mark, type PageSetup, type ParagraphBlock, type Revision, type Run} from '../model/docx';
 
 export type FormatProp = 'b' | 'i' | 'u' | 'h';
 export type StyleKind = 'heading1' | 'heading2' | 'title' | 'normal';
@@ -54,7 +54,27 @@ export type Op =
    * `result`: the changed paragraphs as the file will have them (from DocxModule.preview),
    * so the screen shows exactly what the save writes; the native writer ignores it.
    */
-  | {op: 'revision'; para: number; id: string; accept: boolean; result: Record<number, {runs: Run[]; revs?: Revision[]}>};
+  | {op: 'revision'; para: number; id: string; accept: boolean; result: Record<number, {runs: Run[]; revs?: Revision[]}>}
+  /**
+   * A new comment `id` on the text from (fromPara, from) to (toPara, to); with `parent`, a
+   * reply sharing the parent's range. para is -1.
+   */
+  | {
+      op: 'comment';
+      para: -1;
+      id: number;
+      fromPara: number;
+      from: number;
+      toPara: number;
+      to: number;
+      text: string;
+      author: string;
+      initials: string;
+      date: string;
+      parent?: number;
+    }
+  /** Delete these comments (a thread: the comment and its replies). para is -1. */
+  | {op: 'uncomment'; para: -1; ids: number[]};
 
 /** A position between characters of paragraph `para` (Paragraph.index). */
 export type Pos = {para: number; offset: number};
@@ -239,6 +259,11 @@ function split(out: Block[], i: number, op: Extract<Op, {op: 'split'}>): void {
     ...(p.revs ?? []).filter(v => v.kind === 'ins'),
     ...dels.filter(v => (v.at ?? 0) > op.offset).map(v => ({...v, at: (v.at ?? 0) - op.offset})),
   ]);
+  const marks = p.marks ?? [];
+  const firstMarks = marks.filter(m => m.at < op.offset || (m.at === op.offset && m.kind !== 'start'));
+  const secondMarks = marks.filter(m => !firstMarks.includes(m)).map(m => ({...m, at: m.at - op.offset}));
+  (first as ParagraphBlock).marks = firstMarks.length ? firstMarks : undefined;
+  second = withMarks(second, secondMarks);
   if (op.offset === len && p.kind !== 'body') {
     second = {...second, kind: 'body', level: 0, style: ''};
   }
@@ -254,10 +279,13 @@ function join(out: Block[], i: number): void {
   out.splice(
     i - 1,
     2,
-    withRevs({...prev, runs: [...prev.runs, ...p.runs], sect: prev.sect || p.sect}, [
-      ...(prev.revs ?? []),
-      ...(p.revs ?? []).map(v => (v.kind === 'del' ? {...v, at: (v.at ?? 0) + shift} : v)),
-    ]),
+    withMarks(
+      withRevs({...prev, runs: [...prev.runs, ...p.runs], sect: prev.sect || p.sect}, [
+        ...(prev.revs ?? []),
+        ...(p.revs ?? []).map(v => (v.kind === 'del' ? {...v, at: (v.at ?? 0) + shift} : v)),
+      ]),
+      [...(prev.marks ?? []), ...(p.marks ?? []).map(m => ({...m, at: m.at + shift}))],
+    ),
   );
   renumber(out, i, -1);
 }
@@ -351,6 +379,10 @@ export function applyOps(blocks: Block[], ops: Op[]): Block[] {
     if (op.op === 'headerFooter' || op.op === 'page') {
       continue;
     }
+    if (op.op === 'comment' || op.op === 'uncomment') {
+      commentMarks(out, op);
+      continue;
+    }
     if (op.op === 'revision') {
       for (const [key, r] of Object.entries(op.result)) {
         const j = out.findIndex(b => b.type === 'p' && b.index === Number(key));
@@ -373,7 +405,7 @@ export function applyOps(blocks: Block[], ops: Op[]): Block[] {
         out[i] = styleParagraph(p, op.kind);
         break;
       case 'text':
-        out[i] = withRevs(editText(p, op), shiftDeletions(p.revs, op.start, op.end, op.text.length));
+        out[i] = withMarks(withRevs(editText(p, op), shiftDeletions(p.revs, op.start, op.end, op.text.length)), shiftMarks(p.marks, op.start, op.end, op.text.length));
         break;
       case 'split':
         split(out, i, op);
@@ -405,6 +437,87 @@ export function applyOps(blocks: Block[], ops: Op[]): Block[] {
     }
   }
   return out;
+}
+
+function withMarks(p: ParagraphBlock, marks: Mark[] | undefined): ParagraphBlock {
+  return {...p, marks: marks && marks.length ? marks : undefined};
+}
+
+/**
+ * Comment anchors after [start, end) is replaced by `inserted` characters. Screen-only; as
+ * the writer does, typed text joins the run before it, so marks there move after it.
+ */
+function shiftMarks(marks: Mark[] | undefined, start: number, end: number, inserted: number): Mark[] | undefined {
+  return marks?.map(m => {
+    if (m.at < start || (m.at === 0 && start === 0)) {
+      return m;
+    }
+    return m.at >= end ? {...m, at: m.at + inserted - (end - start)} : {...m, at: start};
+  });
+}
+
+/** Adds or removes comment anchors on screen, as DocxEditor.addComment / deleteComments place them. */
+function commentMarks(out: Block[], op: Extract<Op, {op: 'comment' | 'uncomment'}>): void {
+  const update = (index: number, change: (marks: Mark[]) => Mark[]) => {
+    const j = out.findIndex(b => b.type === 'p' && b.index === index);
+    if (j >= 0) {
+      const p = out[j] as ParagraphBlock;
+      out[j] = withMarks(p, change(p.marks ?? []));
+    }
+  };
+  if (op.op === 'uncomment') {
+    const ids = new Set(op.ids.map(String));
+    for (const b of out) {
+      if (b.type === 'p' && b.marks?.some(m => ids.has(m.id))) {
+        update(b.index, marks => marks.filter(m => !ids.has(m.id)));
+      }
+    }
+    return;
+  }
+  const id = String(op.id);
+  if (op.parent !== undefined) {
+    // A reply sits beside its parent's marks.
+    const parent = String(op.parent);
+    for (const b of out) {
+      if (b.type === 'p' && b.marks?.some(m => m.id === parent)) {
+        update(b.index, marks => [...marks, ...marks.filter(m => m.id === parent).map(m => ({...m, id}))]);
+      }
+    }
+    return;
+  }
+  update(op.fromPara, marks => [...marks, {id, kind: 'start', at: op.from}]);
+  update(op.toPara, marks => [...marks, {id, kind: 'end', at: op.to}, {id, kind: 'ref', at: op.to}]);
+}
+
+/** The comments after the edits: added ones appended, deleted ones gone. */
+export function commentsAfter(comments: Comment[] | undefined, ops: Op[]): Comment[] {
+  let out = comments ?? [];
+  for (const op of ops) {
+    if (op.op === 'comment') {
+      out = [
+        ...out,
+        {id: String(op.id), author: op.author, initials: op.initials, date: op.date, text: op.text, parent: op.parent === undefined ? undefined : String(op.parent)},
+      ];
+    } else if (op.op === 'uncomment') {
+      const ids = new Set(op.ids.map(String));
+      out = out.filter(c => !ids.has(c.id));
+    }
+  }
+  return out;
+}
+
+/** The next free comment id. */
+export function nextCommentId(comments: Comment[]): number {
+  return comments.reduce((n, c) => Math.max(n, Number(c.id) + 1 || n), 0);
+}
+
+/** A comment and all its replies (replies of replies too), for deleting a thread. */
+export function threadIds(comments: Comment[], id: string): number[] {
+  const out = [id];
+  for (let i = 0; i < out.length; i++) {
+    out.push(...comments.filter(c => c.parent === out[i]).map(c => c.id));
+  }
+  return out.map(Number);
 }
 
 /** The paragraph with `revs`, keeping only insertions that still have text and dropping an empty list. */

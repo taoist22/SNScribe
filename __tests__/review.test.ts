@@ -1,4 +1,4 @@
-import {applyOps, expectedTexts, fromShown, toShown} from '../src/domain/edits';
+import {applyOps, commentsAfter, expectedTexts, fromShown, nextCommentId, threadIds, toShown} from '../src/domain/edits';
 import {paragraphText, type ParagraphBlock} from '../src/model/docx';
 
 // "Hello big world" with "old " deleted before "world" (at 10) and "big " inserted (id 7).
@@ -58,5 +58,34 @@ describe('tracked changes follow edits', () => {
     expect(paragraphText(q)).toBe('Hello big old world');
     expect(q.revs).toBeUndefined();
     expect(expectedTexts([p], ops)).toEqual(['Hello big old world']);
+  });
+});
+
+describe('comments on screen', () => {
+  const q: ParagraphBlock = {type: 'p', index: 0, style: '', kind: 'body', level: 0, align: 'left', indent: 0, runs: [{t: 'One two three'}]};
+  const add = {op: 'comment' as const, para: -1 as const, id: 5, fromPara: 0, from: 4, toPara: 0, to: 7, text: 'Hm', author: 'CT', initials: 'C', date: ''};
+
+  it('adds anchors, replies beside them, and deletes a thread', () => {
+    const [a] = applyOps([q], [add]) as ParagraphBlock[];
+    expect(a.marks).toEqual([
+      {id: '5', kind: 'start', at: 4},
+      {id: '5', kind: 'end', at: 7},
+      {id: '5', kind: 'ref', at: 7},
+    ]);
+    const [b] = applyOps([a], [{...add, id: 6, parent: 5}]) as ParagraphBlock[];
+    expect(b.marks?.filter(m => m.id === '6').map(m => m.at)).toEqual([4, 7, 7]);
+    const comments = commentsAfter([], [add, {...add, id: 6, parent: 5}]);
+    expect(threadIds(comments, '5')).toEqual([5, 6]);
+    expect(nextCommentId(comments)).toBe(7);
+    const [c] = applyOps([b], [{op: 'uncomment', para: -1, ids: [5, 6]}]) as ParagraphBlock[];
+    expect(c.marks).toBeUndefined();
+  });
+
+  it('anchors follow typing', () => {
+    const [a] = applyOps([q], [add, {op: 'text', para: 0, start: 0, end: 0, text: 'Zero '}]) as ParagraphBlock[];
+    // Typed at the very start: the range moves with its text.
+    expect(a.marks?.map(m => m.at)).toEqual([9, 12, 12]);
+    const [b] = applyOps([q], [add, {op: 'text', para: 0, start: 5, end: 6, text: ''}]) as ParagraphBlock[];
+    expect(b.marks?.map(m => m.at)).toEqual([4, 6, 6]);
   });
 });
