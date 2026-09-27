@@ -433,9 +433,16 @@ export function applyOps(blocks: Block[], ops: Op[]): Block[] {
       case 'format':
         out[i] = formatParagraph(p, op);
         break;
-      case 'style':
-        out[i] = styleParagraph(p, op.kind);
+      case 'style': {
+        // The new style's font, size, bold and italic are the file's to know: take them from
+        // a paragraph already in that style, else show the kind's defaults.
+        const next = styleParagraph(p, op.kind);
+        const like = out.find(
+          b => b.type === 'p' && b !== p && b.kind === next.kind && b.level === next.level && !!b.quote === !!next.quote && !b.num,
+        ) as ParagraphBlock | undefined;
+        out[i] = {...next, bf: like?.bf, bs: like?.bs, sb: like?.sb, si: like?.si};
         break;
+      }
       case 'text':
         out[i] = withMarks(withRevs(editText(p, op), shiftDeletions(p.revs, op.start, op.end, op.text.length)), shiftMarks(p.marks, op.start, op.end, op.text.length));
         break;
@@ -856,7 +863,9 @@ export function allHave(blocks: Block[], ranges: Range[], prop: FormatProp): boo
         continue;
       }
       any = true;
-      if (!run[prop]) {
+      // Bold / italic may come from the paragraph's style when the run doesn't say.
+      const has = prop === 'b' ? run.b ?? !!p.sb : prop === 'i' ? run.i ?? !!p.si : !!run[prop];
+      if (!has) {
         return false;
       }
     }

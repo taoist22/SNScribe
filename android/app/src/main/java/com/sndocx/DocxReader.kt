@@ -274,6 +274,16 @@ object DocxReader {
         val rev: String? = null,
         /** A handwritten note DOCX put in the margin (obj "ink"): its note id. */
         val ink: String? = null,
+        /**
+         * What the run sets itself (w:rPr and its character style), without what its
+         * paragraph style gives it — the screen shows the style's part from the paragraph, so
+         * a style change shows at once (CT: a new heading "did nothing" on screen because the
+         * old style's size was baked into every run). The fields above stay fully resolved.
+         */
+        val ownBold: Boolean? = null,
+        val ownItalic: Boolean? = null,
+        val ownFont: String? = null,
+        val ownSize: Int? = null,
     )
 
     /**
@@ -333,6 +343,9 @@ object DocxReader {
         /** The font and size (half-points) text in this paragraph has unless it sets its own. */
         val baseFont: String? = null,
         val baseSize: Int? = null,
+        /** Its style makes its text bold / italic (unless a run says otherwise). */
+        val baseBold: Boolean = false,
+        val baseItalic: Boolean = false,
         /** Tracked insertions and deletions in its text, in reading order. */
         val revisions: List<Revision> = emptyList(),
         /** In a quotation style (Quote / Intense Quote): body text, shown as a block quote. */
@@ -555,6 +568,8 @@ object DocxReader {
                 para = style.para.merge(ParaFmt.of(pPr)),
                 baseFont = theme.resolve(style.run.font),
                 baseSize = style.run.size,
+                baseBold = style.run.bold == true,
+                baseItalic = style.run.italic == true,
                 revisions = revisions,
                 marks = marks,
                 quote = kind == "body" && (name == "quote" || name == "intense quote"),
@@ -622,7 +637,8 @@ object DocxReader {
         private fun run(r: Element, base: Fmt, link: Boolean, locked: Boolean, out: MutableList<Run>, rev: String? = null, deleted: Boolean = false) {
             val rPr = child(r, "rPr")
             val charStyle = rPr?.let { child(it, "rStyle") }?.getAttributeNS(W, "val")
-            val fmt = base.merge(styles.character(charStyle)).merge(Fmt.of(rPr))
+            val own = styles.character(charStyle).merge(Fmt.of(rPr))
+            val fmt = base.merge(own)
             val isLink = link || charStyle.equals("Hyperlink", ignoreCase = true)
             fun add(text: String, obj: String? = null, ink: String? = null) {
                 if (text.isEmpty()) return
@@ -648,6 +664,10 @@ object DocxReader {
                         size = fmt.size,
                         rev = rev,
                         ink = ink,
+                        ownBold = own.bold,
+                        ownItalic = own.italic,
+                        ownFont = theme.resolve(own.font),
+                        ownSize = own.size,
                     ),
                 )
             }

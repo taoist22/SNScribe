@@ -96,8 +96,10 @@ function pieces(p: ParagraphBlock, selection: {start: number; end: number} | nul
 function ParagraphView({p, selection, onFrame, onLines, textRef, onTextFrame, fonts, scale = 1}: Omit<Props, 'block'> & {p: ParagraphBlock}) {
   // The document's own sizes when it has them, times the reader's text size; the line
   // height follows the largest.
-  const base = Math.round(sizeFor(p) * scale);
+  // Text without a size of its own takes its style's (bs), else the kind's default.
+  const base = p.bs ? Math.round(dpFor(p.bs) * scale) : Math.round(sizeFor(p) * scale);
   const runSize = (r: Run) => (r.sz ? Math.round(dpFor(r.sz) * scale) : base);
+  const family = (r: Run) => r.f ?? p.bf;
   const size = p.runs.length ? Math.max(...p.runs.map(runSize)) : base;
   // The document's line spacing when it has one: 'auto' in 240ths of a line, else twips.
   const lineHeight =
@@ -121,8 +123,8 @@ function ParagraphView({p, selection, onFrame, onLines, textRef, onTextFrame, fo
       style={[
         styles.text,
         {fontSize: size, lineHeight, textAlign: p.align},
-        heading && p.kind !== 'subtitle' ? styles.bold : null,
-        p.kind === 'subtitle' || p.quote ? styles.italic : null,
+        (heading && p.kind !== 'subtitle') || p.sb ? styles.bold : null,
+        p.kind === 'subtitle' || p.quote || p.si ? styles.italic : null,
         p.list !== undefined ? styles.flex : null,
         p.runs.length === 0 ? {minHeight: lineHeight} : null,
       ]}
@@ -134,15 +136,16 @@ function ParagraphView({p, selection, onFrame, onLines, textRef, onTextFrame, fo
         <Text
           key={i}
           style={[
-            r.b ? styles.bold : null,
-            r.i ? styles.italic : null,
+            // A run's own bold/italic: true, false (switched off against its style), or inherit.
+            r.b === true ? styles.bold : r.b === false ? styles.notBold : null,
+            r.i === true ? styles.italic : r.i === false ? styles.notItalic : null,
             r.h ? styles.highlight : null,
             r.del ? styles.deleted : r.rv ? styles.inserted : null,
             r.u || r.s || r.del || r.rv
               ? {textDecorationLine: (r.u || r.rv) && (r.s || r.del) ? 'underline line-through' : r.u || r.rv ? 'underline' : 'line-through'}
               : null,
             {fontSize: r.sup || r.sub ? Math.round(runSize(r) * 0.65) : runSize(r)},
-            r.f && fonts?.has(r.f) ? {fontFamily: r.f} : null,
+            family(r) && fonts?.has(family(r)!) ? {fontFamily: family(r)} : null,
             r.sel ? styles.selected : null,
           ]}>
           {runText(r)}
@@ -216,6 +219,8 @@ const styles = StyleSheet.create({
   label: {width: LIST_LABEL_W},
   bold: {fontWeight: '700'},
   italic: {fontStyle: 'italic'},
+  notBold: {fontWeight: '400'},
+  notItalic: {fontStyle: 'normal'},
   highlight: {backgroundColor: '#cfcfcf'},
   selected: {backgroundColor: '#000', color: '#fff'},
   inserted: {color: '#333'},

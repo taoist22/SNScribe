@@ -49,6 +49,21 @@ class Batch3Test {
     }
 
     @Test
+    fun runsReportTheirOwnFormattingApartFromTheStyle() {
+        val blank = File(work, "blank.docx").also { DocxBlank.write(it) }
+        val typed = File(work, "typed.docx")
+        DocxEditor.save(blank, listOf(Op.Text(0, 0, 0, "Heading text"), Op.Style(0, "heading1")), typed, File(work, "tmp"))
+        val p = paragraphs(typed)[0]
+        val run = p.runs.single()
+        // The style's size and bold reach the paragraph, not the run's own formatting.
+        assertEquals(null, run.ownSize)
+        assertEquals(null, run.ownBold)
+        assertTrue(run.bold)
+        assertTrue(p.baseBold)
+        assertEquals(32, p.baseSize)
+    }
+
+    @Test
     fun headingThreeAndQuote() {
         val out = save(listOf(Op.Style(2, "heading3"), Op.Style(3, "quote")), "b3-styles")
         val ps = paragraphs(out)

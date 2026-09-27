@@ -98,6 +98,9 @@ export type ParagraphBlock = {
   /** Font and size (half-points) text here has unless it sets its own: from the style and document defaults. */
   bf?: string;
   bs?: number;
+  /** Its style makes the text bold / italic (runs may say otherwise: b / i false). */
+  sb?: boolean;
+  si?: boolean;
 };
 
 export type TableBlock = {type: 'table'; rows: number; cols: number; preview: string};

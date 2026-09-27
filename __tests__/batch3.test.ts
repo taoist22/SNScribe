@@ -74,3 +74,24 @@ describe('pen selection', () => {
     expect(penSelection(t, t, at(2), at(10))).toEqual({from: {para: 0, offset: 0}, to: {para: 0, offset: 12}}); // "Water is H2O"
   });
 });
+
+describe('style changes show on screen', () => {
+  const body = (index: number, t: string): ParagraphBlock => ({...p(index, [{t}]), bs: 24, bf: 'Times New Roman'});
+  const h1: ParagraphBlock = {...p(9, [{t: 'Intro'}]), kind: 'heading', level: 1, bs: 32, bf: 'Calibri Light', sb: true};
+
+  it('a new heading takes an existing heading\'s size and font, not the body\'s', () => {
+    const out = applyOps([body(0, 'Make me a heading'), h1], [{op: 'style', para: 0, kind: 'heading1'}]) as ParagraphBlock[];
+    expect(out[0]).toMatchObject({kind: 'heading', level: 1, bs: 32, bf: 'Calibri Light', sb: true});
+  });
+
+  it('with no heading like it in the document, the kind\'s defaults', () => {
+    const out = applyOps([body(0, 'Only paragraph')], [{op: 'style', para: 0, kind: 'heading2'}]) as ParagraphBlock[];
+    expect(out[0].bs).toBeUndefined();
+    expect(out[0].bf).toBeUndefined();
+  });
+
+  it('B knows text bold by its style', () => {
+    const blocks: Block[] = [h1];
+    expect(formatOps(blocks, [{para: 9, start: 0, end: 5}], 'b')[0]).toMatchObject({on: false});
+  });
+});

@@ -608,8 +608,10 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
     private fun runs(list: List<DocxReader.Run>) = Arguments.createArray().apply {
         for (r in list) pushMap(Arguments.createMap().apply {
             putString("t", r.text)
-            if (r.bold) putBoolean("b", true)
-            if (r.italic) putBoolean("i", true)
+            // Bold, italic, font and size as the run sets them itself; the style's part comes
+            // with the paragraph (sb/si/bf/bs), so a style change shows on screen at once.
+            r.ownBold?.let { putBoolean("b", it) }
+            r.ownItalic?.let { putBoolean("i", it) }
             if (r.underline) putBoolean("u", true)
             if (r.strike) putBoolean("s", true)
             if (r.highlight) putBoolean("h", true)
@@ -619,8 +621,8 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
             r.highlightColor?.let { putString("hc", it) }
             r.obj?.let { putString("obj", it) }
             if (r.locked) putBoolean("k", true)
-            r.font?.let { putString("f", it) }
-            r.size?.let { putInt("sz", it) }
+            r.ownFont?.let { putString("f", it) }
+            r.ownSize?.let { putInt("sz", it) }
             r.rev?.let { putString("rv", it) }
             r.ink?.let { putString("ink", it) }
         })
@@ -650,6 +652,8 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
                 }
                 b.baseFont?.let { putString("bf", it) }
                 b.baseSize?.let { putInt("bs", it) }
+                if (b.baseBold) putBoolean("sb", true)
+                if (b.baseItalic) putBoolean("si", true)
                 putArray("runs", runs(b.runs))
                 if (b.revisions.isNotEmpty()) putArray("revs", Arguments.createArray().apply {
                     for (v in b.revisions) pushMap(Arguments.createMap().apply {
