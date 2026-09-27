@@ -101,6 +101,9 @@ function ParagraphView({p, selection, onFrame, onLines, textRef, onTextFrame, fo
   const base = p.bs ? Math.round(dpFor(p.bs) * scale) : Math.round(sizeFor(p) * scale);
   const runSize = (r: Run) => (r.sz ? Math.round(dpFor(r.sz) * scale) : base);
   const family = (r: Run) => r.f ?? p.bf;
+  // What the paragraph's style gives text that does not say otherwise.
+  const styleBold = (p.kind !== 'body' && p.kind !== 'subtitle') || !!p.sb;
+  const styleItalic = p.kind === 'subtitle' || !!p.quote || !!p.si;
   const size = p.runs.length ? Math.max(...p.runs.map(runSize)) : base;
   // The document's line spacing when it has one: 'auto' in 240ths of a line, else twips.
   const lineHeight =
@@ -137,9 +140,11 @@ function ParagraphView({p, selection, onFrame, onLines, textRef, onTextFrame, fo
         <Text
           key={i}
           style={[
-            // A run's own bold/italic: true, false (switched off against its style), or inherit.
-            r.b === true ? styles.bold : r.b === false ? styles.notBold : null,
-            r.i === true ? styles.italic : r.i === false ? styles.notItalic : null,
+            // Bold and italic are set on every run, never inherited from the paragraph: a run
+            // that names its own font starts from a regular face on Android, so a heading's bold
+            // (from its style, on the paragraph) did not show on Times New Roman text (CT).
+            (r.b ?? styleBold) ? styles.bold : styles.notBold,
+            (r.i ?? styleItalic) ? styles.italic : styles.notItalic,
             r.h ? styles.highlight : null,
             r.del ? styles.deleted : r.rv ? styles.inserted : null,
             r.u || r.s || r.del || r.rv
