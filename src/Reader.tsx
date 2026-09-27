@@ -2676,6 +2676,23 @@ export function Reader(): React.JSX.Element {
     </Pressable>
   );
 
+  /**
+   * A button inside a panel that must stay open (Search, Next, Reply …). `button` closes
+   * the open menu first — right for the toolbar, wrong in a panel: its results then arrived
+   * after it had closed (CT: Search "just goes back to the document").
+   */
+  const panelButton = (label: string, action: () => void, disabled = false) => (
+    <Pressable
+      key={label}
+      disabled={disabled || busy}
+      onPress={once(`panel:${label}`, action)}
+      style={[styles.button, disabled || busy ? styles.disabled : null]}>
+      <Text allowFontScaling={false} style={styles.buttonText}>
+        {label}
+      </Text>
+    </Pressable>
+  );
+
   /** A menu button: opens its menu (never toggles it shut — closing is by choosing, or tapping elsewhere). */
   const menuButton = (label: string, which: Menu) => (
     <Pressable
@@ -2971,7 +2988,7 @@ export function Reader(): React.JSX.Element {
               {'Only what you change is written. A different first page keeps its own. Word shows these; the Supernote page does not.'}
             </Text>
             <View style={styles.row}>
-              {button('Apply', applyHeader)}
+              {panelButton('Apply', applyHeader)}
               {button('Cancel', () => {
                 setHfForm(null);
                 setMenu(null);
@@ -3013,7 +3030,7 @@ export function Reader(): React.JSX.Element {
                 secureTextEntry
                 allowFontScaling={false}
               />
-              <View style={styles.row}>{button('Load from file…', zoteroFromFile, cite.busy)}</View>
+              <View style={styles.row}>{panelButton('Load from file…', zoteroFromFile, cite.busy)}</View>
               <Text allowFontScaling={false} style={styles.presetSummary}>
                 {'Load from file: a .txt with the key (and your user ID, if you like). Kept only on this Supernote, in the plugin’s private storage.'}
               </Text>
@@ -3023,8 +3040,8 @@ export function Reader(): React.JSX.Element {
                 </Text>
               ) : null}
               <View style={styles.row}>
-                {button(cite.busy ? 'Checking…' : 'Save', saveZotero, cite.busy)}
-                {button('Cancel', () => (zotero ? setCite(c => ({...c, setup: false})) : setMenu(null)))}
+                {panelButton(cite.busy ? 'Checking…' : 'Save', saveZotero, cite.busy)}
+                {panelButton('Cancel', () => (zotero ? setCite(c => ({...c, setup: false})) : setMenu(null)))}
               </View>
             </View>
           );
@@ -3054,7 +3071,7 @@ export function Reader(): React.JSX.Element {
                 returnKeyType="search"
                 onSubmitEditing={() => searchCite()}
               />
-              {button(cite.busy ? '…' : 'Search', () => searchCite(), cite.busy || !cite.query.trim())}
+              {panelButton(cite.busy ? '…' : 'Search', () => searchCite(), cite.busy || !cite.query.trim())}
             </View>
             {cite.message ? (
               <Text allowFontScaling={false} style={[styles.menuText, styles.citeMessage]}>
@@ -3105,14 +3122,14 @@ export function Reader(): React.JSX.Element {
                   ))}
                 </Text>
                 <View style={styles.row}>
-                  {button('Insert', insertCitation)}
-                  {button('Back', () => setCite(c => ({...c, chosen: null})))}
+                  {panelButton('Insert', insertCitation)}
+                  {panelButton('Back', () => setCite(c => ({...c, chosen: null})))}
                 </View>
               </View>
             ) : null}
             <View style={styles.row}>
               {button('Close', () => setMenu(null))}
-              {button('Zotero settings', () => setCite(c => ({...c, setup: true, userId: zotero?.userId ?? ''})))}
+              {panelButton('Zotero settings', () => setCite(c => ({...c, setup: true, userId: zotero?.userId ?? ''})))}
             </View>
           </View>
         );
@@ -3139,7 +3156,7 @@ export function Reader(): React.JSX.Element {
               <TextInput style={styles.nameInput} value={author} onChangeText={setAuthor} allowFontScaling={false} autoCorrect={false} />
             </View>
             <View style={styles.row}>
-              {button('Add comment', addComment)}
+              {panelButton('Add comment', addComment)}
               {button('Cancel', () => {
                 setCommentForm(null);
                 setMenu(null);
@@ -3194,7 +3211,7 @@ export function Reader(): React.JSX.Element {
               placeholder="Reply"
             />
             <View style={styles.row}>
-              {button('Reply', reply, !replyText.trim())}
+              {panelButton('Reply', reply, !replyText.trim())}
               {button('Delete comment', deleteThread)}
               {button('Close', () => {
                 setThread(null);
@@ -3223,7 +3240,7 @@ export function Reader(): React.JSX.Element {
               onSubmitEditing={applyLink}
             />
             <View style={styles.row}>
-              {button('Link', applyLink)}
+              {panelButton('Link', applyLink)}
               {button('Cancel', () => {
                 setLinkForm(null);
                 setMenu(null);
@@ -3407,12 +3424,12 @@ export function Reader(): React.JSX.Element {
               {find.query ? (n === 0 ? 'Not found' : find.at >= 0 ? `${find.at + 1} of ${n}` : `${n} found`) : ' '}
             </Text>
             <View style={styles.row}>
-              {button('‹ Prev', () => showMatch(find.at - 1), !find.query)}
-              {button('Next ›', () => showMatch(find.at + 1), !find.query)}
+              {panelButton('‹ Prev', () => showMatch(find.at - 1), !find.query)}
+              {panelButton('Next ›', () => showMatch(find.at + 1), !find.query)}
             </View>
             <View style={styles.row}>
-              {button('Replace', replaceOne, !find.query)}
-              {button('Replace all', replaceAll, !find.query || n === 0)}
+              {panelButton('Replace', replaceOne, !find.query)}
+              {panelButton('Replace all', replaceAll, !find.query || n === 0)}
               {button('Close', () => setMenu(null))}
             </View>
           </View>
