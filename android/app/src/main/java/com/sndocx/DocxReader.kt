@@ -31,6 +31,22 @@ object DocxReader {
     const val DOCUMENT_RELS = "word/_rels/document.xml.rels"
     const val REL_NUMBERING = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering"
 
+    /** The theme part (for theme fonts), through the document's relationships. */
+    fun themePart(rels: Document?): String = relTarget(rels, "http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme")
+        ?: "word/theme/theme1.xml"
+
+    private fun relTarget(rels: Document?, type: String): String? {
+        var n = rels?.documentElement?.firstChild
+        while (n != null) {
+            if (n is Element && n.localName == "Relationship" && n.getAttribute("Type") == type && n.getAttribute("TargetMode") != "External") {
+                val target = n.getAttribute("Target")
+                return if (target.startsWith("/")) target.removePrefix("/") else "word/" + target.removePrefix("./")
+            }
+            n = n.nextSibling
+        }
+        return null
+    }
+
     /** Where the document's list definitions live: its numbering relationship, else word/numbering.xml. */
     fun numberingPart(rels: Document?): String {
         val root = rels?.documentElement ?: return "word/numbering.xml"
@@ -62,6 +78,10 @@ object DocxReader {
         val obj: String? = null,
         /** Inside a field or content control: shown and formattable, but its text is not editable. */
         val locked: Boolean = false,
+        /** Font family name, theme fonts resolved; null = not set anywhere. */
+        val font: String? = null,
+        /** Size in half-points (w:sz); null = not set anywhere. */
+        val size: Int? = null,
     )
 
     sealed class Block
@@ -119,12 +139,13 @@ object DocxReader {
             fun part(name: String): Document? = zip.getEntry(name)?.let { parse(readEntry(zip, it)) }
             for (e in zip.entries()) checkEntryName(e.name)
             val document = part(DOCUMENT_PART) ?: throw IllegalStateException("no $DOCUMENT_PART in package")
-            return read(document, part("word/styles.xml"), part(numberingPart(part(DOCUMENT_RELS))))
+            val rels = part(DOCUMENT_RELS)
+            return read(document, part("word/styles.xml"), part(numberingPart(rels)), part(themePart(rels)))
         }
     }
 
-    fun read(document: Document, styles: Document?, numbering: Document?): Result {
-        val ctx = Context(Styles(styles), Numbering(numbering))
+    fun read(document: Document, styles: Document?, numbering: Document?, theme: Document? = null): Result {
+        val ctx = Context(Styles(styles), Numbering(numbering), themeFonts(theme))
         val body = child(document.documentElement, "body") ?: return Result(emptyList(), ctx.report())
         val blocks = ArrayList<Block>()
         var paraIndex = 0
@@ -157,7 +178,21 @@ object DocxReader {
 
     // ---------------------------------------------------------------- paragraphs
 
-    private class Context(val styles: Styles, val numbering: Numbering) {
+    /** The theme's heading (major) and body (minor) Latin fonts. */
+    private data class ThemeFonts(val major: String?, val minor: String?)
+
+    private fun themeFonts(theme: Document?): ThemeFonts {
+        val a = "http://schemas.openxmlformats.org/drawingml/2006/main"
+        fun latin(which: String): String? {
+            val list = theme?.getElementsByTagNameNS(a, which) ?: return null
+            if (list.length == 0) return null
+            val latin = (list.item(0) as Element).getElementsByTagNameNS(a, "latin")
+            return if (latin.length > 0) (latin.item(0) as Element).getAttribute("typeface").takeIf { it.isNotEmpty() } else null
+        }
+        return ThemeFonts(latin("majorFont"), latin("minorFont"))
+    }
+
+    private class Context(val styles: Styles, val numbering: Numbering, val theme: ThemeFonts) {
         var tables = 0
         var images = 0
         var tracked = 0
@@ -260,6 +295,12 @@ object DocxReader {
                         superscript = fmt.superscript == true || obj == "note",
                         obj = obj,
                         locked = locked,
+                        font = when (fmt.font) {
+                            "+major" -> theme.major
+                            "+minor" -> theme.minor
+                            else -> fmt.font
+                        },
+                        size = fmt.size,
                     ),
                 )
             }
@@ -411,6 +452,9 @@ object DocxReader {
         val strike: Boolean? = null,
         val highlight: Boolean? = null,
         val superscript: Boolean? = null,
+        /** A family name, or "+major" / "+minor" for the theme's heading / body font. */
+        val font: String? = null,
+        val size: Int? = null,
     ) {
         fun merge(over: Fmt) = Fmt(
             over.bold ?: bold,
@@ -419,6 +463,8 @@ object DocxReader {
             over.strike ?: strike,
             over.highlight ?: highlight,
             over.superscript ?: superscript,
+            over.font ?: font,
+            over.size ?: size,
         )
 
         companion object {
@@ -435,7 +481,16 @@ object DocxReader {
                     strike = on("strike") ?: on("dstrike"),
                     highlight = hl?.let { it.isNotEmpty() && it != "none" },
                     superscript = va?.let { it == "superscript" },
+                    font = child(rPr, "rFonts")?.let { fontOf(it) },
+                    size = child(rPr, "sz")?.getAttributeNS(W, "val")?.toIntOrNull(),
                 )
+            }
+
+            /** The Latin-text font of w:rFonts: a named font, else a theme font marker. */
+            private fun fontOf(r: Element): String? {
+                fun attr(name: String) = r.getAttributeNS(W, name).takeIf { it.isNotEmpty() }
+                fun theme(v: String?) = v?.let { if (it.startsWith("major")) "+major" else "+minor" }
+                return attr("ascii") ?: theme(attr("asciiTheme")) ?: attr("hAnsi") ?: theme(attr("hAnsiTheme"))
             }
         }
     }

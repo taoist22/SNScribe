@@ -35,7 +35,7 @@ import {
 } from './domain/edits';
 import {listKind, recount} from './domain/lists';
 import {anchorAfter, findBreak, windowEnd, type Anchor, type BlockBox, type Break, type LineBox} from './domain/paging';
-import {outline, paragraphText, wordCount, type DocxDocument, type ParagraphBlock} from './model/docx';
+import {fontsUsed, outline, paragraphText, wordCount, type DocxDocument, type ParagraphBlock} from './model/docx';
 import {ensureFileReadPermission, ensureFileWritePermission} from './pluginPermissions';
 import {Docx, DocxKeys, DocxText, errorText, log, nativeBuild, type KeyPress} from './services/native';
 
@@ -87,6 +87,12 @@ export function Reader(): React.JSX.Element {
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
   const [contents, setContents] = useState(false);
+  /** A chooser shown in place of the page: fonts or sizes for the selection. */
+  const [panel, setPanel] = useState<'font' | 'size' | null>(null);
+  /** Font families loaded on this device (from MyStyle/Fonts, or added by hand). */
+  const [fonts, setFonts] = useState<Set<string>>(new Set());
+  /** Naming a new document: the name being typed, or null. */
+  const [naming, setNaming] = useState<string | null>(null);
   const [pageH, setPageH] = useState(0);
   const [measured, setMeasured] = useState<{key: string; brk: Break} | null>(null);
   const [edits, setEdits] = useState<{steps: Op[][]; cursor: number}>({steps: [], cursor: 0});
@@ -202,14 +208,52 @@ export function Reader(): React.JSX.Element {
 
   // ---------------------------------------------------------------- open / close
 
-  const open = async () => {
+  /** Unsaved changes need a second tap to be discarded (Open and New). */
+  const mayDiscard = (action: string): boolean => {
     flushTyping();
     if ((dirty || pending.length > 0) && !discardArmed) {
       setDiscardArmed(true);
-      setStatus('You have unsaved changes. Tap Open again to discard them, or Save first.');
-      return;
+      setStatus(`You have unsaved changes. Tap ${action} again to discard them, or Save first.`);
+      return false;
     }
     setDiscardArmed(false);
+    return true;
+  };
+
+  /** Opens a document and makes its fonts available. `extra` marks a document made with New. */
+  const openPath = async (path: string, extra: Pick<DocxDocument, 'source' | 'saveTo'> = {}) => {
+    setStatus('Opening…');
+    const opened = {...(await Docx!.open(path)), ...extra};
+    setDoc(opened);
+    setAnchor(START);
+    setHistory([]);
+    setContents(false);
+    setPanel(null);
+    setEdits({steps: [], cursor: 0});
+    setSaved({cursor: 0, dest: null});
+    setSelection(null);
+    setCaret(null);
+    setTyping(null);
+    const r = opened.report;
+    setStatus(
+      r.trackedChanges > 0
+        ? 'This document has tracked changes, so it is read-only here. Deleted text is hidden.'
+        : extra.saveTo
+        ? 'New document. Tap the page to start typing.'
+        : '',
+    );
+    log(`opened ${opened.name}: ${opened.blocks.length} blocks in ${opened.ms} ms; ${JSON.stringify(r)}`);
+    try {
+      setFonts(new Set(await Docx!.fonts(fontsUsed(opened.blocks))));
+    } catch (error) {
+      log(`fonts failed: ${errorText(error)}`);
+    }
+  };
+
+  const open = async () => {
+    if (!mayDiscard('Open')) {
+      return;
+    }
     setBusy(true);
     try {
       if (!(await ensureFileReadPermission())) {
@@ -231,24 +275,7 @@ export function Reader(): React.JSX.Element {
         setStatus('Only .docx files can be opened (not .doc).');
         return;
       }
-      setStatus('Opening…');
-      const opened = await Docx!.open(path);
-      setDoc(opened);
-      setAnchor(START);
-      setHistory([]);
-      setContents(false);
-      setEdits({steps: [], cursor: 0});
-      setSaved({cursor: 0, dest: null});
-      setSelection(null);
-      setCaret(null);
-      setTyping(null);
-      const r = opened.report;
-      setStatus(
-        r.trackedChanges > 0
-          ? 'This document has tracked changes, so it is read-only here. Deleted text is hidden.'
-          : '',
-      );
-      log(`opened ${opened.name}: ${opened.blocks.length} blocks in ${opened.ms} ms; ${JSON.stringify(r)}`);
+      await openPath(path);
     } catch (error) {
       setStatus(`Could not open: ${errorText(error)}`);
       log(`open failed: ${errorText(error)}`);
@@ -256,6 +283,74 @@ export function Reader(): React.JSX.Element {
       setBusy(false);
     }
   };
+
+  const startNew = () => {
+    if (!mayDiscard('New')) {
+      return;
+    }
+    setNaming('Untitled');
+  };
+
+  /** A blank document in the Document folder, opened for editing; it saves over itself. */
+  const createNew = async () => {
+    const name = (naming ?? '').trim() || 'Untitled';
+    setNaming(null);
+    setBusy(true);
+    try {
+      if (!(await ensureFileWritePermission())) {
+        setStatus('Making a document needs file write permission.');
+        return;
+      }
+      const made = await Docx!.create(name);
+      await openPath(made.path, {source: made.source, saveTo: made.path});
+    } catch (error) {
+      setStatus(`Could not make the document: ${errorText(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // ---------------------------------------------------------------- fonts and sizes
+
+  const applyRunStyle = (style: {font?: string; size?: number}, label: string) => {
+    if (!selection) {
+      return;
+    }
+    commit(
+      rangesBetween(blocks, selection.from, selection.to).map(r => ({op: 'runStyle', para: r.para, start: r.start, end: r.end, ...style})),
+      label,
+    );
+    setPanel(null);
+  };
+
+  /** A font file picked by hand: named from inside the file, loaded, and remembered. */
+  const addFont = async () => {
+    try {
+      if (!(await ensureFileReadPermission())) {
+        setStatus('File access was not allowed.');
+        return;
+      }
+      const picked = (await RattaFileSelector.selectFile({
+        selectType: 0,
+        maxNum: 1,
+        title: 'Choose a font file (.ttf or .otf)',
+        rightButtonText: 'Add',
+        suffixList: ['ttf', 'otf'],
+      })) as string[] | null | undefined;
+      const path = picked?.find(p => typeof p === 'string' && /\.(ttf|otf)$/i.test(p));
+      if (!path) {
+        return;
+      }
+      const added = await Docx!.addFont(path);
+      setFonts(f => new Set([...f, added.family]));
+      setStatus(`Added the font ${added.family}.`);
+    } catch (error) {
+      setStatus(`Font not added: ${errorText(error)}`);
+    }
+  };
+
+  const fontChoices = useMemo(() => [...new Set([...fonts, ...fontsUsed(blocks)])].sort((a, b) => a.localeCompare(b)), [fonts, blocks]);
+  const SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48, 72];
 
   const close = () => PluginManager.closePluginView();
 
@@ -972,10 +1067,12 @@ export function Reader(): React.JSX.Element {
         setStatus('Saving needs file write permission.');
         return;
       }
-      const res = await Docx.save(doc.path, ops, saved.dest ?? '', expectedTexts(doc.blocks, ops));
+      // A document made with New saves over itself, from its pristine blank; any other
+      // document saves as a copy beside the original.
+      const res = await Docx.save(doc.source ?? doc.path, ops, doc.saveTo ?? saved.dest ?? '', expectedTexts(doc.blocks, ops));
       setSaved({cursor, dest: res.dest});
       setDiscardArmed(false);
-      setStatus(`Saved as ${res.name} (next to the original, which is unchanged).`);
+      setStatus(doc.saveTo ? `Saved ${res.name}.` : `Saved as ${res.name} (next to the original, which is unchanged).`);
     } catch (error) {
       setStatus(`Not saved: ${errorText(error)}`);
     } finally {
@@ -1048,6 +1145,7 @@ export function Reader(): React.JSX.Element {
       ) : null}
       <View style={styles.header}>
         {button('Open', open)}
+        {button('New', startNew)}
         <Text allowFontScaling={false} style={styles.title} numberOfLines={1}>
           {doc ? `${dirty ? '• ' : ''}${doc.name.replace(/\.docx$/i, '')}` : 'DOCX'}
         </Text>
@@ -1062,7 +1160,25 @@ export function Reader(): React.JSX.Element {
         {button('Close', close)}
       </View>
       <View style={styles.bar}>
-        {doc && typing && !contents ? (
+        {naming !== null ? (
+          <View style={styles.typing}>
+            <Text allowFontScaling={false} style={styles.nameLabel}>
+              {'Name:'}
+            </Text>
+            <TextInput
+              style={styles.nameInput}
+              value={naming}
+              onChangeText={setNaming}
+              autoFocus
+              selectTextOnFocus
+              allowFontScaling={false}
+              returnKeyType="done"
+              onSubmitEditing={createNew}
+            />
+            {button('Create', createNew)}
+            {button('Cancel', () => setNaming(null))}
+          </View>
+        ) : doc && typing && !contents ? (
           <View style={styles.typing}>
             <Text allowFontScaling={false} style={styles.caretHint} numberOfLines={1}>
               {typing.mode === 'insert' ? 'Typing — Enter for a new paragraph; tap elsewhere or Done to finish.' : 'Type to replace the selection.'}
@@ -1079,6 +1195,8 @@ export function Reader(): React.JSX.Element {
             {button('H1', () => style('heading1', 'heading 1'))}
             {button('H2', () => style('heading2', 'heading 2'))}
             {button('Body', () => style('normal', 'body text'))}
+            {button('Font', () => setPanel(p => (p === 'font' ? null : 'font')))}
+            {button('Size', () => setPanel(p => (p === 'size' ? null : 'size')))}
             {button('Delete', remove)}
             {button('Replace', startReplace)}
             {button('✕', () => setSelection(null))}
@@ -1110,6 +1228,36 @@ export function Reader(): React.JSX.Element {
               {'Tap Open to choose a Word document (.docx).'}
             </Text>
           </View>
+        ) : panel && selection ? (
+          <ScrollView style={styles.contents}>
+            <View style={styles.panelHead}>
+              <Text allowFontScaling={false} style={styles.panelTitle}>
+                {panel === 'font' ? 'Font for the selection' : 'Size for the selection (points)'}
+              </Text>
+              {panel === 'font' ? button('Add font file…', addFont) : null}
+              {button('Close', () => setPanel(null))}
+            </View>
+            {panel === 'font'
+              ? fontChoices.map(f => (
+                  <Pressable key={f} onPress={() => applyRunStyle({font: f}, `font ${f}`)} style={styles.contentsRow}>
+                    <Text allowFontScaling={false} style={[styles.contentsText, fonts.has(f) ? {fontFamily: f} : null]}>
+                      {fonts.has(f) ? f : `${f}  (not on this Supernote — shows in the default font)`}
+                    </Text>
+                  </Pressable>
+                ))
+              : SIZES.map(pt => (
+                  <Pressable key={pt} onPress={() => applyRunStyle({size: pt * 2}, `size ${pt}`)} style={styles.contentsRow}>
+                    <Text allowFontScaling={false} style={styles.contentsText}>
+                      {`${pt}`}
+                    </Text>
+                  </Pressable>
+                ))}
+            {panel === 'font' ? (
+              <Text allowFontScaling={false} style={styles.panelNote}>
+                {'Fonts are .ttf or .otf files in MyStyle/Fonts. Fonts a document uses are found there by name; add any other font with "Add font file…".'}
+              </Text>
+            ) : null}
+          </ScrollView>
         ) : contents ? (
           <ScrollView style={styles.contents}>
             {headings.map(h => (
@@ -1128,6 +1276,7 @@ export function Reader(): React.JSX.Element {
                   key={anchor.block + i}
                   block={b}
                   selection={selectedIn(b)}
+                  fonts={fonts}
                   onFrame={onFrame(i)}
                   onLines={onLines(i)}
                   onTextFrame={onTextFrame(i)}
@@ -1193,6 +1342,11 @@ const styles = StyleSheet.create({
   typing: {flex: 1, flexDirection: 'row', alignItems: 'center'},
   hiddenInput: {position: 'absolute', left: 0, top: 0, width: 1, height: 1, opacity: 0},
   caretRow: {flex: 1, flexDirection: 'row', alignItems: 'center'},
+  nameLabel: {color: '#000', fontSize: 16, marginRight: 8},
+  nameInput: {flex: 1, height: 44, borderWidth: 1, borderColor: '#000', paddingHorizontal: 10, fontSize: 18, color: '#000'},
+  panelHead: {flexDirection: 'row', alignItems: 'center', paddingVertical: 8, borderBottomWidth: 1, borderColor: '#000'},
+  panelTitle: {flex: 1, color: '#000', fontSize: 18, fontWeight: '700'},
+  panelNote: {color: '#333', fontSize: 15, marginTop: 16},
   caretHint: {flex: 1, color: '#000', fontSize: 15},
   caret: {position: 'absolute', width: 3, backgroundColor: '#000'},
   statusText: {flex: 1, color: '#000', fontSize: 15},

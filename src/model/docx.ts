@@ -20,6 +20,10 @@ export type Run = {
   obj?: 'image' | 'note' | 'object';
   /** Inside a field or content control: formattable, but its text is not editable. */
   k?: boolean;
+  /** Font family (theme fonts resolved). */
+  f?: string;
+  /** Size in half-points (w:sz): 22 = 11 pt. */
+  sz?: number;
 };
 
 export type ParagraphBlock = {
@@ -68,7 +72,28 @@ export type DocxDocument = {
   blocks: Block[];
   /** Definitions of the lists the paragraphs use, by id. */
   lists: Record<string, ListDef>;
+  /**
+   * Set for a document made with New: edits are applied to `source` (a pristine blank in
+   * private storage) and saved over `saveTo` (the new file), instead of an "-edited" copy.
+   */
+  source?: string;
+  saveTo?: string;
 };
+
+/** Every font family the document's text uses. */
+export function fontsUsed(blocks: Block[]): string[] {
+  const out = new Set<string>();
+  for (const b of blocks) {
+    if (b.type === 'p') {
+      for (const r of b.runs) {
+        if (r.f) {
+          out.add(r.f);
+        }
+      }
+    }
+  }
+  return [...out].sort();
+}
 
 export function paragraphText(p: ParagraphBlock): string {
   return p.runs.map(r => r.t).join('');

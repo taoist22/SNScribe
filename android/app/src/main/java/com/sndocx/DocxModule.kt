@@ -7,6 +7,8 @@ import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.ReadableArray
 import com.facebook.react.bridge.WritableMap
+import android.graphics.Typeface
+import com.facebook.react.common.assets.ReactFontManager
 import java.io.File
 import java.io.FileOutputStream
 import java.text.SimpleDateFormat
@@ -31,7 +33,7 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
 
     companion object {
         /** Bumped with each native change; first log line, to spot stale installs. */
-        const val NATIVE_BUILD = 5
+        const val NATIVE_BUILD = 6
         private val EXPORT_DIR = File("/storage/emulated/0/EXPORT")
         private const val LOG_MAX_BYTES = 2L * 1024 * 1024
         private const val LOG_LINE_MAX = 4000
@@ -163,6 +165,11 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
                         )
                         "split" -> DocxEditor.Op.Split(m.getInt("para"), m.getInt("offset"))
                         "join" -> DocxEditor.Op.Join(m.getInt("para"))
+                        "runStyle" -> DocxEditor.Op.RunStyle(
+                            m.getInt("para"), m.getInt("start"), m.getInt("end"),
+                            if (m.hasKey("font") && !m.isNull("font")) m.getString("font") else null,
+                            if (m.hasKey("size") && !m.isNull("size")) m.getInt("size") else null,
+                        )
                         "list" -> DocxEditor.Op.ListItem(m.getInt("para"), m.getString("kind") ?: "none", m.getString("listId") ?: "")
                         else -> throw IllegalArgumentException("unknown op ${m.getString("op")}")
                     }
@@ -183,6 +190,122 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
                 appendLog("save FAILED $srcPath: $t")
                 promise.reject("DOCX_SAVE_FAILED", t.message ?: t.toString(), t)
             }
+        }
+    }
+
+    // ---------------------------------------------------------------- new documents
+
+    /**
+     * A new blank document named [name] in the Document folder (never over an existing
+     * file). Also keeps a pristine copy in private storage: edits are always applied to
+     * that copy and saved over the new file, so every save starts from the same blank.
+     * Resolves {path, source}.
+     */
+    @ReactMethod
+    fun create(name: String, promise: Promise) {
+        worker.execute {
+            try {
+                val dir = File("/storage/emulated/0/Document").also { if (!it.isDirectory) it.mkdirs() }
+                val dest = DocxBlank.freeName(dir, name)
+                val source = File(File(reactContext.filesDir, "sn-docx-new").also { it.mkdirs() }, "blank-${System.currentTimeMillis()}.docx")
+                DocxBlank.write(source)
+                source.inputStream().use { input -> FileOutputStream(dest).use { input.copyTo(it) } }
+                appendLog("created ${dest.path} (source ${source.name})")
+                promise.resolve(Arguments.createMap().apply {
+                    putString("path", dest.path)
+                    putString("source", source.path)
+                })
+            } catch (t: Throwable) {
+                appendLog("create FAILED: $t")
+                promise.reject("DOCX_CREATE_FAILED", t.message ?: t.toString(), t)
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- fonts
+
+    /** Fonts added by hand, remembered across sessions: family \t style \t path. */
+    private val fontList by lazy { File(reactContext.filesDir, "sn-docx-fonts.tsv") }
+    private val loaded = HashMap<String, MutableSet<Int>>() // family → styles registered
+    private var restored = false
+
+    private val faces = HashMap<String, HashMap<Int, Typeface>>() // family → style → file-loaded face
+
+    private fun register(family: String, style: Int, file: File): Boolean {
+        val tf = runCatching { Typeface.createFromFile(file) }.getOrNull() ?: return false
+        faces.getOrPut(family) { HashMap() }[style] = tf
+        ReactFontManager.getInstance().setTypeface(family, style, tf)
+        loaded.getOrPut(family) { HashSet() }.add(style)
+        fillMissing(family)
+        return true
+    }
+
+    /**
+     * Styles with no file of their own (say, no bold file) get a synthesized face of the
+     * regular one; otherwise the screen would draw them in the system font instead.
+     */
+    private fun fillMissing(family: String) {
+        val have = faces[family] ?: return
+        val base = have[Typeface.NORMAL] ?: have.values.first()
+        for (style in listOf(Typeface.NORMAL, Typeface.BOLD, Typeface.ITALIC, Typeface.BOLD_ITALIC)) {
+            if (style !in have) ReactFontManager.getInstance().setTypeface(family, style, Typeface.create(base, style))
+        }
+    }
+
+    private fun restore() {
+        if (restored) return
+        restored = true
+        runCatching {
+            if (!fontList.isFile) return
+            for (line in fontList.readLines()) {
+                val (family, style, path) = line.split('\t').takeIf { it.size == 3 } ?: continue
+                val f = File(path)
+                if (f.isFile) register(family, style.toIntOrNull() ?: 0, f)
+            }
+        }
+    }
+
+    /**
+     * Makes the given families (the fonts a document uses) available to the screen where a
+     * file can be found in MyStyle/Fonts, plus every font added by hand. Resolves the
+     * families that are available now.
+     */
+    @ReactMethod
+    fun fonts(families: ReadableArray, promise: Promise) {
+        worker.execute {
+            restore()
+            for (i in 0 until families.size()) {
+                val family = families.getString(i) ?: continue
+                if (loaded.containsKey(family)) continue
+                for (style in 0..3) FontFiles.find(family, style)?.let { register(family, style, it) }
+            }
+            appendLog("fonts available: ${loaded.keys.sorted()}")
+            promise.resolve(Arguments.fromList(loaded.keys.sorted()))
+        }
+    }
+
+    /** A font file the user picked: named from its own name table, registered and remembered. */
+    @ReactMethod
+    fun addFont(path: String, promise: Promise) {
+        worker.execute {
+            restore()
+            val file = File(path)
+            val info = FontFiles.info(file)
+            if (info == null) {
+                promise.reject("DOCX_FONT", "Not a font file this device can read: ${file.name}")
+                return@execute
+            }
+            val style = FontFiles.styleIndex(info.bold, info.italic)
+            if (!register(info.family, style, file)) {
+                promise.reject("DOCX_FONT", "Android could not load ${file.name}")
+                return@execute
+            }
+            runCatching { fontList.appendText("${info.family}\t$style\t${file.path}\n") }
+            appendLog("font added: ${info.family} style $style from ${file.path}")
+            promise.resolve(Arguments.createMap().apply {
+                putString("family", info.family)
+                putInt("style", style)
+            })
         }
     }
 
@@ -221,6 +344,8 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
                         if (r.superscript) putBoolean("sup", true)
                         r.obj?.let { putString("obj", it) }
                         if (r.locked) putBoolean("k", true)
+                        r.font?.let { putString("f", it) }
+                        r.size?.let { putInt("sz", it) }
                     })
                 })
             }

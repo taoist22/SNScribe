@@ -21,7 +21,9 @@ export type Op =
   /** Backspace at the start of `para`: it joins onto the end of `para` - 1. */
   | {op: 'join'; para: number}
   /** In or out of a list. listId: a document list (number as text) or a new list's name ("n1", "b2"). */
-  | {op: 'list'; para: number; kind: 'number' | 'bullet' | 'none'; listId: string};
+  | {op: 'list'; para: number; kind: 'number' | 'bullet' | 'none'; listId: string}
+  /** Font family and/or size (half-points) of [start, end). */
+  | {op: 'runStyle'; para: number; start: number; end: number; font?: string; size?: number};
 
 /** A position between characters of paragraph `para` (Paragraph.index). */
 export type Pos = {para: number; offset: number};
@@ -226,6 +228,23 @@ function listItem(p: ParagraphBlock, op: Extract<Op, {op: 'list'}>): ParagraphBl
   return {...p, num: {id, lvl: 0}, list: p.list ?? '', indent: Math.max(p.indent, 720)};
 }
 
+/** Mirrors DocxEditor.runStyle. */
+function runStyle(p: ParagraphBlock, op: Extract<Op, {op: 'runStyle'}>): ParagraphBlock {
+  if (op.end <= op.start) {
+    return p;
+  }
+  let offset = 0;
+  const runs = splitRuns(p.runs, [op.start, op.end]).map(r => {
+    const s = offset;
+    offset += r.t.length;
+    if (r.t.length === 0 || s < op.start || offset > op.end) {
+      return r;
+    }
+    return {...r, ...(op.font !== undefined ? {f: op.font} : {}), ...(op.size !== undefined ? {sz: op.size} : {})};
+  });
+  return {...p, runs};
+}
+
 /** The document with `ops` applied, in order. Untouched blocks keep their identity. */
 export function applyOps(blocks: Block[], ops: Op[]): Block[] {
   if (ops.length === 0) {
@@ -258,6 +277,9 @@ export function applyOps(blocks: Block[], ops: Op[]): Block[] {
         break;
       case 'list':
         out[i] = listItem(p, op);
+        break;
+      case 'runStyle':
+        out[i] = runStyle(p, op);
         break;
     }
   }

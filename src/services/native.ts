@@ -11,6 +11,12 @@ type DocxModule = {
   logName(): Promise<string>;
   delay(ms: number): Promise<void>;
   open(path: string): Promise<DocxDocument>;
+  /** A blank document named `name` in the Document folder: its path, and the pristine copy edits apply to. */
+  create(name: string): Promise<{path: string; source: string}>;
+  /** Loads what it can find of these families (plus fonts added before); resolves the families available. */
+  fonts(families: string[]): Promise<string[]>;
+  /** A font file the user picked: its family, loaded and remembered. */
+  addFont(path: string): Promise<{family: string; style: number}>;
   /** Saves a verified copy with `ops` applied; `dest` '' = new <name>-edited.docx beside the original. */
   save(
     src: string,

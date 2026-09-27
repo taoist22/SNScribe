@@ -64,6 +64,9 @@ object DocxEditor {
          * new list, which starts at 1.
          */
         data class ListItem(val para: Int, val kind: String, val listId: String) : Op()
+
+        /** Sets the font family and/or the size (half-points) of characters [start, end). */
+        data class RunStyle(val para: Int, val start: Int, val end: Int, val font: String?, val size: Int?) : Op()
     }
 
     data class Saved(val dest: File, val changedParts: List<String>, val notes: List<String>)
@@ -209,6 +212,7 @@ object DocxEditor {
                 is Op.Split -> op.para
                 is Op.Join -> op.para
                 is Op.ListItem -> op.para
+                is Op.RunStyle -> op.para
             }
             val p = checkNotNull(paragraphs.getOrNull(index)) { "no paragraph $index for $op" }
             when (op) {
@@ -218,6 +222,7 @@ object DocxEditor {
                 is Op.Split -> splitParagraph(document, p, op, styleIds, notes)
                 is Op.Join -> joinParagraph(checkNotNull(paragraphs.getOrNull(index - 1)) { "nothing before paragraph $index to join onto" }, p, op, notes)
                 is Op.ListItem -> setListItem(document, p, op, lists, styleIds, notes)
+                is Op.RunStyle -> runStyle(document, p, op, notes)
             }
             // Splits and joins renumber the paragraphs after them.
             if (op is Op.Split || op is Op.Join) paragraphs = bodyParagraphs(document)
@@ -646,6 +651,38 @@ object DocxEditor {
             }
             offset += len
         }
+    }
+
+    private fun runStyle(document: Document, p: Element, op: Op.RunStyle, notes: MutableList<String>) {
+        if (op.end <= op.start) return
+        splitAt(p, op.start)
+        splitAt(p, op.end)
+        var offset = 0
+        var touched = 0
+        for (seg in DocxReader.segments(p)) {
+            val len = seg.length
+            if (seg.isRun && len > 0 && offset >= op.start && offset + len <= op.end) {
+                val rPr = child(seg.el, "rPr") ?: document.createElementNS(W, "w:rPr").also { seg.el.insertBefore(it, seg.el.firstChild) }
+                op.font?.let { name ->
+                    // A named font on every script slot; theme references would override it.
+                    child(rPr, "rFonts")?.let { rPr.removeChild(it) }
+                    val f = document.createElementNS(W, "w:rFonts")
+                    for (slot in listOf("ascii", "hAnsi", "eastAsia", "cs")) f.setAttributeNS(W, "w:$slot", name)
+                    insertInOrder(rPr, f, RPR_ORDER)
+                }
+                op.size?.let { size ->
+                    for (tag in listOf("sz", "szCs")) {
+                        child(rPr, tag)?.let { rPr.removeChild(it) }
+                        val e = document.createElementNS(W, "w:$tag")
+                        e.setAttributeNS(W, "w:val", size.toString())
+                        insertInOrder(rPr, e, RPR_ORDER)
+                    }
+                }
+                touched++
+            }
+            offset += len
+        }
+        notes.add("font=${op.font} size=${op.size} p${op.para} [${op.start},${op.end}): $touched run(s)")
     }
 
     /** Sets a run property explicitly on or off, so styles cannot override the user's choice. */

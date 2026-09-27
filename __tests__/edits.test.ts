@@ -217,3 +217,19 @@ describe('paragraphs', () => {
     expect(splitProblem(field, 5)).toBeNull();
   });
 });
+
+describe('fonts and sizes', () => {
+  it('sets font and size on exactly the range', () => {
+    const [, , out] = applyOps(doc, [{op: 'runStyle', para: 1, start: 6, end: 15, font: 'Georgia', size: 28}]) as ParagraphBlock[];
+    const styled = out.runs.filter(r => r.f === 'Georgia');
+    expect(styled.map(r => r.t).join('')).toBe('then bold');
+    expect(styled.every(r => r.sz === 28)).toBe(true);
+    expect(out.runs.find(r => r.t === 'bold')?.b).toBe(true);
+    expect(paragraphText(out)).toBe(paragraphText(p1));
+  });
+  it('can change only the size', () => {
+    const [, , out] = applyOps(doc, [{op: 'runStyle', para: 1, start: 0, end: 5, size: 40}]) as ParagraphBlock[];
+    expect(out.runs[0]).toMatchObject({t: 'Plain', sz: 40});
+    expect(out.runs[0].f).toBeUndefined();
+  });
+});

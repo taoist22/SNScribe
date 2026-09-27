@@ -25,6 +25,8 @@ type Props = {
   textRef?: (t: Text | null) => void;
   /** The paragraph Text's position inside the block frame (list rows shift it right). */
   onTextFrame?: (e: LayoutChangeEvent) => void;
+  /** Font families loaded on this device; other fonts show in the default font. */
+  fonts?: Set<string>;
 };
 
 const SYMBOL: Record<string, string> = {image: '▣', note: '*', object: '◇'};
@@ -47,8 +49,14 @@ function sizeFor(p: ParagraphBlock): number {
   }
 }
 
-function ParagraphView({p, selection, onFrame, onLines, textRef, onTextFrame}: Omit<Props, 'block'> & {p: ParagraphBlock}) {
-  const size = sizeFor(p);
+/** Word sizes (half-points) on screen: 11 pt body text ≈ 20 dp, as before sizes were read. */
+const dpFor = (halfPoints: number) => Math.max(10, Math.min(64, Math.round(halfPoints * 0.91)));
+
+function ParagraphView({p, selection, onFrame, onLines, textRef, onTextFrame, fonts}: Omit<Props, 'block'> & {p: ParagraphBlock}) {
+  // The document's own sizes when it has them; the line height follows the largest.
+  const base = sizeFor(p);
+  const runSize = (r: Run) => (r.sz ? dpFor(r.sz) : base);
+  const size = p.runs.length ? Math.max(...p.runs.map(runSize)) : base;
   const lineHeight = Math.round(size * 1.45);
   const heading = p.kind !== 'body';
   // Word allows negative indents (text pulled into the page margin); the screen has no
@@ -78,7 +86,8 @@ function ParagraphView({p, selection, onFrame, onLines, textRef, onTextFrame}: O
             r.i ? styles.italic : null,
             r.h ? styles.highlight : null,
             r.u || r.s ? {textDecorationLine: r.u && r.s ? 'underline line-through' : r.u ? 'underline' : 'line-through'} : null,
-            r.sup ? {fontSize: Math.round(size * 0.65)} : null,
+            {fontSize: r.sup ? Math.round(runSize(r) * 0.65) : runSize(r)},
+            r.f && fonts?.has(r.f) ? {fontFamily: r.f} : null,
             r.sel ? styles.selected : null,
           ]}>
           {runText(r)}
