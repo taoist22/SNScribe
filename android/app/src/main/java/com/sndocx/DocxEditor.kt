@@ -961,11 +961,29 @@ object DocxEditor {
         val inches = (right / 1440.0 - 0.1).coerceIn(0.8, 1.6)
         val cx = (inches * EMU_PER_INCH).toLong()
         val cy = (cx * op.height / maxOf(1, op.width)).coerceAtLeast(EMU_PER_INCH / 10)
+        // Notes never overlap: Word moves floating pictures apart when allowOverlap is off (set
+        // on every DOCX note, older ones too), and notes beside one paragraph are stacked here
+        // as well, for apps that ignore that setting.
+        var below = 0L
+        val drawingsNow = document.getElementsByTagNameNS(W, "drawing")
+        for (i in 0 until drawingsNow.length) {
+            val d = drawingsNow.item(i) as Element
+            if (DocxReader.inkNoteId(d) == null) continue
+            val anchor = d.getElementsByTagNameNS(DocxReader.WP, "anchor").item(0) as? Element ?: continue
+            anchor.setAttribute("allowOverlap", "0")
+            var n: org.w3c.dom.Node? = d
+            while (n != null && n !== p) n = n.parentNode
+            if (n === p) {
+                val ext = anchor.getElementsByTagNameNS(DocxReader.WP, "extent").item(0) as? Element
+                val off = (anchor.getElementsByTagNameNS(DocxReader.WP, "posOffset").item(1) as? Element)?.textContent?.trim()?.toLongOrNull() ?: 0L
+                below = maxOf(below, off + (ext?.getAttribute("cy")?.toLongOrNull() ?: 0L) + EMU_PER_INCH / 20)
+            }
+        }
         var maxDocPr = 0
         val prs = document.getElementsByTagNameNS(DocxReader.WP, "docPr")
         for (i in 0 until prs.length) maxDocPr = maxOf(maxDocPr, (prs.item(i) as Element).getAttribute("id").toIntOrNull() ?: 0)
         val docPr = maxDocPr + 1
-        val xml = """<w:r xmlns:w="$W" xmlns:wp="${DocxReader.WP}" xmlns:a="${DocxReader.A}" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="$R_NS"><w:rPr><w:noProof/></w:rPr><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="${251659264 + docPr}" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="rightMargin"><wp:posOffset>45720</wp:posOffset></wp:positionH><wp:positionV relativeFrom="line"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="$cx" cy="$cy"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapNone/><wp:docPr id="$docPr" name="${DocxReader.INK_NAME}${op.id}" descr="Handwritten note"/><wp:cNvGraphicFramePr/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="$docPr" name="Handwritten note ${op.id}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="$rId"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="$cx" cy="$cy"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"""
+        val xml = """<w:r xmlns:w="$W" xmlns:wp="${DocxReader.WP}" xmlns:a="${DocxReader.A}" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="$R_NS"><w:rPr><w:noProof/></w:rPr><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="${251659264 + docPr}" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="0"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="rightMargin"><wp:posOffset>45720</wp:posOffset></wp:positionH><wp:positionV relativeFrom="line"><wp:posOffset>$below</wp:posOffset></wp:positionV><wp:extent cx="$cx" cy="$cy"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapNone/><wp:docPr id="$docPr" name="${DocxReader.INK_NAME}${op.id}" descr="Handwritten note"/><wp:cNvGraphicFramePr/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="$docPr" name="Handwritten note ${op.id}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="$rId"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="$cx" cy="$cy"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"""
         val run = document.importNode(DocxReader.parse(xml.toByteArray()).documentElement, true) as Element
         // Namespaces are declared on the document root already, or the serializer adds them.
         for (prefix in listOf("w", "wp", "a", "pic", "r")) run.removeAttributeNS("http://www.w3.org/2000/xmlns/", prefix)
