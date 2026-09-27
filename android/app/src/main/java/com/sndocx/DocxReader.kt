@@ -27,7 +27,7 @@ import javax.xml.parsers.DocumentBuilderFactory
 object DocxReader {
     const val W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
     const val OBJECT = '￼'
-    private const val DOCUMENT_PART = "word/document.xml"
+    const val DOCUMENT_PART = "word/document.xml"
     const val DOCUMENT_RELS = "word/_rels/document.xml.rels"
     const val REL_NUMBERING = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering"
 
@@ -179,6 +179,23 @@ object DocxReader {
         val font: String? = null,
         /** Size in half-points (w:sz); null = not set anywhere. */
         val size: Int? = null,
+        /** Inside a tracked insertion (w:ins / w:moveTo): its w:id. */
+        val rev: String? = null,
+    )
+
+    /**
+     * A tracked change in a paragraph's text. "ins": the runs with [Run.rev] == [id].
+     * "del": text that is deleted but not yet accepted — not part of the paragraph's text;
+     * it sits before character [at] and reads [runs]. [move]: a move (moveTo/moveFrom).
+     */
+    data class Revision(
+        val id: String,
+        val kind: String,
+        val author: String,
+        val date: String,
+        val at: Int = -1,
+        val runs: List<Run> = emptyList(),
+        val move: Boolean = false,
     )
 
     sealed class Block
@@ -205,6 +222,8 @@ object DocxReader {
         /** The font and size (half-points) text in this paragraph has unless it sets its own. */
         val baseFont: String? = null,
         val baseSize: Int? = null,
+        /** Tracked insertions and deletions in its text, in reading order. */
+        val revisions: List<Revision> = emptyList(),
     ) : Block() {
         val text: String get() = runs.joinToString("") { it.text }
     }
@@ -240,6 +259,8 @@ object DocxReader {
         val page: PageSetup? = null,
         val header: HeaderFooter? = null,
         val footer: HeaderFooter? = null,
+        /** Tracked changes DOCX can't review yet: formatting, paragraph marks, sections, tables. */
+        val otherRevisions: Int = 0,
     )
 
     /** The default header or footer of the last section: its text, whether it shows a page number, alignment. */
@@ -304,7 +325,21 @@ object DocxReader {
             ctx.report(),
             used.mapNotNull { id -> ctx.numbering.definition(id)?.let { id to it } }.toMap(),
             pageSetup(child(body, "sectPr")),
+            otherRevisions = otherRevisions(document),
         )
+    }
+
+    /** Formatting changes, and insertions or deletions of paragraph marks and table rows. */
+    fun otherRevisions(document: Document): Int {
+        var n = 0
+        for (tag in listOf("rPrChange", "pPrChange", "sectPrChange", "tblPrChange", "trPrChange", "tcPrChange", "tblGridChange", "numberingChange")) {
+            n += document.getElementsByTagNameNS(W, tag).length
+        }
+        for (tag in listOf("ins", "del")) {
+            val all = document.getElementsByTagNameNS(W, tag)
+            for (i in 0 until all.length) if ((all.item(i).parentNode as? Element)?.localName in setOf("rPr", "trPr")) n++
+        }
+        return n
     }
 
     // ---------------------------------------------------------------- paragraphs
@@ -383,6 +418,8 @@ object DocxReader {
 
             val runs = ArrayList<Run>()
             collectRuns(p, style.run, runs)
+            val revisions = ArrayList<Revision>()
+            collectRevisions(p, style.run, intArrayOf(0), revisions)
             return Paragraph(
                 index = index,
                 styleId = styleId,
@@ -398,7 +435,46 @@ object DocxReader {
                 para = style.para.merge(ParaFmt.of(pPr)),
                 baseFont = theme.resolve(style.run.font),
                 baseSize = style.run.size,
+                revisions = revisions,
             )
+        }
+
+        /**
+         * Tracked changes in reading order, mirroring [walk]: insertions where they start,
+         * deletions with their position in the paragraph's text ([at], kept in [offset]).
+         */
+        private fun collectRevisions(parent: Element, base: Fmt, offset: IntArray, out: MutableList<Revision>) {
+            fun meta(el: Element, kind: String, at: Int = -1, runs: List<Run> = emptyList()) = Revision(
+                id = el.getAttributeNS(W, "id"),
+                kind = kind,
+                author = el.getAttributeNS(W, "author"),
+                date = el.getAttributeNS(W, "date"),
+                at = at,
+                runs = runs,
+                move = el.localName.startsWith("move"),
+            )
+            for (el in elementChildren(parent)) {
+                if (el.namespaceURI != W) {
+                    if (el.localName == "AlternateContent") offset[0]++
+                    continue
+                }
+                when (el.localName) {
+                    "r" -> offset[0] += runText(el).length
+                    "ins", "moveTo" -> {
+                        if (lengthOf(el) > 0) out.add(meta(el, "ins"))
+                        collectRevisions(el, base, offset, out)
+                    }
+                    "del", "moveFrom" -> {
+                        val deleted = ArrayList<Run>()
+                        for (i in 0 until el.getElementsByTagNameNS(W, "r").length) {
+                            run(el.getElementsByTagNameNS(W, "r").item(i) as Element, base, link = false, locked = true, out = deleted, deleted = true)
+                        }
+                        if (deleted.isNotEmpty()) out.add(meta(el, "del", offset[0], mergeAdjacent(deleted)))
+                    }
+                    "hyperlink", "fldSimple", "smartTag", "customXml" -> collectRevisions(el, base, offset, out)
+                    "sdt" -> child(el, "sdtContent")?.let { collectRevisions(it, base, offset, out) }
+                }
+            }
         }
 
         private fun collectRuns(p: Element, base: Fmt, out: MutableList<Run>) {
@@ -412,11 +488,11 @@ object DocxReader {
                 }
             }
             for (seg in segs) {
-                if (seg.isRun) run(seg.el, base, seg.link, seg.locked, out) else out.add(Run(OBJECT.toString(), obj = "object", locked = true))
+                if (seg.isRun) run(seg.el, base, seg.link, seg.locked, out, rev = seg.rev) else out.add(Run(OBJECT.toString(), obj = "object", locked = true, rev = seg.rev))
             }
         }
 
-        private fun run(r: Element, base: Fmt, link: Boolean, locked: Boolean, out: MutableList<Run>) {
+        private fun run(r: Element, base: Fmt, link: Boolean, locked: Boolean, out: MutableList<Run>, rev: String? = null, deleted: Boolean = false) {
             val rPr = child(r, "rPr")
             val charStyle = rPr?.let { child(it, "rStyle") }?.getAttributeNS(W, "val")
             val fmt = base.merge(styles.character(charStyle)).merge(Fmt.of(rPr))
@@ -441,12 +517,13 @@ object DocxReader {
                             else -> fmt.font
                         },
                         size = fmt.size,
+                        rev = rev,
                     ),
                 )
             }
             val text = StringBuilder()
             for (c in elementChildren(r)) {
-                val t = textOf(c)
+                val t = if (deleted && c.localName == "delText") c.textContent else textOf(c)
                 if (t.isEmpty()) {
                     if (c.localName == "fldChar") fields++
                     continue
@@ -472,7 +549,7 @@ object DocxReader {
      * One text-bearing piece of a paragraph, in reading order: a w:r run, or a foreign object
      * (mc:AlternateContent — a text box or shape) that counts as a single U+FFFC.
      */
-    class Segment(val el: Element, val isRun: Boolean, val link: Boolean, var locked: Boolean = false) {
+    class Segment(val el: Element, val isRun: Boolean, val link: Boolean, var locked: Boolean = false, val rev: String? = null) {
         val length: Int get() = if (isRun) runText(el).length else 1
     }
 
@@ -506,30 +583,30 @@ object DocxReader {
     }
 
     /** [locked]: inside a simple field or content control — shown, formattable, not text-editable. */
-    private fun walk(parent: Element, link: Boolean, out: MutableList<Segment>, onMarker: (Element) -> Unit, locked: Boolean) {
+    private fun walk(parent: Element, link: Boolean, out: MutableList<Segment>, onMarker: (Element) -> Unit, locked: Boolean, rev: String? = null) {
         for (el in elementChildren(parent)) {
             if (el.namespaceURI != W) {
                 if (el.localName == "AlternateContent") {
                     onMarker(el)
-                    out.add(Segment(el, false, link, locked))
+                    out.add(Segment(el, false, link, locked, rev))
                 }
                 continue
             }
             when (el.localName) {
-                "r" -> out.add(Segment(el, true, link, locked))
-                "hyperlink" -> walk(el, true, out, onMarker, locked)
+                "r" -> out.add(Segment(el, true, link, locked, rev))
+                "hyperlink" -> walk(el, true, out, onMarker, locked, rev)
                 "ins", "moveTo" -> {
                     onMarker(el)
-                    walk(el, link, out, onMarker, locked)
+                    walk(el, link, out, onMarker, locked, el.getAttributeNS(W, "id"))
                 }
                 "fldSimple" -> {
                     onMarker(el)
-                    walk(el, link, out, onMarker, true)
+                    walk(el, link, out, onMarker, true, rev)
                 }
-                "smartTag", "customXml" -> walk(el, link, out, onMarker, locked)
+                "smartTag", "customXml" -> walk(el, link, out, onMarker, locked, rev)
                 "sdt" -> {
                     onMarker(el)
-                    child(el, "sdtContent")?.let { walk(it, link, out, onMarker, true) }
+                    child(el, "sdtContent")?.let { walk(it, link, out, onMarker, true, rev) }
                 }
                 else -> onMarker(el) // del, moveFrom, commentRangeStart, bookmarks, proofErr, pPr …
             }

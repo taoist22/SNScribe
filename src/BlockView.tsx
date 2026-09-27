@@ -1,6 +1,6 @@
 import React from 'react';
 import {StyleSheet, Text, View, type LayoutChangeEvent, type TextLayoutEventData, type NativeSyntheticEvent} from 'react-native';
-import {markSelection} from './domain/edits';
+import {markSelection, splitRuns} from './domain/edits';
 import {OBJECT, type Block, type ParagraphBlock, type Run} from './model/docx';
 import type {LineBox} from './domain/paging';
 
@@ -12,7 +12,9 @@ import type {LineBox} from './domain/paging';
  * Inline objects keep their single character (so offsets match the model) but show as a
  * symbol: ▣ image, * note reference, ◇ other object.
  *
- * Grayscale only: highlight is light grey, links are underlined.
+ * Grayscale only: highlight is light grey, links are underlined. Tracked changes as Word
+ * shows them, in grey: insertions underlined, deletions struck through (shown before the
+ * character they sit at, though they are not part of the text — see shownExtras).
  */
 
 type Props = {
@@ -66,6 +68,31 @@ export function leadChars(b: Block): number {
   return b.type === 'p' && (b.first ?? 0) > 0 && b.runs.length > 0 ? 1 : 0;
 }
 
+type Piece = Run & {sel?: boolean; del?: boolean};
+
+/** The paragraph's runs with selection marked, and deleted text placed where it sits. */
+function pieces(p: ParagraphBlock, selection: {start: number; end: number} | null): Piece[] {
+  const marked: Piece[] = markSelection(p.runs, selection);
+  const dels = (p.revs ?? []).filter(v => v.kind === 'del' && v.runs?.length).sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
+  if (dels.length === 0) {
+    return marked;
+  }
+  const out: Piece[] = [];
+  let offset = 0;
+  let d = 0;
+  for (const r of splitRuns(marked, dels.map(v => v.at ?? 0)) as Piece[]) {
+    while (d < dels.length && (dels[d].at ?? 0) <= offset) {
+      out.push(...dels[d++].runs!.map(x => ({...x, del: true})));
+    }
+    out.push(r);
+    offset += r.t.length;
+  }
+  while (d < dels.length) {
+    out.push(...dels[d++].runs!.map(x => ({...x, del: true})));
+  }
+  return out;
+}
+
 function ParagraphView({p, selection, onFrame, onLines, textRef, onTextFrame, fonts, scale = 1}: Omit<Props, 'block'> & {p: ParagraphBlock}) {
   // The document's own sizes when it has them, times the reader's text size; the line
   // height follows the largest.
@@ -102,14 +129,17 @@ function ParagraphView({p, selection, onFrame, onLines, textRef, onTextFrame, fo
         onLines?.(e.nativeEvent.lines.map(l => ({y: l.y, height: l.height, len: l.text.length})))
       }>
       {leadChars(p) ? <View key="first-line" style={{width: dpForTwips(p.first!, scale), height: 1}} /> : null}
-      {markSelection(p.runs, selection ?? null).map((r, i) => (
+      {pieces(p, selection ?? null).map((r, i) => (
         <Text
           key={i}
           style={[
             r.b ? styles.bold : null,
             r.i ? styles.italic : null,
             r.h ? styles.highlight : null,
-            r.u || r.s ? {textDecorationLine: r.u && r.s ? 'underline line-through' : r.u ? 'underline' : 'line-through'} : null,
+            r.del ? styles.deleted : r.rv ? styles.inserted : null,
+            r.u || r.s || r.del || r.rv
+              ? {textDecorationLine: (r.u || r.rv) && (r.s || r.del) ? 'underline line-through' : r.u || r.rv ? 'underline' : 'line-through'}
+              : null,
             {fontSize: r.sup ? Math.round(runSize(r) * 0.65) : runSize(r)},
             r.f && fonts?.has(r.f) ? {fontFamily: r.f} : null,
             r.sel ? styles.selected : null,
@@ -187,6 +217,8 @@ const styles = StyleSheet.create({
   italic: {fontStyle: 'italic'},
   highlight: {backgroundColor: '#cfcfcf'},
   selected: {backgroundColor: '#000', color: '#fff'},
+  inserted: {color: '#333'},
+  deleted: {color: '#777'},
   pageBreak: {height: 28, justifyContent: 'center', alignItems: 'center', borderTopWidth: 1, borderColor: '#000', borderStyle: 'dashed'},
   pageBreakText: {color: '#000', fontSize: 13},
   locked: {borderWidth: 1, borderColor: '#000', borderStyle: 'dashed', padding: 10, marginBottom: 12},

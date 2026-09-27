@@ -118,6 +118,7 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
                     putDouble("bytes", file.length().toDouble())
                     putDouble("ms", ms.toDouble())
                     putMap("report", report(result.report))
+                    if (result.otherRevisions > 0) putInt("otherRevisions", result.otherRevisions)
                     result.page?.let { pg ->
                         putMap("page", Arguments.createMap().apply {
                             putInt("width", pg.width); putInt("height", pg.height)
@@ -170,59 +171,7 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
             val t0 = System.currentTimeMillis()
             try {
                 val src = File(srcPath)
-                val parsed = (0 until ops.size()).mapNotNull { i -> ops.getMap(i) }.map { m ->
-                    when (m.getString("op")) {
-                        "format" -> DocxEditor.Op.Format(
-                            m.getInt("para"), m.getInt("start"), m.getInt("end"),
-                            m.getString("prop") ?: "", m.getBoolean("on"),
-                        )
-                        "style" -> DocxEditor.Op.Style(m.getInt("para"), m.getString("kind") ?: "normal")
-                        "text" -> DocxEditor.Op.Text(
-                            m.getInt("para"), m.getInt("start"), m.getInt("end"), m.getString("text") ?: "",
-                        )
-                        "split" -> DocxEditor.Op.Split(m.getInt("para"), m.getInt("offset"))
-                        "join" -> DocxEditor.Op.Join(m.getInt("para"))
-                        "runStyle" -> DocxEditor.Op.RunStyle(
-                            m.getInt("para"), m.getInt("start"), m.getInt("end"),
-                            if (m.hasKey("font") && !m.isNull("font")) m.getString("font") else null,
-                            if (m.hasKey("size") && !m.isNull("size")) m.getInt("size") else null,
-                        )
-                        "para" -> {
-                            fun int(k: String) = if (m.hasKey(k) && !m.isNull(k)) m.getInt(k) else null
-                            fun str(k: String) = if (m.hasKey(k) && !m.isNull(k)) m.getString(k) else null
-                            DocxEditor.Op.ParaProps(
-                                para = m.getInt("para"),
-                                align = str("align"),
-                                line = int("line"),
-                                lineRule = str("lineRule"),
-                                before = int("before"),
-                                after = int("after"),
-                                first = int("first"),
-                                pageBreakBefore = if (m.hasKey("pb") && !m.isNull("pb")) m.getBoolean("pb") else null,
-                            )
-                        }
-                        "page" -> {
-                            fun int(k: String) = if (m.hasKey(k) && !m.isNull(k)) m.getInt(k) else null
-                            DocxEditor.Op.PageSetup(
-                                width = int("width"), height = int("height"),
-                                landscape = if (m.hasKey("landscape") && !m.isNull("landscape")) m.getBoolean("landscape") else null,
-                                top = int("top"), right = int("right"), bottom = int("bottom"), left = int("left"),
-                            )
-                        }
-                        "defaults" -> DocxEditor.Op.Defaults(
-                            if (m.hasKey("font") && !m.isNull("font")) m.getString("font") else null,
-                            if (m.hasKey("size") && !m.isNull("size")) m.getInt("size") else null,
-                        )
-                        "headerFooter" -> DocxEditor.Op.HeaderFooter(
-                            m.getString("kind") ?: "header", m.getString("text") ?: "",
-                            m.hasKey("pageNumber") && m.getBoolean("pageNumber"), m.getString("align") ?: "right",
-                        )
-                        "link" -> DocxEditor.Op.Link(m.getInt("para"), m.getInt("start"), m.getInt("end"), m.getString("url") ?: "")
-                        "unlink" -> DocxEditor.Op.Unlink(m.getInt("para"), m.getInt("start"), m.getInt("end"))
-                        "list" -> DocxEditor.Op.ListItem(m.getInt("para"), m.getString("kind") ?: "none", m.getString("listId") ?: "")
-                        else -> throw IllegalArgumentException("unknown op ${m.getString("op")}")
-                    }
-                }
+                val parsed = parseOps(ops)
                 val target = if (dest.isEmpty()) DocxEditor.editedCopyName(src) else File(dest)
                 val expect = (0 until expected.size()).map { expected.getString(it) ?: "" }
                 val saved = DocxEditor.save(src, parsed, target, File(reactContext.cacheDir, "saving"), expect)
@@ -238,6 +187,94 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
             } catch (t: Throwable) {
                 appendLog("save FAILED $srcPath: $t")
                 promise.reject("DOCX_SAVE_FAILED", t.message ?: t.toString(), t)
+            }
+        }
+    }
+
+    private fun parseOps(ops: ReadableArray): List<DocxEditor.Op> = (0 until ops.size()).mapNotNull { i -> ops.getMap(i) }.map { m ->
+        when (m.getString("op")) {
+            "format" -> DocxEditor.Op.Format(
+                m.getInt("para"), m.getInt("start"), m.getInt("end"),
+                m.getString("prop") ?: "", m.getBoolean("on"),
+            )
+            "style" -> DocxEditor.Op.Style(m.getInt("para"), m.getString("kind") ?: "normal")
+            "text" -> DocxEditor.Op.Text(
+                m.getInt("para"), m.getInt("start"), m.getInt("end"), m.getString("text") ?: "",
+            )
+            "split" -> DocxEditor.Op.Split(m.getInt("para"), m.getInt("offset"))
+            "join" -> DocxEditor.Op.Join(m.getInt("para"))
+            "runStyle" -> DocxEditor.Op.RunStyle(
+                m.getInt("para"), m.getInt("start"), m.getInt("end"),
+                if (m.hasKey("font") && !m.isNull("font")) m.getString("font") else null,
+                if (m.hasKey("size") && !m.isNull("size")) m.getInt("size") else null,
+            )
+            "para" -> {
+                fun int(k: String) = if (m.hasKey(k) && !m.isNull(k)) m.getInt(k) else null
+                fun str(k: String) = if (m.hasKey(k) && !m.isNull(k)) m.getString(k) else null
+                DocxEditor.Op.ParaProps(
+                    para = m.getInt("para"),
+                    align = str("align"),
+                    line = int("line"),
+                    lineRule = str("lineRule"),
+                    before = int("before"),
+                    after = int("after"),
+                    first = int("first"),
+                    pageBreakBefore = if (m.hasKey("pb") && !m.isNull("pb")) m.getBoolean("pb") else null,
+                )
+            }
+            "page" -> {
+                fun int(k: String) = if (m.hasKey(k) && !m.isNull(k)) m.getInt(k) else null
+                DocxEditor.Op.PageSetup(
+                    width = int("width"), height = int("height"),
+                    landscape = if (m.hasKey("landscape") && !m.isNull("landscape")) m.getBoolean("landscape") else null,
+                    top = int("top"), right = int("right"), bottom = int("bottom"), left = int("left"),
+                )
+            }
+            "defaults" -> DocxEditor.Op.Defaults(
+                if (m.hasKey("font") && !m.isNull("font")) m.getString("font") else null,
+                if (m.hasKey("size") && !m.isNull("size")) m.getInt("size") else null,
+            )
+            "headerFooter" -> DocxEditor.Op.HeaderFooter(
+                m.getString("kind") ?: "header", m.getString("text") ?: "",
+                m.hasKey("pageNumber") && m.getBoolean("pageNumber"), m.getString("align") ?: "right",
+            )
+            "link" -> DocxEditor.Op.Link(m.getInt("para"), m.getInt("start"), m.getInt("end"), m.getString("url") ?: "")
+            "unlink" -> DocxEditor.Op.Unlink(m.getInt("para"), m.getInt("start"), m.getInt("end"))
+            "revision" -> DocxEditor.Op.Revision(m.getInt("para"), m.getString("id") ?: "", m.getBoolean("accept"))
+        "list" -> DocxEditor.Op.ListItem(m.getInt("para"), m.getString("kind") ?: "none", m.getString("listId") ?: "")
+            else -> throw IllegalArgumentException("unknown op ${m.getString("op")}")
+        }
+    }
+
+    /**
+     * The paragraphs [paras] (empty = all) as they will be once [ops] are applied to
+     * [srcPath] — for edits whose result only the file knows exactly (accepting or rejecting
+     * tracked changes). Nothing is written. Resolves {blocks: [paragraph blocks]}.
+     */
+    @ReactMethod
+    fun preview(srcPath: String, ops: ReadableArray, paras: ReadableArray, promise: Promise) {
+        worker.execute {
+            val t0 = System.currentTimeMillis()
+            try {
+                val parsed = parseOps(ops)
+                val result = java.util.zip.ZipFile(File(srcPath)).use { zip ->
+                    val pkg = DocxEditor.Pkg(zip)
+                    val document = pkg.part(DocxReader.DOCUMENT_PART) ?: error("no document")
+                    val styles = pkg.part("word/styles.xml")
+                    val rels = pkg.part(DocxReader.DOCUMENT_RELS)
+                    val numbering = pkg.part(DocxReader.numberingPart(rels))
+                    DocxEditor.apply(document, styles, parsed, ArrayList(), DocxEditor.Lists(numbering), pkg)
+                    DocxReader.read(document, styles, numbering, pkg.part(DocxReader.themePart(rels)))
+                }
+                val want = (0 until paras.size()).map { paras.getInt(it) }.toSet()
+                val blocks = result.blocks.filterIsInstance<DocxReader.Paragraph>().filter { want.isEmpty() || it.index in want }
+                appendLog("preview ${parsed.size} ops → ${blocks.size} paragraphs, ${System.currentTimeMillis() - t0} ms")
+                promise.resolve(Arguments.createMap().apply {
+                    putArray("blocks", Arguments.createArray().apply { blocks.forEach { pushMap(block(it)) } })
+                })
+            } catch (t: Throwable) {
+                appendLog("preview FAILED: $t")
+                promise.reject("DOCX_PREVIEW_FAILED", t.message ?: t.toString(), t)
             }
         }
     }
@@ -536,6 +573,24 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
         putInt("contentControls", r.contentControls)
     }
 
+    private fun runs(list: List<DocxReader.Run>) = Arguments.createArray().apply {
+        for (r in list) pushMap(Arguments.createMap().apply {
+            putString("t", r.text)
+            if (r.bold) putBoolean("b", true)
+            if (r.italic) putBoolean("i", true)
+            if (r.underline) putBoolean("u", true)
+            if (r.strike) putBoolean("s", true)
+            if (r.highlight) putBoolean("h", true)
+            if (r.link) putBoolean("l", true)
+            if (r.superscript) putBoolean("sup", true)
+            r.obj?.let { putString("obj", it) }
+            if (r.locked) putBoolean("k", true)
+            r.font?.let { putString("f", it) }
+            r.size?.let { putInt("sz", it) }
+            r.rev?.let { putString("rv", it) }
+        })
+    }
+
     private fun block(b: DocxReader.Block): WritableMap = Arguments.createMap().apply {
         when (b) {
             is DocxReader.Paragraph -> {
@@ -559,20 +614,18 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
                 }
                 b.baseFont?.let { putString("bf", it) }
                 b.baseSize?.let { putInt("bs", it) }
-                putArray("runs", Arguments.createArray().apply {
-                    for (r in b.runs) pushMap(Arguments.createMap().apply {
-                        putString("t", r.text)
-                        if (r.bold) putBoolean("b", true)
-                        if (r.italic) putBoolean("i", true)
-                        if (r.underline) putBoolean("u", true)
-                        if (r.strike) putBoolean("s", true)
-                        if (r.highlight) putBoolean("h", true)
-                        if (r.link) putBoolean("l", true)
-                        if (r.superscript) putBoolean("sup", true)
-                        r.obj?.let { putString("obj", it) }
-                        if (r.locked) putBoolean("k", true)
-                        r.font?.let { putString("f", it) }
-                        r.size?.let { putInt("sz", it) }
+                putArray("runs", runs(b.runs))
+                if (b.revisions.isNotEmpty()) putArray("revs", Arguments.createArray().apply {
+                    for (v in b.revisions) pushMap(Arguments.createMap().apply {
+                        putString("id", v.id)
+                        putString("kind", v.kind)
+                        putString("author", v.author)
+                        putString("date", v.date)
+                        if (v.kind == "del") {
+                            putInt("at", v.at)
+                            putArray("runs", runs(v.runs))
+                        }
+                        if (v.move) putBoolean("move", true)
                     })
                 })
             }

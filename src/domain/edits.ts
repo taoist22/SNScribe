@@ -6,7 +6,7 @@
 // Offsets are into a paragraph's text (runs' `t` joined; objects are one U+FFFC), the
 // same text the native reader and writer use.
 
-import {OBJECT, paragraphText, type Block, type PageSetup, type ParagraphBlock, type Run} from '../model/docx';
+import {OBJECT, paragraphText, type Block, type PageSetup, type ParagraphBlock, type Revision, type Run} from '../model/docx';
 
 export type FormatProp = 'b' | 'i' | 'u' | 'h';
 export type StyleKind = 'heading1' | 'heading2' | 'title' | 'normal';
@@ -48,7 +48,13 @@ export type Op =
   /** Make [start, end) a link to url. */
   | {op: 'link'; para: number; start: number; end: number; url: string}
   /** Remove the links overlapping [start, end) (a caret: the link it is in); the text stays. */
-  | {op: 'unlink'; para: number; start: number; end: number};
+  | {op: 'unlink'; para: number; start: number; end: number}
+  /**
+   * Accept or reject tracked change `id` of `para` (para -1 and id '*': all of them).
+   * `result`: the changed paragraphs as the file will have them (from DocxModule.preview),
+   * so the screen shows exactly what the save writes; the native writer ignores it.
+   */
+  | {op: 'revision'; para: number; id: string; accept: boolean; result: Record<number, {runs: Run[]; revs?: Revision[]}>};
 
 /** A position between characters of paragraph `para` (Paragraph.index). */
 export type Pos = {para: number; offset: number};
@@ -224,8 +230,15 @@ function split(out: Block[], i: number, op: Extract<Op, {op: 'split'}>): void {
     (offset < op.offset ? before : after).push(r);
     offset += r.t.length;
   }
-  const first: ParagraphBlock = {...p, runs: before, sect: undefined};
-  let second: ParagraphBlock = {...p, index: p.index + 1, runs: after};
+  const dels = (p.revs ?? []).filter(v => v.kind === 'del');
+  const first: ParagraphBlock = withRevs({...p, runs: before, sect: undefined}, [
+    ...(p.revs ?? []).filter(v => v.kind === 'ins'),
+    ...dels.filter(v => (v.at ?? 0) <= op.offset),
+  ]);
+  let second: ParagraphBlock = withRevs({...p, index: p.index + 1, runs: after}, [
+    ...(p.revs ?? []).filter(v => v.kind === 'ins'),
+    ...dels.filter(v => (v.at ?? 0) > op.offset).map(v => ({...v, at: (v.at ?? 0) - op.offset})),
+  ]);
   if (op.offset === len && p.kind !== 'body') {
     second = {...second, kind: 'body', level: 0, style: ''};
   }
@@ -237,7 +250,15 @@ function split(out: Block[], i: number, op: Extract<Op, {op: 'split'}>): void {
 function join(out: Block[], i: number): void {
   const p = out[i] as ParagraphBlock;
   const prev = out[i - 1] as ParagraphBlock;
-  out.splice(i - 1, 2, {...prev, runs: [...prev.runs, ...p.runs], sect: prev.sect || p.sect});
+  const shift = paragraphText(prev).length;
+  out.splice(
+    i - 1,
+    2,
+    withRevs({...prev, runs: [...prev.runs, ...p.runs], sect: prev.sect || p.sect}, [
+      ...(prev.revs ?? []),
+      ...(p.revs ?? []).map(v => (v.kind === 'del' ? {...v, at: (v.at ?? 0) + shift} : v)),
+    ]),
+  );
   renumber(out, i, -1);
 }
 
@@ -330,6 +351,15 @@ export function applyOps(blocks: Block[], ops: Op[]): Block[] {
     if (op.op === 'headerFooter' || op.op === 'page') {
       continue;
     }
+    if (op.op === 'revision') {
+      for (const [key, r] of Object.entries(op.result)) {
+        const j = out.findIndex(b => b.type === 'p' && b.index === Number(key));
+        if (j >= 0) {
+          out[j] = {...(out[j] as ParagraphBlock), runs: r.runs, revs: r.revs && r.revs.length ? r.revs : undefined};
+        }
+      }
+      continue;
+    }
     const i = out.findIndex(b => b.type === 'p' && b.index === op.para);
     if (i < 0) {
       continue;
@@ -343,7 +373,7 @@ export function applyOps(blocks: Block[], ops: Op[]): Block[] {
         out[i] = styleParagraph(p, op.kind);
         break;
       case 'text':
-        out[i] = editText(p, op);
+        out[i] = withRevs(editText(p, op), shiftDeletions(p.revs, op.start, op.end, op.text.length));
         break;
       case 'split':
         split(out, i, op);
@@ -375,6 +405,79 @@ export function applyOps(blocks: Block[], ops: Op[]): Block[] {
     }
   }
   return out;
+}
+
+/** The paragraph with `revs`, keeping only insertions that still have text and dropping an empty list. */
+function withRevs(p: ParagraphBlock, revs: Revision[] | undefined): ParagraphBlock {
+  const ids = new Set(p.runs.map(r => r.rv).filter(Boolean));
+  const kept = (revs ?? []).filter(v => v.kind === 'del' || ids.has(v.id));
+  return {...p, revs: kept.length ? kept : undefined};
+}
+
+/**
+ * Where deletions sit after [start, end) is replaced by `inserted` characters. Screen-only
+ * (accept/reject asks the file for its result), so ties go the natural way: text typed
+ * where a deletion sits goes after it.
+ */
+function shiftDeletions(revs: Revision[] | undefined, start: number, end: number, inserted: number): Revision[] | undefined {
+  return revs?.map(v => {
+    if (v.kind !== 'del' || v.at === undefined) {
+      return v;
+    }
+    if (v.at >= end && v.at > start) {
+      return {...v, at: v.at + inserted - (end - start)};
+    }
+    return v.at > start ? {...v, at: start} : v;
+  });
+}
+
+// ---------------------------------------------------------------- screen offsets
+
+/**
+ * Characters on screen that are not the paragraph's text, as {at, len, lead}: the
+ * first-line indent spacer (lead, before everything) and deleted text shown struck through
+ * before character `at`. The TextView's offsets count them; the model's do not.
+ */
+export function shownExtras(p: ParagraphBlock): Array<{at: number; len: number; lead?: boolean}> {
+  const out: Array<{at: number; len: number; lead?: boolean}> = [];
+  if ((p.first ?? 0) > 0 && p.runs.length > 0) {
+    out.push({at: 0, len: 1, lead: true});
+  }
+  for (const v of p.revs ?? []) {
+    if (v.kind === 'del' && v.runs?.length) {
+      out.push({at: Math.max(0, v.at ?? 0), len: v.runs.reduce((n, r) => n + r.t.length, 0)});
+    }
+  }
+  return out;
+}
+
+/** A text offset as a TextView offset: extras before it are counted (a deletion at the caret is after it). */
+export function toShown(p: ParagraphBlock, offset: number): number {
+  let n = offset;
+  for (const x of shownExtras(p)) {
+    if (x.lead || x.at < offset) {
+      n += x.len;
+    }
+  }
+  return n;
+}
+
+/** A TextView offset as a text offset; inside shown deleted text it snaps to where the deletion sits. */
+export function fromShown(p: ParagraphBlock, shown: number): number {
+  let extra = 0;
+  // Extras in display order: the lead first, then deletions by position.
+  const xs = shownExtras(p).sort((a, b) => (a.lead ? -1 : b.lead ? 1 : a.at - b.at));
+  for (const x of xs) {
+    const startShown = (x.lead ? 0 : x.at) + extra;
+    if (shown < startShown) {
+      break;
+    }
+    if (shown < startShown + x.len) {
+      return x.lead ? 0 : x.at;
+    }
+    extra += x.len;
+  }
+  return Math.max(0, shown - extra);
 }
 
 function setLink(runs: Run[], start: number, end: number, on: boolean): Run[] {

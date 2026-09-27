@@ -14,7 +14,7 @@ import {
   type LayoutChangeEvent,
 } from 'react-native';
 import {PluginManager, RattaFileSelector} from 'sn-plugin-lib';
-import {BlockView, leadChars} from './BlockView';
+import {BlockView} from './BlockView';
 import {PageCounter} from './PageCounter';
 import {
   applyOps,
@@ -22,6 +22,7 @@ import {
   deletionRange,
   expectedTexts,
   formatOps,
+  fromShown,
   headerFooterAfter,
   joinProblem,
   linkProblem,
@@ -32,6 +33,7 @@ import {
   splitProblem,
   styleOps,
   textEditProblem,
+  toShown,
   wordAround,
   type FormatProp,
   type Op,
@@ -72,6 +74,11 @@ import {Docx, DocxKeys, DocxText, errorText, log, nativeBuild, type KeyPress} fr
 const HEADER_H = 64;
 const BAR_H = 60;
 const PAD = 16;
+/** The margin column beside the text: tracked changes and comments, as in Word's margin. */
+const MARGIN_W = 290;
+const MARGIN_GAP = 14;
+/** A margin card's height: cards are a fixed size so they can be stacked before they are drawn. */
+const CARD_H = 84;
 const START: Anchor = {block: 0, offset: 0};
 /** Pen travel below this (dp) is a tap: it selects the word under the pen. */
 const TAP_SLOP = 12;
@@ -132,6 +139,8 @@ export function Reader(): React.JSX.Element {
   /** The whole document's page starts, counted in the background for one layout (mapKey). */
   const [pageMap, setPageMap] = useState<{key: string; pages: PageStart[]; done: boolean} | null>(null);
   const [showPages, setShowPages] = useState(false);
+  /** The margin column (View ▾); it appears only when the document has changes or comments. */
+  const [showMargin, setShowMargin] = useState(true);
   /** Fingerprint of the document file as DOCX last read or wrote it; a different one means changed elsewhere. */
   const [diskStamp, setDiskStamp] = useState<string | null>(null);
   /** Unsaved edits found for the document just opened, offered for restoring. */
@@ -522,7 +531,11 @@ export function Reader(): React.JSX.Element {
   // The page map belongs to one layout: the document with its edits, the text size, and
   // the page's size. It is recounted a moment after that settles, and not while typing.
   // Includes what is being typed: the count follows typing once it pauses.
-  const mapKey = `${doc?.path}:${edits.cursor}:${input.length}:${textScale}:${pageW}x${pageH}:${fonts.size}`;
+  const hasNotes = blocks.some(b => b.type === 'p' && !!b.revs?.length);
+  const marginOn = showMargin && hasNotes && !showPages && !contents;
+  // The text column: the page less the margin column when it shows.
+  const textW = marginOn ? Math.max(200, pageW - MARGIN_W - MARGIN_GAP) : pageW;
+  const mapKey = `${doc?.path}:${edits.cursor}:${input.length}:${textScale}:${textW}x${pageH}:${fonts.size}`;
   const [countKey, setCountKey] = useState('');
   useEffect(() => {
     if (!doc || pageH <= 0 || pageW <= 0) {
@@ -585,8 +598,8 @@ export function Reader(): React.JSX.Element {
     for (let i = pg.anchor.block; i < blocks.length; i++) {
       const b = blocks[i];
       if (b.type === 'p') {
-        // The page map counts a first-line indent spacer as a character.
-        const offset = i === pg.anchor.block && pg.char > 0 ? Math.max(0, pg.char - leadChars(b)) : 0;
+        // The page map counts what the screen shows (indent spacer, deleted text) as characters.
+        const offset = i === pg.anchor.block && pg.char > 0 ? fromShown(b, pg.char) : 0;
         return {para: b.index, offset: Math.min(offset, paragraphText(b).length)};
       }
     }
@@ -772,9 +785,8 @@ export function Reader(): React.JSX.Element {
     if (res.error !== undefined) {
       return `${res.error} (${res.viewClass})`;
     }
-    // A first-line indent spacer is one character of the TextView, before the text.
-    const lead = leadChars(p);
-    return {para: p.index, offset: Math.max(0, res.offset! - lead), char: Math.max(0, res.char! - lead)};
+    // The TextView also counts the indent spacer and shown deleted text; the model does not.
+    return {para: p.index, offset: fromShown(p, res.offset!), char: fromShown(p, res.char!)};
   };
 
   const textOf = (para: number): string => {
@@ -898,6 +910,41 @@ export function Reader(): React.JSX.Element {
   };
 
   const nothingSelected = () => setStatus('Select some text first, or tap inside a word.');
+
+  // ---------------------------------------------------------------- tracked changes
+
+  /**
+   * Accept or reject one tracked change (or all: para -1, id '*'). The file decides the
+   * result (DocxModule.preview), so the screen shows exactly what Save will write.
+   */
+  const review = async (para: number, id: string, accept: boolean) => {
+    if (!doc?.source || !Docx) {
+      return;
+    }
+    flushTyping();
+    const all = para < 0;
+    const paras = all ? blocks.filter((b): b is ParagraphBlock => b.type === 'p' && !!b.revs?.length).map(b => b.index) : [para];
+    if (paras.length === 0) {
+      setStatus('There are no tracked changes to review.');
+      return;
+    }
+    const op = {op: 'revision' as const, para, id, accept};
+    setBusy(true);
+    try {
+      const res = await Docx.preview(doc.source, [...applied, op], paras);
+      const result: Record<number, {runs: ParagraphBlock['runs']; revs?: ParagraphBlock['revs']}> = {};
+      for (const b of res.blocks) {
+        result[b.index] = {runs: b.runs, revs: b.revs};
+      }
+      commit([{...op, result}], `${accept ? 'accept' : 'reject'} ${all ? 'all changes' : 'change'}`);
+      setStatus(all ? `${accept ? 'Accepted' : 'Rejected'} every tracked change in the text. Undo puts them back.` : accept ? 'Change accepted.' : 'Change rejected.');
+    } catch (error) {
+      setStatus(`Could not review the change: ${errorText(error)}`);
+      log(`review failed: ${errorText(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   // ---------------------------------------------------------------- header, page numbers, links
 
@@ -1417,10 +1464,10 @@ export function Reader(): React.JSX.Element {
         const i = window.findIndex(b => b.type === 'p' && b.index === pos.para);
         const tag = i >= 0 ? findNodeHandle(textRefs.current[i] ?? null) : null;
         if (tag !== null && DocxText) {
-          const lead = leadChars(window[i]);
-          const r = await DocxText.lineMove(tag, pos.offset + lead, up ? -1 : 1);
+          const b = window[i] as ParagraphBlock;
+          const r = await DocxText.lineMove(tag, toShown(b, pos.offset), up ? -1 : 1);
           if (r.offset !== undefined) {
-            return {para: pos.para, offset: Math.max(0, r.offset - lead)};
+            return {para: pos.para, offset: fromShown(b, r.offset)};
           }
         }
         return up ? prevEnd : nextStart;
@@ -1826,7 +1873,7 @@ export function Reader(): React.JSX.Element {
     const timer = setTimeout(() => {
       const fr = frames.current[i] ?? f;
       const tf = textFrames.current[i] ?? {x: 0, y: 0};
-      DocxText?.caretRect(tag, at.offset + leadChars(window[i])).then(r => {
+      DocxText?.caretRect(tag, toShown(window[i] as ParagraphBlock, at.offset)).then(r => {
         if (r.error !== undefined || measuredFor.current !== key) {
           return;
         }
@@ -1842,6 +1889,110 @@ export function Reader(): React.JSX.Element {
   // ---------------------------------------------------------------- render
 
   const visible = brk.kind === 'at' ? Math.max(0, brk.top - anchor.offset) : pageH;
+
+  /** Where on the page (y) the text offset of window block i is, from its measured lines. */
+  const yOf = (i: number, offset: number): number | null => {
+    const b = window[i];
+    const f = frames.current[i];
+    const l = lines.current[i];
+    if (!f || b?.type !== 'p') {
+      return null;
+    }
+    const tf = textFrames.current[i] ?? {x: 0, y: 0};
+    const shown = toShown(b, offset);
+    let pos = 0;
+    let y = 0;
+    for (const line of l ?? []) {
+      y = line.y;
+      if (shown < pos + (line.len ?? 0)) {
+        break;
+      }
+      pos += line.len ?? 0;
+    }
+    return f.top + tf.y + y - anchor.offset;
+  };
+
+  /** The margin: a card beside the line of each tracked change on this page. */
+  const marginColumn = () => {
+    type Card = {key: string; y: number; para: number; id: string; kind: 'ins' | 'del'; author: string; text: string; move?: boolean};
+    const cards: Card[] = [];
+    window.forEach((b, i) => {
+      if (b.type !== 'p' || !b.revs) {
+        return;
+      }
+      for (const v of b.revs) {
+        let at = v.at ?? 0;
+        let text = (v.runs ?? []).map(r => r.t).join('');
+        if (v.kind === 'ins') {
+          let pos = 0;
+          let first = -1;
+          text = '';
+          for (const r of b.runs) {
+            if (r.rv === v.id) {
+              first = first < 0 ? pos : first;
+              text += r.t;
+            }
+            pos += r.t.length;
+          }
+          at = Math.max(0, first);
+        }
+        const y = yOf(i, at);
+        if (y !== null && y >= -4 && y < visible) {
+          cards.push({key: `${b.index}:${v.id}:${v.kind}`, y: Math.max(0, y), para: b.index, id: v.id, kind: v.kind, author: v.author, text, move: v.move});
+        }
+      }
+    });
+    cards.sort((a, b) => a.y - b.y);
+    // Stacked downward where they would overlap; those that no longer fit are counted.
+    let bottom = 0;
+    const placed: Array<Card & {top: number}> = [];
+    let hidden = 0;
+    for (const c of cards) {
+      const top = Math.max(c.y, bottom);
+      if (top + CARD_H > pageH - 30) {
+        hidden++;
+        continue;
+      }
+      placed.push({...c, top});
+      bottom = top + CARD_H + 6;
+    }
+    return (
+      <View style={[styles.margin, {height: pageH, left: PAD + textW + MARGIN_GAP, top: PAD}]}>
+        {placed.map(c => (
+          <View key={c.key} style={[styles.card, {top: c.top}]}>
+            <View style={styles.cardText}>
+              <Text allowFontScaling={false} style={styles.cardHead} numberOfLines={1}>
+                {`${c.move ? (c.kind === 'ins' ? 'Moved here' : 'Moved away') : c.kind === 'ins' ? 'Inserted' : 'Deleted'} · ${c.author || 'Unknown'}`}
+              </Text>
+              <Text allowFontScaling={false} style={[styles.cardBody, c.kind === 'del' ? styles.cardDeleted : styles.cardInserted]} numberOfLines={2}>
+                {c.text.replace(/\ufffc/g, '◇')}
+              </Text>
+            </View>
+            <Pressable onPress={once(`acc:${c.key}`, () => review(c.para, c.id, true))} style={styles.cardButton}>
+              <Text allowFontScaling={false} style={styles.cardButtonText}>
+                {'✓'}
+              </Text>
+            </Pressable>
+            <Pressable onPress={once(`rej:${c.key}`, () => review(c.para, c.id, false))} style={styles.cardButton}>
+              <Text allowFontScaling={false} style={styles.cardButtonText}>
+                {'✗'}
+              </Text>
+            </Pressable>
+          </View>
+        ))}
+        {hidden > 0 ? (
+          <Text allowFontScaling={false} style={[styles.cardMore, {top: pageH - 26}]}>
+            {`+${hidden} more on this page (turn the page or hide some by reviewing)`}
+          </Text>
+        ) : null}
+        {doc?.otherRevisions ? (
+          <Text allowFontScaling={false} style={[styles.cardMore, {top: placed.length ? pageH - 50 : 0}]} numberOfLines={2}>
+            {`${doc.otherRevisions} formatting or paragraph change${doc.otherRevisions === 1 ? '' : 's'} can't be reviewed here yet; they stay as they are.`}
+          </Text>
+        ) : null}
+      </View>
+    );
+  };
   const progress = doc && blocks.length > 0 ? Math.round((anchor.block / blocks.length) * 100) : 0;
   const headings = useMemo(() => outline(blocks), [blocks]);
 
@@ -2233,6 +2384,7 @@ export function Reader(): React.JSX.Element {
             {item('Word count…', () => setMenu('count'))}
             {item('Go to start', () => goTo({block: 0, offset: 0}))}
             {item('Go to end', goToEnd)}
+            {hasNotes ? item(showMargin ? 'Hide margin (changes)' : 'Show margin (changes)', () => setShowMargin(v => !v)) : null}
           </>
         );
       case 'folder':
@@ -2303,6 +2455,14 @@ export function Reader(): React.JSX.Element {
             {item('Paste', pasteFromMenu)}
             {item('Delete', deleteFromMenu)}
             {item('Link…', startLink)}
+            {hasNotes ? item('Accept all changes', () => {
+              setMenu(null);
+              review(-1, '*', true);
+            }) : null}
+            {hasNotes ? item('Reject all changes', () => {
+              setMenu(null);
+              review(-1, '*', false);
+            }) : null}
             {item('Remove link', removeLink)}
             {item('Hide keyboard', done)}
           </>
@@ -2430,7 +2590,7 @@ export function Reader(): React.JSX.Element {
           <PageCounter
             key={countKey}
             blocks={blocks}
-            width={pageW}
+            width={textW}
             pageH={pageH}
             fonts={fonts}
             scale={textScale}
@@ -2498,7 +2658,7 @@ export function Reader(): React.JSX.Element {
             ))}
           </ScrollView>
         ) : pageH > 0 ? (
-          <View style={[styles.viewport, {height: pageH}]}>
+          <View style={[styles.viewport, {height: pageH, width: textW}]}>
             <View key={pageKey} style={[styles.column, {top: -anchor.offset}]}>
               {window.map((b, i) => (
                 <BlockView
@@ -2548,6 +2708,7 @@ export function Reader(): React.JSX.Element {
             />
           </View>
         ) : null}
+        {doc && marginOn && pageH > 0 ? marginColumn() : null}
         {menu ? (
           <View style={[styles.menu, {left: Math.max(0, Math.min(menuX, pageW + PAD * 2 - MENU_W - 4)), maxHeight: Math.max(240, pageH)}]}>
             <ScrollView keyboardShouldPersistTaps="always">{menuBody()}</ScrollView>
@@ -2649,6 +2810,28 @@ const styles = StyleSheet.create({
   pageArea: {flex: 1, padding: PAD},
   viewport: {overflow: 'hidden'},
   column: {position: 'absolute', left: 0, right: 0},
+  margin: {position: 'absolute', width: MARGIN_W, borderLeftWidth: 1, borderColor: '#999', paddingLeft: 8},
+  card: {
+    position: 'absolute',
+    left: 8,
+    right: 0,
+    height: CARD_H,
+    borderWidth: 1,
+    borderColor: '#000',
+    borderRadius: 6,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingLeft: 8,
+    backgroundColor: '#fff',
+  },
+  cardText: {flex: 1},
+  cardHead: {color: '#000', fontSize: 14, fontWeight: '700'},
+  cardBody: {color: '#333', fontSize: 15, marginTop: 2},
+  cardInserted: {textDecorationLine: 'underline'},
+  cardDeleted: {textDecorationLine: 'line-through'},
+  cardButton: {width: 44, height: CARD_H - 2, alignItems: 'center', justifyContent: 'center', borderLeftWidth: 1, borderColor: '#000'},
+  cardButtonText: {color: '#000', fontSize: 24},
+  cardMore: {position: 'absolute', left: 8, right: 0, color: '#333', fontSize: 13},
   mask: {position: 'absolute', left: 0, right: 0, bottom: 0, backgroundColor: '#fff'},
   empty: {flex: 1, alignItems: 'center', justifyContent: 'center'},
   emptyText: {color: '#000', fontSize: 20},

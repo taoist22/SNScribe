@@ -111,6 +111,12 @@ object DocxEditor {
 
         /** Removes hyperlinks that overlap characters [start, end) (their text stays). */
         data class Unlink(val para: Int, val start: Int, val end: Int) : Op()
+
+        /**
+         * Accepts or rejects the tracked insertion or deletion [id] in one paragraph; [para]
+         * −1 with [id] "*" does every text insertion and deletion in the document's paragraphs.
+         */
+        data class Revision(val para: Int, val id: String, val accept: Boolean) : Op()
     }
 
     data class Saved(val dest: File, val changedParts: List<String>, val notes: List<String>)
@@ -218,6 +224,7 @@ object DocxEditor {
 
     fun save(src: File, ops: List<Op>, dest: File, workDir: File, expected: List<String> = emptyList()): Saved {
         require(src.length() <= DocxReader.MAX_DOCX_BYTES) { "too large: ${src.length()} bytes" }
+        val effects = ArrayList<Op>()
         val notes = ArrayList<String>()
         val changed = ArrayList<String>()
         var addedNames: Set<String> = emptySet()
@@ -231,7 +238,7 @@ object DocxEditor {
                 val numberingPath = DocxReader.numberingPart(pkg.part(DocxReader.DOCUMENT_RELS))
                 val numbering = pkg.part(numberingPath)
                 val lists = Lists(numbering)
-                val stylesChanged = apply(document, styles, ops, notes, lists, pkg)
+                val stylesChanged = apply(document, styles, ops, notes, lists, pkg, effects)
                 if (ops.isNotEmpty()) pkg.touch(DOCUMENT_PART)
                 if (stylesChanged && styles != null) pkg.touch(STYLES_PART)
                 if (lists.changed) {
@@ -256,7 +263,7 @@ object DocxEditor {
                 changed.addAll(pkg.added.keys)
                 addedNames = pkg.added.keys.toSet()
             }
-            verify(src, temp, changed, ops, expected, addedNames)
+            verify(src, temp, changed, effects, expected, addedNames)
             copy(temp, dest)
             return Saved(dest, changed, notes)
         } finally {
@@ -311,6 +318,7 @@ object DocxEditor {
         notes: MutableList<String>,
         lists: Lists = Lists(null),
         pkg: Pkg = Pkg(null),
+        effects: MutableList<Op>? = null,
     ): Boolean {
         var paragraphs = bodyParagraphs(document)
         val styleIds = StyleIds(styles)
@@ -332,6 +340,21 @@ object DocxEditor {
                 headerFooter(document, pkg, op, notes)
                 continue
             }
+            if (op is Op.Revision) {
+                // Text changes, as plain splices, for verify.
+                val targets = if (op.para < 0) paragraphs.indices.toList() else listOf(op.para)
+                for (i in targets) {
+                    val p = checkNotNull(paragraphs.getOrNull(i)) { "no paragraph $i for $op" }
+                    val old = paragraphText(p)
+                    val done = revision(p, if (op.para < 0) null else op.id, op.accept)
+                    check(done > 0 || op.para < 0) { "no tracked change ${op.id} in paragraph ${op.para}" }
+                    val new = paragraphText(p)
+                    if (old != new) effects?.add(Op.Text(i, 0, old.length, new))
+                }
+                notes.add("revision ${if (op.accept) "accept" else "reject"} ${op.id} p${op.para}")
+                continue
+            }
+            effects?.add(op)
             val index = when (op) {
                 is Op.Format -> op.para
                 is Op.Style -> op.para
@@ -343,7 +366,7 @@ object DocxEditor {
                 is Op.ParaProps -> op.para
                 is Op.Link -> op.para
                 is Op.Unlink -> op.para
-                is Op.PageSetup, is Op.Defaults, is Op.HeaderFooter -> error("unreachable")
+                is Op.PageSetup, is Op.Defaults, is Op.HeaderFooter, is Op.Revision -> error("unreachable")
             }
             val p = checkNotNull(paragraphs.getOrNull(index)) { "no paragraph $index for $op" }
             when (op) {
@@ -357,12 +380,54 @@ object DocxEditor {
                 is Op.ParaProps -> paraProps(document, p, op, notes)
                 is Op.Link -> link(document, p, op, pkg, styleIds, notes)
                 is Op.Unlink -> unlink(p, op, notes)
-                is Op.PageSetup, is Op.Defaults, is Op.HeaderFooter -> {}
+                is Op.PageSetup, is Op.Defaults, is Op.HeaderFooter, is Op.Revision -> {}
             }
             // Splits and joins renumber the paragraphs after them.
             if (op is Op.Split || op is Op.Join) paragraphs = bodyParagraphs(document)
         }
         return styleIds.added || stylesTouched
+    }
+
+    private fun paragraphText(p: Element): String = DocxReader.segments(p).joinToString("") { if (it.isRun) DocxReader.runText(it.el) else DocxReader.OBJECT.toString() }
+
+    /**
+     * Accepts or rejects tracked insertions and deletions in [p]'s content ([id] null = all
+     * of them). Accepting an insertion or rejecting a deletion keeps its text as ordinary
+     * text; the other two remove it. Returns how many changes were resolved.
+     */
+    private fun revision(p: Element, id: String?, accept: Boolean): Int {
+        val found = ArrayList<Element>()
+        fun collect(parent: Element) {
+            for (el in elementChildren(parent)) {
+                if (el.namespaceURI != W || el.localName == "pPr") continue
+                if (el.localName in REVISION_TAGS && (id == null || el.getAttributeNS(W, "id") == id)) found.add(el)
+                collect(el)
+            }
+        }
+        collect(p)
+        // Innermost first: a deletion inside an insertion is resolved before the insertion.
+        for (el in found.asReversed()) {
+            if (el.parentNode == null) continue
+            val inserted = el.localName == "ins" || el.localName == "moveTo"
+            if (inserted == accept) {
+                // Keep the text: unwrap, and deleted text becomes text again.
+                if (!inserted) renameDeleted(el)
+                while (el.firstChild != null) el.parentNode.insertBefore(el.firstChild, el)
+            }
+            el.parentNode.removeChild(el)
+        }
+        return found.size
+    }
+
+    private val REVISION_TAGS = setOf("ins", "del", "moveTo", "moveFrom")
+
+    private fun renameDeleted(el: Element) {
+        val doc = el.ownerDocument
+        for ((from, to) in listOf("delText" to "w:t", "delInstrText" to "w:instrText")) {
+            val list = el.getElementsByTagNameNS(W, from)
+            val items = (0 until list.length).map { list.item(it) }
+            for (n in items) doc.renameNode(n, W, to)
+        }
     }
 
     fun bodyParagraphs(document: Document): List<Element> {

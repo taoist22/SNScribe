@@ -1,7 +1,7 @@
 // Typed handle on the native Docx module, and the session log.
 
 import {NativeModules} from 'react-native';
-import type {DocxDocument} from '../model/docx';
+import type {DocxDocument, ParagraphBlock} from '../model/docx';
 
 type DocxModule = {
   NATIVE_BUILD?: number;
@@ -43,6 +43,8 @@ type DocxModule = {
     /** Every paragraph's text as the screen shows it after the edits; the save is refused on any mismatch. */
     expected: string[],
   ): Promise<{dest: string; name: string; ms: number; changed: string[]}>;
+  /** Paragraphs `paras` (empty = all) as they will be once `ops` are applied to `src`; nothing is written. */
+  preview(src: string, ops: object[], paras: number[]): Promise<{blocks: ParagraphBlock[]}>;
 };
 
 export type OffsetResult = {

@@ -24,10 +24,28 @@ export type Run = {
   f?: string;
   /** Size in half-points (w:sz): 22 = 11 pt. */
   sz?: number;
+  /** Inside a tracked insertion: its id (ParagraphBlock.revs). */
+  rv?: string;
+};
+
+/**
+ * A tracked change. 'ins': the runs whose rv is this id. 'del': deleted text that is not
+ * part of the paragraph's text; it shows (struck through) before character `at`.
+ */
+export type Revision = {
+  id: string;
+  kind: 'ins' | 'del';
+  author: string;
+  date: string;
+  at?: number;
+  runs?: Run[];
+  move?: boolean;
 };
 
 export type ParagraphBlock = {
   type: 'p';
+  /** Tracked insertions and deletions in its text, in reading order. */
+  revs?: Revision[];
   /** Ordinal among the body's top-level paragraphs: the address edits use. */
   index: number;
   style: string;
@@ -88,6 +106,8 @@ export type DocxDocument = {
   lists: Record<string, ListDef>;
   /** Page size and margins (twips) of the last section. */
   page?: PageSetup;
+  /** Tracked formatting and paragraph changes DOCX can't review; they stay as they are. */
+  otherRevisions?: number;
   /**
    * The default header and footer of the last section, as DOCX can edit them. `other`: it
    * also has a logo or table, which stays; text and alignment are then of its page-number line.
