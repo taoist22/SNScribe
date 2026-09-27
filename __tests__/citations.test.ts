@@ -72,3 +72,13 @@ describe('entries never inherit the heading', () => {
     expect(out[1].runs.filter(r => r.b).length).toBe(0);
   });
 });
+
+import {credentialsIn} from '../src/services/zotero';
+
+describe('Zotero key from a text file', () => {
+  it('finds the key and the user ID however the file is laid out', () => {
+    expect(credentialsIn('P9NiFoyLeZu2bZNvvuQPDWsd')).toEqual({apiKey: 'P9NiFoyLeZu2bZNvvuQPDWsd'});
+    expect(credentialsIn('Zotero\nuserID: 1234567\nkey: P9NiFoyLeZu2bZNvvuQPDWsd\n')).toEqual({apiKey: 'P9NiFoyLeZu2bZNvvuQPDWsd', userId: '1234567'});
+    expect(credentialsIn('no key here 1234567')).toEqual({userId: '1234567'});
+  });
+});

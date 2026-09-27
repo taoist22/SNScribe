@@ -58,7 +58,7 @@ import {docKey, parseRecovery, recoveryFor, touchRecent, type RecentDoc, type Re
 import {DocxInk, InkSurfaceView, activateInk, deactivateInk, isInkAvailable} from './services/ink';
 import {shownFont, withStandIns} from './domain/fonts';
 import {CITE_STYLES, htmlToPieces, inText, piecesText, referenceOps, type CiteStyle, type Source} from './domain/citations';
-import {searchZotero, setZoteroLog, testZotero, type ZoteroAccount} from './services/zotero';
+import {credentialsIn, searchZotero, setZoteroLog, testZotero, type ZoteroAccount} from './services/zotero';
 import {anchorAfter, findBreak, pageIndexOf, windowEnd, type Anchor, type BlockBox, type Break, type LineBox, type PageStart} from './domain/paging';
 import {countWords, fontsUsed, outline, paragraphText, wordCount, type DocxDocument, type ParagraphBlock, type Run} from './model/docx';
 import {ensureFileReadPermission, ensureFileWritePermission, ensureInternetPermission} from './pluginPermissions';
@@ -1147,6 +1147,40 @@ export function Reader(): React.JSX.Element {
     } catch (error) {
       setCite(c => ({...c, busy: false, message: errorText(error)}));
       setStatus(errorText(error));
+    }
+  };
+
+  /** Load from file…: the key (and user ID, if there) from a .txt on the device — no typing. */
+  const zoteroFromFile = async () => {
+    try {
+      if (!(await ensureFileReadPermission())) {
+        setCite(c => ({...c, message: 'File access was not allowed.'}));
+        return;
+      }
+      const picked = (await RattaFileSelector.selectFile({
+        selectType: 0,
+        maxNum: 1,
+        title: 'Choose the text file with your Zotero key',
+        rightButtonText: 'Use',
+        suffixList: ['txt'],
+      })) as string[] | null | undefined;
+      const path = picked?.find(x => typeof x === 'string' && x.length > 0);
+      if (!path) {
+        return;
+      }
+      const found = credentialsIn(await Docx!.readText(path));
+      if (!found.apiKey) {
+        setCite(c => ({...c, message: 'No Zotero key in that file (a key is 24 letters and numbers).'}));
+        return;
+      }
+      setCite(c => ({
+        ...c,
+        apiKey: found.apiKey!,
+        userId: found.userId ?? c.userId,
+        message: `Key loaded${found.userId ? ` and user ID ${found.userId}` : ''}. Tap Save. (You can delete the text file afterwards.)`,
+      }));
+    } catch (error) {
+      setCite(c => ({...c, message: `Could not read the file: ${errorText(error)}`}));
     }
   };
 
@@ -2973,8 +3007,9 @@ export function Reader(): React.JSX.Element {
                 secureTextEntry
                 allowFontScaling={false}
               />
+              <View style={styles.row}>{button('Load from file…', zoteroFromFile, cite.busy)}</View>
               <Text allowFontScaling={false} style={styles.presetSummary}>
-                {'Kept only on this Supernote, in the plugin’s private storage.'}
+                {'Load from file: a .txt with the key (and your user ID, if you like). Kept only on this Supernote, in the plugin’s private storage.'}
               </Text>
               {cite.message ? (
                 <Text allowFontScaling={false} style={[styles.menuText, styles.citeMessage]}>

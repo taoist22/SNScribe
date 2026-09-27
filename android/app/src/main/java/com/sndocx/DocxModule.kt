@@ -446,6 +446,21 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
         }
     }
 
+    /** A small text file's contents (at most 16 KB): a key or setting the user keeps in a .txt. */
+    @ReactMethod
+    fun readText(path: String, promise: Promise) {
+        worker.execute {
+            try {
+                val f = File(path)
+                check(f.isFile) { "No such file: ${f.name}" }
+                check(f.length() <= 16 * 1024) { "${f.name} is too large for a text snippet" }
+                promise.resolve(f.readText(Charsets.UTF_8))
+            } catch (t: Throwable) {
+                promise.reject("DOCX_READ_TEXT", t.message ?: t.toString(), t)
+            }
+        }
+    }
+
     /** Size and last-modified time of [path]: its fingerprint, to notice changes made elsewhere. */
     @ReactMethod
     fun fileStamp(path: String, promise: Promise) {

@@ -69,6 +69,18 @@ async function get(account: ZoteroAccount, path: string): Promise<unknown> {
   return res.json();
 }
 
+/**
+ * A Zotero key and user ID found in text the user keeps (a .txt): the key is 24 letters and
+ * digits; the user ID is a run of digits on its own ("userID: 1234567" or a bare number).
+ */
+export function credentialsIn(text: string): {apiKey?: string; userId?: string} {
+  // Word by word (no lookbehind: the device's JavaScript engine may not support it).
+  const words = text.split(/[^A-Za-z0-9]+/).filter(Boolean);
+  const apiKey = words.find(w => w.length === 24);
+  const userId = words.find(w => /^\d{3,12}$/.test(w));
+  return {...(apiKey ? {apiKey} : {}), ...(userId ? {userId} : {})};
+}
+
 /** Checks the account can read the library. */
 export async function testZotero(account: ZoteroAccount): Promise<void> {
   await get(account, '/items/top?limit=1&format=json');
