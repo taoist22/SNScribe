@@ -535,6 +535,19 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
 
     private val faces = HashMap<String, HashMap<Int, Typeface>>() // family → style → file-loaded face
 
+    /** Stand-ins (as domain/fonts.ts): free fonts with the same widths as common Word fonts. */
+    private val STAND_INS = mapOf(
+        "calibri" to "Carlito",
+        "cambria" to "Caladea",
+        "arial" to "Liberation Sans",
+        "helvetica" to "Liberation Sans",
+        "times new roman" to "Liberation Serif",
+        "times" to "Liberation Serif",
+        "courier new" to "Liberation Mono",
+        "courier" to "Liberation Mono",
+        "georgia" to "Gelasio",
+    )
+
     private fun register(family: String, style: Int, file: File): Boolean {
         val tf = runCatching { Typeface.createFromFile(file) }.getOrNull() ?: return false
         faces.getOrPut(family) { HashMap() }[style] = tf
@@ -552,7 +565,14 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
         val have = faces[family] ?: return
         val base = have[Typeface.NORMAL] ?: have.values.first()
         for (style in listOf(Typeface.NORMAL, Typeface.BOLD, Typeface.ITALIC, Typeface.BOLD_ITALIC)) {
-            if (style !in have) ReactFontManager.getInstance().setTypeface(family, style, Typeface.create(base, style))
+            if (style in have) continue
+            // A real bold/italic from the font's metric-compatible stand-in beats a synthesized
+            // one: the screen does not draw synthesized bold (CT: Times New Roman headings,
+            // with only its regular file on the device, showed not bold).
+            val borrowed = STAND_INS[family.lowercase()]?.let { FontFiles.find(it, style) }
+                ?.let { runCatching { Typeface.createFromFile(it) }.getOrNull() }
+            if (borrowed != null) appendLog("font $family: style $style borrowed from ${STAND_INS[family.lowercase()]}")
+            ReactFontManager.getInstance().setTypeface(family, style, borrowed ?: Typeface.create(base, style))
         }
     }
 
@@ -585,7 +605,7 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
                 if (loaded.containsKey(family)) continue
                 for (style in 0..3) FontFiles.find(family, style)?.let { register(family, style, it) }
             }
-            appendLog("fonts available: ${loaded.keys.sorted()}")
+            appendLog("fonts available: ${loaded.keys.sorted().joinToString { f -> "$f ${loaded[f]!!.sorted().joinToString("") { st -> "RBIZ"[st].toString() }}" }} (R regular, B bold, I italic, Z bold italic: files found)")
             promise.resolve(Arguments.fromList(loaded.keys.sorted()))
         }
     }
