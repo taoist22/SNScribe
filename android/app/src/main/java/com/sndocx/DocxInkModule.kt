@@ -50,11 +50,13 @@ class DocxInkModule(private val reactContext: ReactApplicationContext) : ReactCo
         }
 
         /**
-         * Draws strokes (x, y lists, in the engine's pixels) into a PNG cropped to the ink, in
+         * Draws strokes (x, y lists, in the engine's pixels) into a PNG cropped to the ink, as
+         * thick as the pen wrote them and smoothed between samples (thin, straight-segment
+         * lines broke up — "grainy" — once Word shrank the picture into the margin), in
          * [color] on a transparent background (so a note never hides text it overlaps in
          * Word). Returns (width, height), or null when there is no ink.
          */
-        fun renderPng(strokes: List<IntArray>, dest: File, color: Int = Color.BLACK, strokeWidth: Float = 5f, maxSide: Int = 1400): Pair<Int, Int>? {
+        fun renderPng(strokes: List<IntArray>, dest: File, color: Int = Color.BLACK, strokeWidth: Float = PEN_WIDTH, maxSide: Int = 1000): Pair<Int, Int>? {
             val points = strokes.filter { it.size >= 2 }
             if (points.isEmpty()) return null
             var minX = Int.MAX_VALUE; var minY = Int.MAX_VALUE; var maxX = Int.MIN_VALUE; var maxY = Int.MIN_VALUE
@@ -62,7 +64,7 @@ class DocxInkModule(private val reactContext: ReactApplicationContext) : ReactCo
                 minX = minOf(minX, s[i]); maxX = maxOf(maxX, s[i])
                 minY = minOf(minY, s[i + 1]); maxY = maxOf(maxY, s[i + 1])
             }
-            val pad = 12
+            val pad = (strokeWidth + 8).toInt()
             val w0 = maxX - minX + 2 * pad
             val h0 = maxY - minY + 2 * pad
             val k = minOf(1f, maxSide.toFloat() / maxOf(w0, h0))
@@ -74,7 +76,7 @@ class DocxInkModule(private val reactContext: ReactApplicationContext) : ReactCo
             val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 this.color = ink
                 style = Paint.Style.STROKE
-                this.strokeWidth = maxOf(2f, strokeWidth * k)
+                this.strokeWidth = maxOf(3f, strokeWidth * k)
                 strokeCap = Paint.Cap.ROUND
                 strokeJoin = Paint.Join.ROUND
             }
@@ -85,9 +87,15 @@ class DocxInkModule(private val reactContext: ReactApplicationContext) : ReactCo
                     canvas.drawPoint(x(0), y(0), paint)
                     continue
                 }
+                // Through the midpoints, with each sample as a control point: a smooth curve.
                 val path = Path()
                 path.moveTo(x(0), y(0))
-                for (i in 2 until s.size step 2) path.lineTo(x(i), y(i))
+                var i = 2
+                while (i + 2 < s.size) {
+                    path.quadTo(x(i), y(i), (x(i) + x(i + 2)) / 2, (y(i) + y(i + 2)) / 2)
+                    i += 2
+                }
+                path.lineTo(x(s.size - 2), y(s.size - 2))
                 canvas.drawPath(path, paint)
             }
             dest.parentFile?.mkdirs()

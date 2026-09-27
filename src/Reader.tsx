@@ -3159,11 +3159,7 @@ export function Reader(): React.JSX.Element {
               {button('Cancel', () => setPad(null))}
             </View>
             <View style={styles.padBody}>
-              {/* Fixed size and position: the pen engine must never see its host move. Narrow,
-                  like the margin it goes into, so the writing stays legible when it shrinks. */}
-              <View style={styles.padSurface}>
-                <InkSurfaceView style={{width: PAD_W, height: pageH + PAD * 2 - PAD_HEAD - 28}} />
-              </View>
+            {/* Colours on the left, the writing box on the right (CT). */}
               <View style={styles.padSide}>
                 <Text allowFontScaling={false} style={styles.paraLabel}>
                   {'Ink color in Word'}
@@ -3186,6 +3182,11 @@ export function Reader(): React.JSX.Element {
                 <Text allowFontScaling={false} style={styles.panelNote}>
                   {'Write in the box. The note goes in the right margin of the Word file, beside these words, about 1 inch wide — Word shows and prints it.'}
                 </Text>
+              </View>
+              {/* Fixed size and position: the pen engine must never see its host move. Narrow,
+                  like the margin it goes into, so the writing stays legible when it shrinks. */}
+              <View style={styles.padSurface}>
+                <InkSurfaceView style={{width: PAD_W, height: pageH + PAD * 2 - PAD_HEAD - 28}} />
               </View>
             </View>
           </View>
@@ -3310,7 +3311,7 @@ const styles = StyleSheet.create({
   pad: {position: 'absolute', left: 0, top: 0, backgroundColor: '#fff'},
   padBody: {flexDirection: 'row', padding: 12},
   padSurface: {borderWidth: 2, borderColor: '#000'},
-  padSide: {flex: 1, marginLeft: 16},
+  padSide: {flex: 1, marginRight: 16},
   strip: {position: 'absolute', width: MARGIN_STRIP, borderLeftWidth: 1, borderColor: '#999', alignItems: 'center', paddingTop: 8},
   stripArrow: {color: '#000', fontSize: 30, fontWeight: '700'},
   stripCount: {color: '#000', fontSize: 16, marginTop: 8, borderWidth: 1, borderColor: '#000', borderRadius: 12, minWidth: 24, textAlign: 'center', paddingHorizontal: 4},
