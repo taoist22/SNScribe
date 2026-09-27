@@ -84,6 +84,20 @@ object DocxEditor {
             val first: Int? = null,
             val pageBreakBefore: Boolean? = null,
         ) : Op()
+
+        /** Page size, orientation and margins (twips) for every section; null = unchanged. */
+        data class PageSetup(
+            val width: Int? = null,
+            val height: Int? = null,
+            val landscape: Boolean? = null,
+            val top: Int? = null,
+            val right: Int? = null,
+            val bottom: Int? = null,
+            val left: Int? = null,
+        ) : Op()
+
+        /** The document's default font and size (half-points): what text without its own takes. */
+        data class Defaults(val font: String?, val size: Int?) : Op()
     }
 
     data class Saved(val dest: File, val changedParts: List<String>, val notes: List<String>)
@@ -221,7 +235,20 @@ object DocxEditor {
     fun apply(document: Document, styles: Document?, ops: List<Op>, notes: MutableList<String>, lists: Lists = Lists(null)): Boolean {
         var paragraphs = bodyParagraphs(document)
         val styleIds = StyleIds(styles)
+        var stylesTouched = false
         for (op in ops) {
+            // Document-wide edits address no paragraph.
+            if (op is Op.PageSetup) {
+                pageSetup(document, op, notes)
+                continue
+            }
+            if (op is Op.Defaults) {
+                if (styles != null) {
+                    defaults(styles, op, notes)
+                    stylesTouched = true
+                }
+                continue
+            }
             val index = when (op) {
                 is Op.Format -> op.para
                 is Op.Style -> op.para
@@ -231,6 +258,7 @@ object DocxEditor {
                 is Op.ListItem -> op.para
                 is Op.RunStyle -> op.para
                 is Op.ParaProps -> op.para
+                is Op.PageSetup, is Op.Defaults -> error("unreachable")
             }
             val p = checkNotNull(paragraphs.getOrNull(index)) { "no paragraph $index for $op" }
             when (op) {
@@ -242,11 +270,12 @@ object DocxEditor {
                 is Op.ListItem -> setListItem(document, p, op, lists, styleIds, notes)
                 is Op.RunStyle -> runStyle(document, p, op, notes)
                 is Op.ParaProps -> paraProps(document, p, op, notes)
+                is Op.PageSetup, is Op.Defaults -> {}
             }
             // Splits and joins renumber the paragraphs after them.
             if (op is Op.Split || op is Op.Join) paragraphs = bodyParagraphs(document)
         }
-        return styleIds.added
+        return styleIds.added || stylesTouched
     }
 
     fun bodyParagraphs(document: Document): List<Element> {
@@ -670,6 +699,59 @@ object DocxEditor {
             }
             offset += len
         }
+    }
+
+    /** Applies [op] to every w:sectPr (the body's and any section breaks in paragraphs). */
+    private fun pageSetup(document: Document, op: Op.PageSetup, notes: MutableList<String>) {
+        val sects = document.getElementsByTagNameNS(W, "sectPr")
+        val order = listOf("headerReference", "footerReference", "footnotePr", "endnotePr", "type", "pgSz", "pgMar")
+        for (i in 0 until sects.length) {
+            val sect = sects.item(i) as Element
+            fun part(name: String) = child(sect, name) ?: document.createElementNS(W, "w:$name").also { insertInOrder(sect, it, order) }
+            if (op.width != null || op.height != null || op.landscape != null) {
+                val sz = part("pgSz")
+                op.width?.let { sz.setAttributeNS(W, "w:w", it.toString()) }
+                op.height?.let { sz.setAttributeNS(W, "w:h", it.toString()) }
+                op.landscape?.let { if (it) sz.setAttributeNS(W, "w:orient", "landscape") else sz.removeAttributeNS(W, "orient") }
+            }
+            if (listOf(op.top, op.right, op.bottom, op.left).any { it != null }) {
+                val mar = part("pgMar")
+                op.top?.let { mar.setAttributeNS(W, "w:top", it.toString()) }
+                op.right?.let { mar.setAttributeNS(W, "w:right", it.toString()) }
+                op.bottom?.let { mar.setAttributeNS(W, "w:bottom", it.toString()) }
+                op.left?.let { mar.setAttributeNS(W, "w:left", it.toString()) }
+                // pgMar requires all of these; fill any a document left out.
+                for ((a, d) in listOf("header" to "720", "footer" to "720", "gutter" to "0", "top" to "1440", "right" to "1440", "bottom" to "1440", "left" to "1440")) {
+                    if (!mar.hasAttributeNS(W, a)) mar.setAttributeNS(W, "w:$a", d)
+                }
+            }
+        }
+        notes.add("page setup on ${sects.length} section(s): $op")
+    }
+
+    /** The default run font and size in styles.xml (docDefaults/rPrDefault). */
+    private fun defaults(styles: Document, op: Op.Defaults, notes: MutableList<String>) {
+        val root = styles.documentElement
+        fun sub(parent: Element, name: String, before: Element? = null): Element =
+            child(parent, name) ?: styles.createElementNS(W, "w:$name").also { parent.insertBefore(it, before) }
+        val docDefaults = sub(root, "docDefaults", root.firstChild as? Element)
+        val rPrDefault = sub(docDefaults, "rPrDefault", child(docDefaults, "pPrDefault"))
+        val rPr = sub(rPrDefault, "rPr")
+        op.font?.let { name ->
+            child(rPr, "rFonts")?.let { rPr.removeChild(it) }
+            val f = styles.createElementNS(W, "w:rFonts")
+            for (slot in listOf("ascii", "hAnsi", "eastAsia", "cs")) f.setAttributeNS(W, "w:$slot", name)
+            insertInOrder(rPr, f, RPR_ORDER)
+        }
+        op.size?.let { size ->
+            for (tag in listOf("sz", "szCs")) {
+                child(rPr, tag)?.let { rPr.removeChild(it) }
+                val e = styles.createElementNS(W, "w:$tag")
+                e.setAttributeNS(W, "w:val", size.toString())
+                insertInOrder(rPr, e, RPR_ORDER)
+            }
+        }
+        notes.add("defaults: $op")
     }
 
     private fun ensurePPr(document: Document, p: Element): Element =

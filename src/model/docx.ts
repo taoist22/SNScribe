@@ -68,6 +68,8 @@ export type Report = {
   contentControls: number;
 };
 
+export type PageSetup = {width: number; height: number; top: number; right: number; bottom: number; left: number; landscape: boolean};
+
 export type ListLevel = {fmt: string; text: string; start: number} | null;
 /** A list's levels, and the numbers it restarts at. */
 export type ListDef = {levels: ListLevel[]; starts: Record<string, number>};
@@ -81,6 +83,8 @@ export type DocxDocument = {
   blocks: Block[];
   /** Definitions of the lists the paragraphs use, by id. */
   lists: Record<string, ListDef>;
+  /** Page size and margins (twips) of the last section. */
+  page?: PageSetup;
   /**
    * Set for a document made with New: edits are applied to `source` (a pristine blank in
    * private storage) and saved over `saveTo` (the new file), instead of an "-edited" copy.

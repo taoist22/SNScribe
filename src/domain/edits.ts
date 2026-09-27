@@ -6,7 +6,7 @@
 // Offsets are into a paragraph's text (runs' `t` joined; objects are one U+FFFC), the
 // same text the native reader and writer use.
 
-import {OBJECT, paragraphText, type Block, type ParagraphBlock, type Run} from '../model/docx';
+import {OBJECT, paragraphText, type Block, type PageSetup, type ParagraphBlock, type Run} from '../model/docx';
 
 export type FormatProp = 'b' | 'i' | 'u' | 'h';
 export type StyleKind = 'heading1' | 'heading2' | 'title' | 'normal';
@@ -35,7 +35,11 @@ export type Op =
       after?: number;
       first?: number;
       pb?: boolean;
-    };
+    }
+  /** Page size, orientation and margins (twips) for the whole document; para is -1. */
+  | {op: 'page'; para: -1; width?: number; height?: number; landscape?: boolean; top?: number; right?: number; bottom?: number; left?: number}
+  /** The document's default font and size (half-points), for text without its own; para is -1. */
+  | {op: 'defaults'; para: -1; font?: string; size?: number};
 
 /** A position between characters of paragraph `para` (Paragraph.index). */
 export type Pos = {para: number; offset: number};
@@ -475,4 +479,16 @@ export function markSelection(runs: Run[], sel: {start: number; end: number} | n
     offset += r.t.length;
     return s >= sel.start && offset <= sel.end && r.t.length > 0 ? {...r, sel: true} : r;
   });
+}
+
+/** Page setup after the edits (page ops apply in order over the document's own). */
+export function pageAfter(page: PageSetup | undefined, ops: Op[]): PageSetup {
+  let out: PageSetup = page ?? {width: 12240, height: 15840, top: 1440, right: 1440, bottom: 1440, left: 1440, landscape: false};
+  for (const op of ops) {
+    if (op.op === 'page') {
+      const {op: _o, para: _p, ...rest} = op;
+      out = {...out, ...Object.fromEntries(Object.entries(rest).filter(([, v]) => v !== undefined))};
+    }
+  }
+  return out;
 }

@@ -33,7 +33,7 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
 
     companion object {
         /** Bumped with each native change; first log line, to spot stale installs. */
-        const val NATIVE_BUILD = 8
+        const val NATIVE_BUILD = 9
         private val EXPORT_DIR = File("/storage/emulated/0/EXPORT")
         private const val LOG_MAX_BYTES = 2L * 1024 * 1024
         private const val LOG_LINE_MAX = 4000
@@ -118,6 +118,13 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
                     putDouble("bytes", file.length().toDouble())
                     putDouble("ms", ms.toDouble())
                     putMap("report", report(result.report))
+                    result.page?.let { pg ->
+                        putMap("page", Arguments.createMap().apply {
+                            putInt("width", pg.width); putInt("height", pg.height)
+                            putInt("top", pg.top); putInt("right", pg.right); putInt("bottom", pg.bottom); putInt("left", pg.left)
+                            putBoolean("landscape", pg.landscape)
+                        })
+                    }
                     putArray("blocks", Arguments.createArray().apply { result.blocks.forEach { pushMap(block(it)) } })
                     putMap("lists", Arguments.createMap().apply {
                         for ((id, def) in result.lists) putMap(id.toString(), Arguments.createMap().apply {
@@ -184,6 +191,18 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
                                 pageBreakBefore = if (m.hasKey("pb") && !m.isNull("pb")) m.getBoolean("pb") else null,
                             )
                         }
+                        "page" -> {
+                            fun int(k: String) = if (m.hasKey(k) && !m.isNull(k)) m.getInt(k) else null
+                            DocxEditor.Op.PageSetup(
+                                width = int("width"), height = int("height"),
+                                landscape = if (m.hasKey("landscape") && !m.isNull("landscape")) m.getBoolean("landscape") else null,
+                                top = int("top"), right = int("right"), bottom = int("bottom"), left = int("left"),
+                            )
+                        }
+                        "defaults" -> DocxEditor.Op.Defaults(
+                            if (m.hasKey("font") && !m.isNull("font")) m.getString("font") else null,
+                            if (m.hasKey("size") && !m.isNull("size")) m.getInt("size") else null,
+                        )
                         "list" -> DocxEditor.Op.ListItem(m.getInt("para"), m.getString("kind") ?: "none", m.getString("listId") ?: "")
                         else -> throw IllegalArgumentException("unknown op ${m.getString("op")}")
                     }

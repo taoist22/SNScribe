@@ -129,8 +129,16 @@ object DocxReader {
     /** A list (w:num): its levels, and start overrides that restart it. */
     data class ListDef(val levels: List<ListLevel?>, val starts: Map<Int, Int>)
 
+    /** Page size and margins of the document's last section, in twips. */
+    data class PageSetup(val width: Int, val height: Int, val top: Int, val right: Int, val bottom: Int, val left: Int, val landscape: Boolean)
+
     /** [lists] holds the definitions of every list a paragraph uses, so the screen can recount. */
-    data class Result(val blocks: List<Block>, val report: Report, val lists: Map<Int, ListDef> = emptyMap())
+    data class Result(
+        val blocks: List<Block>,
+        val report: Report,
+        val lists: Map<Int, ListDef> = emptyMap(),
+        val page: PageSetup? = null,
+    )
 
     // ---------------------------------------------------------------- entry points
 
@@ -175,7 +183,12 @@ object DocxReader {
             }
         }
         val used = blocks.filterIsInstance<Paragraph>().mapNotNull { it.numId }.toSet()
-        return Result(blocks, ctx.report(), used.mapNotNull { id -> ctx.numbering.definition(id)?.let { id to it } }.toMap())
+        return Result(
+            blocks,
+            ctx.report(),
+            used.mapNotNull { id -> ctx.numbering.definition(id)?.let { id to it } }.toMap(),
+            pageSetup(child(body, "sectPr")),
+        )
     }
 
     // ---------------------------------------------------------------- paragraphs
@@ -720,6 +733,18 @@ object DocxReader {
                 }
             }
         }
+    }
+
+    private fun pageSetup(sect: Element?): PageSetup? {
+        if (sect == null) return null
+        val sz = child(sect, "pgSz")
+        val mar = child(sect, "pgMar")
+        fun n(e: Element?, a: String, d: Int) = e?.getAttributeNS(W, a)?.toIntOrNull() ?: d
+        return PageSetup(
+            width = n(sz, "w", 12240), height = n(sz, "h", 15840),
+            top = n(mar, "top", 1440), right = n(mar, "right", 1440), bottom = n(mar, "bottom", 1440), left = n(mar, "left", 1440),
+            landscape = sz?.getAttributeNS(W, "orient") == "landscape",
+        )
     }
 
     // ---------------------------------------------------------------- XML / zip helpers

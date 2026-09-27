@@ -73,6 +73,28 @@ class FontsAndBlankTest {
         assertEquals("a-b.docx", DocxBlank.freeName(work, "a/b").name)
     }
 
+    @Test
+    fun setsPageSetupAndDefaultFont() {
+        val blank = File(work, "page.docx").also { DocxBlank.write(it) }
+        val dest = File(work, "page-out.docx")
+        val saved = DocxEditor.save(
+            blank,
+            listOf(
+                Op.PageSetup(width = 15840, height = 12240, landscape = true, top = 1800, right = 1800, bottom = 1800, left = 1800),
+                Op.Defaults("Times New Roman", 24),
+                Op.Text(0, 0, 0, "Hello"),
+            ),
+            dest,
+            File(work, "tmp"),
+        )
+        assertTrue(saved.changedParts.containsAll(listOf("word/document.xml", "word/styles.xml")))
+        val r = DocxReader.read(dest)
+        assertEquals(DocxReader.PageSetup(15840, 12240, 1800, 1800, 1800, 1800, landscape = true), r.page)
+        val run = r.blocks.filterIsInstance<DocxReader.Paragraph>()[0].runs[0]
+        assertEquals("Times New Roman", run.font)
+        assertEquals(24, run.size)
+    }
+
     /** Which fonts and sizes CT's real documents resolve to (theme fonts included). */
     @Test
     fun reportsFontsOfRealDocuments() {

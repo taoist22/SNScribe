@@ -23,6 +23,7 @@ import {
   expectedTexts,
   formatOps,
   joinProblem,
+  pageAfter,
   rangesBetween,
   splitProblem,
   styleOps,
@@ -35,6 +36,7 @@ import {
   type StyleKind,
 } from './domain/edits';
 import {listKind, recount} from './domain/lists';
+import {PAPER_FORMATS, presetOps} from './domain/presets';
 import {anchorAfter, findBreak, pageIndexOf, windowEnd, type Anchor, type BlockBox, type Break, type LineBox, type PageStart} from './domain/paging';
 import {countWords, fontsUsed, outline, paragraphText, wordCount, type DocxDocument, type ParagraphBlock} from './model/docx';
 import {ensureFileReadPermission, ensureFileWritePermission} from './pluginPermissions';
@@ -74,7 +76,10 @@ const DOUBLE_TAP_MS = 500;
 type Frame = {x: number; top: number; height: number};
 type Selection = {from: Pos; to: Pos};
 type Typing = {mode: 'insert'; at: Pos} | {mode: 'replace'; range: Range};
-type Menu = 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count';
+type Menu = 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count' | 'page' | 'preset';
+
+/** Drop-down menu width; menus are kept inside the screen. */
+const MENU_W = 340;
 
 const STORAGE = '/storage/emulated/0';
 const DOCUMENTS = `${STORAGE}/Document`;
@@ -446,6 +451,89 @@ export function Reader(): React.JSX.Element {
       text += (text ? ' ' : '') + (i === start.anchor.block ? t.slice(start.char) : t);
     }
     return {heading, text: text.replace(/\s+/g, ' ').replace(/\ufffc/g, '').trim().slice(0, 140)};
+  };
+
+  /** Where a page begins, as a paragraph position (a table's page begins at the next paragraph). */
+  const pageStartPos = (pg: PageStart): Pos | null => {
+    for (let i = pg.anchor.block; i < blocks.length; i++) {
+      const b = blocks[i];
+      if (b.type === 'p') {
+        // The page map counts a first-line indent spacer as a character.
+        const offset = i === pg.anchor.block && pg.char > 0 ? Math.max(0, pg.char - leadChars(b)) : 0;
+        return {para: b.index, offset: Math.min(offset, paragraphText(b).length)};
+      }
+    }
+    return null;
+  };
+
+  const lastParagraph = (): ParagraphBlock | undefined =>
+    [...blocks].reverse().find((b): b is ParagraphBlock => b.type === 'p');
+
+  /** A blank page after page i: an empty paragraph that starts a new page, and what followed starts another. */
+  const newPageAfter = (i: number) => {
+    if (!map) {
+      return;
+    }
+    flushTyping();
+    const next = map.pages[i + 1];
+    const ops: Op[] = [];
+    let blank: Pos;
+    if (next) {
+      const at = pageStartPos(next);
+      if (!at) {
+        return;
+      }
+      const p = paragraph(at.para);
+      const problem = p ? splitProblem(p, at.offset) : 'Paragraph not found.';
+      if (problem) {
+        setStatus(problem);
+        return;
+      }
+      if (at.offset > 0) {
+        ops.push({op: 'split', para: at.para, offset: at.offset});
+        at.para += 1;
+      }
+      // An empty paragraph in front of the next page's text, both starting new pages.
+      ops.push({op: 'split', para: at.para, offset: 0});
+      ops.push({op: 'para', para: at.para, pb: true});
+      ops.push({op: 'para', para: at.para + 1, pb: true});
+      blank = {para: at.para, offset: 0};
+    } else {
+      const last = lastParagraph();
+      if (!last) {
+        return;
+      }
+      ops.push({op: 'split', para: last.index, offset: paragraphText(last).length});
+      ops.push({op: 'para', para: last.index + 1, pb: true});
+      blank = {para: last.index + 1, offset: 0};
+    }
+    commit(ops, 'new page');
+    setShowPages(false);
+    setSelection(null);
+    setCaret(blank);
+    keys.current?.focus();
+    setStatus('New page. Type to fill it.');
+  };
+
+  /** Selects exactly the text on page i, to see it before deleting it. */
+  const selectPage = (i: number) => {
+    if (!map) {
+      return;
+    }
+    flushTyping();
+    const from = pageStartPos(map.pages[i]);
+    const next = map.pages[i + 1];
+    const last = lastParagraph();
+    const to = next ? pageStartPos(next) : last ? {para: last.index, offset: paragraphText(last).length} : null;
+    if (!from || !to || comparePos(from, to) >= 0) {
+      setStatus('That page has no text to select.');
+      return;
+    }
+    goTo(map.pages[i].anchor);
+    setCaret(null);
+    setSelection({from, to});
+    keys.current?.focus();
+    setStatus('Page selected. Delete (or Backspace) removes it; tap the page to cancel.');
   };
 
   // ---------------------------------------------------------------- folder for New
@@ -1333,6 +1421,35 @@ export function Reader(): React.JSX.Element {
     }
   };
 
+  // The page follows the caret when it moves (typing, arrows) — not when the page is turned.
+  const followCaret = useRef(false);
+  useEffect(() => {
+    followCaret.current = true;
+  }, [caretAt?.para, caretAt?.offset]);
+
+  useEffect(() => {
+    const at = caretAt;
+    if (!followCaret.current || !caretBox || caretBox.key !== pageKey || !at) {
+      return;
+    }
+    followCaret.current = false;
+    const bottom = brk.kind === 'at' ? brk.top : anchor.offset + pageH;
+    if (caretBox.top >= bottom - 1 && brk.kind === 'at') {
+      const to = anchorAfter(anchor, boxesNow(), brk);
+      if (to && to.block < blocks.length) {
+        setHistory(h => [...h, anchor]);
+        setAnchor(to);
+      }
+    } else if (caretBox.top < anchor.offset - 1) {
+      const i = blocks.findIndex(b => b.type === 'p' && b.index === at.para);
+      if (i >= 0) {
+        setAnchor({block: i, offset: 0});
+      }
+    }
+    // Only a new caret box (for the moved caret) triggers this.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [caretBox]);
+
   // Where to draw the caret: asked of the paragraph's own layout once the page is measured.
   useEffect(() => {
     const at = caretAt;
@@ -1340,6 +1457,16 @@ export function Reader(): React.JSX.Element {
       return;
     }
     const i = window.findIndex(b => b.type === 'p' && b.index === at.para);
+    if (i < 0 && followCaret.current) {
+      // The caret moved off this stretch of the document: go to its paragraph.
+      followCaret.current = false;
+      const bi = blocks.findIndex(b => b.type === 'p' && b.index === at.para);
+      if (bi >= 0) {
+        setHistory(h => [...h, anchor]);
+        setAnchor({block: bi, offset: 0});
+      }
+      return;
+    }
     const f = frames.current[i];
     const tag = i >= 0 ? findNodeHandle(textRefs.current[i] ?? null) : null;
     if (i < 0 || !f || tag === null) {
@@ -1439,6 +1566,8 @@ export function Reader(): React.JSX.Element {
           <>
             {item('New…', startNew)}
             {item('Open…', open)}
+            {doc && !readOnly ? item('Page setup…', () => setMenu('page')) : null}
+            {doc && !readOnly ? item('Paper format (APA, MLA, Chicago)…', () => setMenu('preset')) : null}
             {doc && !readOnly ? item('Save', save) : null}
             {item('Close', close)}
           </>
@@ -1510,6 +1639,87 @@ export function Reader(): React.JSX.Element {
           </View>
         );
       }
+      case 'page': {
+        const pg = pageAfter(doc?.page, applied);
+        const chip = (label: string, on: boolean, action: () => void) => (
+          <Pressable key={label} onPress={once(`chip:${label}`, action)} style={[styles.chip, on ? styles.chipOn : null]}>
+            <Text allowFontScaling={false} style={[styles.chipText, on ? styles.chipTextOn : null]}>
+              {label}
+            </Text>
+          </Pressable>
+        );
+        const setPage = (props: Omit<Extract<Op, {op: 'page'}>, 'op' | 'para'>, label: string) =>
+          commit([{op: 'page', para: -1, ...props}], label);
+        const margin = pg.top === pg.bottom && pg.left === pg.right && pg.top === pg.left ? pg.top : null;
+        const short = Math.min(pg.width, pg.height);
+        const paper = Math.abs(short - 12240) < 60 ? 'letter' : Math.abs(short - 11906) < 60 ? 'a4' : 'other';
+        const size = (w: number, h: number) => (pg.landscape ? {width: h, height: w} : {width: w, height: h});
+        return (
+          <View style={styles.paraMenu}>
+            <Text allowFontScaling={false} style={styles.paraLabel}>
+              {'Margins (all sides)'}
+            </Text>
+            <View style={styles.chips}>
+              {[
+                ['0.75″', 1080],
+                ['1″', 1440],
+                ['1.25″', 1800],
+                ['1.5″', 2160],
+              ].map(([label, v]) =>
+                chip(String(label), margin === v, () => setPage({top: Number(v), right: Number(v), bottom: Number(v), left: Number(v)}, `margins ${label}`)),
+              )}
+            </View>
+            <Text allowFontScaling={false} style={styles.paraLabel}>
+              {'Paper'}
+            </Text>
+            <View style={styles.chips}>
+              {chip('Letter', paper === 'letter', () => setPage(size(12240, 15840), 'Letter paper'))}
+              {chip('A4', paper === 'a4', () => setPage(size(11906, 16838), 'A4 paper'))}
+            </View>
+            <Text allowFontScaling={false} style={styles.paraLabel}>
+              {'Orientation'}
+            </Text>
+            <View style={styles.chips}>
+              {chip('Portrait', !pg.landscape, () =>
+                pg.landscape && setPage({landscape: false, width: Math.min(pg.width, pg.height), height: Math.max(pg.width, pg.height)}, 'portrait'),
+              )}
+              {chip('Landscape', pg.landscape, () =>
+                !pg.landscape && setPage({landscape: true, width: Math.max(pg.width, pg.height), height: Math.min(pg.width, pg.height)}, 'landscape'),
+              )}
+            </View>
+            <Text allowFontScaling={false} style={styles.panelNote}>
+              {'Margins and paper shape the printed Word document; on the Supernote the text always fits the screen.'}
+            </Text>
+            <View style={styles.chips}>{chip('Done', false, () => setMenu(null))}</View>
+          </View>
+        );
+      }
+      case 'preset':
+        return (
+          <View>
+            {PAPER_FORMATS.map(f => (
+              <Pressable
+                key={f.id}
+                onPress={once(`preset:${f.id}`, () => {
+                  setMenu(null);
+                  flushTyping();
+                  commit(presetOps(blocks, f.id), f.name);
+                  setStatus(`Formatted as ${f.name}. Undo puts it back as it was.`);
+                })}
+                style={styles.menuItem}>
+                <Text allowFontScaling={false} style={[styles.menuText, styles.menuAction]}>
+                  {f.name}
+                </Text>
+                <Text allowFontScaling={false} style={styles.presetSummary}>
+                  {f.summary}
+                </Text>
+              </Pressable>
+            ))}
+            <Text allowFontScaling={false} style={[styles.presetSummary, styles.folderPath]}>
+              {'Page numbers and running heads come with header editing.'}
+            </Text>
+          </View>
+        );
       case 'count': {
         const all = countWords(blocks.filter((b): b is ParagraphBlock => b.type === 'p').map(paragraphText));
         const sel = !typing && selection ? countWords([selectedText()]) : null;
@@ -1530,9 +1740,12 @@ export function Reader(): React.JSX.Element {
       case 'view':
         return (
           <>
+            <Text allowFontScaling={false} style={[styles.menuText, styles.folderPath]}>
+              {`Text size: ${Math.round(textScale * 100)}%`}
+            </Text>
             {item('Larger text  A+', () => setScale(scaleAt + 1))}
             {item('Smaller text  A−', () => setScale(scaleAt - 1))}
-            {item('Document size', () => setScale(SCALES.indexOf(1)))}
+            {item('Normal size (100%)', () => setScale(SCALES.indexOf(1)))}
             {item('Pages…', () => setShowPages(true))}
             {item('Word count…', () => setMenu('count'))}
             {item('Go to start', () => goTo({block: 0, offset: 0}))}
@@ -1758,9 +1971,21 @@ export function Reader(): React.JSX.Element {
                         {pv.heading}
                       </Text>
                     ) : null}
-                    <Text allowFontScaling={false} style={styles.pageCardText} numberOfLines={4}>
+                    <Text allowFontScaling={false} style={styles.pageCardText} numberOfLines={3}>
                       {pv.text}
                     </Text>
+                    <View style={styles.pageCardTools}>
+                      <Pressable onPress={once(`newpage:${i}`, () => newPageAfter(i))} style={styles.pageCardButton}>
+                        <Text allowFontScaling={false} style={styles.pageCardButtonText}>
+                          {'New page after'}
+                        </Text>
+                      </Pressable>
+                      <Pressable onPress={once(`selpage:${i}`, () => selectPage(i))} style={styles.pageCardButton}>
+                        <Text allowFontScaling={false} style={styles.pageCardButtonText}>
+                          {'Select page'}
+                        </Text>
+                      </Pressable>
+                    </View>
                   </Pressable>
                 );
               })}
@@ -1825,7 +2050,7 @@ export function Reader(): React.JSX.Element {
           </View>
         ) : null}
         {menu ? (
-          <View style={[styles.menu, {left: Math.max(0, Math.min(menuX, 9999)), maxHeight: Math.max(240, pageH)}]}>
+          <View style={[styles.menu, {left: Math.max(0, Math.min(menuX, pageW + PAD * 2 - MENU_W - 4)), maxHeight: Math.max(240, pageH)}]}>
             <ScrollView keyboardShouldPersistTaps="always">{menuBody()}</ScrollView>
           </View>
         ) : null}
@@ -1885,14 +2110,18 @@ const styles = StyleSheet.create({
   chipText: {color: '#000', fontSize: 16},
   chipTextOn: {color: '#fff'},
   countSel: {marginTop: 8},
+  presetSummary: {color: '#333', fontSize: 14, marginTop: 4},
+  pageCardTools: {flexDirection: 'row', marginTop: 'auto'},
+  pageCardButton: {borderWidth: 1, borderColor: '#000', borderRadius: 4, paddingVertical: 5, paddingHorizontal: 6, marginRight: 6},
+  pageCardButtonText: {color: '#000', fontSize: 12, fontWeight: '700'},
   pagesHead: {flexDirection: 'row', alignItems: 'center', paddingVertical: 8, borderBottomWidth: 1, borderColor: '#000'},
   pagesGrid: {flexDirection: 'row', flexWrap: 'wrap', paddingTop: 8},
-  pageCard: {width: 220, height: 170, borderWidth: 1, borderColor: '#000', padding: 10, marginRight: 12, marginBottom: 12},
+  pageCard: {width: 220, height: 210, borderWidth: 1, borderColor: '#000', padding: 10, marginRight: 12, marginBottom: 12},
   pageCardHere: {borderWidth: 3},
   pageCardNumber: {color: '#000', fontSize: 18, fontWeight: '700'},
   pageCardHeading: {color: '#000', fontSize: 15, fontWeight: '700', marginTop: 4},
   pageCardText: {color: '#333', fontSize: 14, marginTop: 4},
-  menu: {position: 'absolute', top: 0, width: 340, backgroundColor: '#fff', borderWidth: 2, borderColor: '#000'},
+  menu: {position: 'absolute', top: 0, width: MENU_W, backgroundColor: '#fff', borderWidth: 2, borderColor: '#000'},
   menuItem: {paddingVertical: 14, paddingHorizontal: 16, borderBottomWidth: 1, borderColor: '#bbb'},
   menuText: {color: '#000', fontSize: 19},
   menuH1: {fontSize: 24, fontWeight: '700'},
