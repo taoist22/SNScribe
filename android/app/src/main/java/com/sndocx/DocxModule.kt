@@ -602,8 +602,14 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
             FontFiles.reindex()
             for (i in 0 until families.size()) {
                 val family = families.getString(i) ?: continue
-                if (loaded.containsKey(family)) continue
-                for (style in 0..3) FontFiles.find(family, style)?.let { register(family, style, it) }
+                // Style by style: a family loaded with only some styles (a regular added by hand,
+                // say) still gets the rest from the font folder. Skipping the whole family once
+                // anything was loaded left Times New Roman without its bold file (CT: headings
+                // not bold on the device, though the bold file was there).
+                for (style in 0..3) {
+                    if (loaded[family]?.contains(style) == true) continue
+                    FontFiles.find(family, style)?.let { register(family, style, it) }
+                }
             }
             appendLog("fonts available: ${loaded.keys.sorted().joinToString { f -> "$f ${loaded[f]!!.sorted().joinToString("") { st -> "RBIZ"[st].toString() }}" }} (R regular, B bold, I italic, Z bold italic: files found)")
             promise.resolve(Arguments.fromList(loaded.keys.sorted()))
