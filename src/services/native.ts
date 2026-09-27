@@ -13,6 +13,8 @@ type DocxModule = {
   open(path: string): Promise<DocxDocument>;
   /** A blank document named `name` in the Document folder: its path, and the pristine copy edits apply to. */
   create(name: string, folder: string): Promise<{path: string; source: string}>;
+  /** A new document in folder copied from a .docx or .dotx (made a document). */
+  createFrom(templatePath: string, name: string, folder: string): Promise<{path: string; source: string}>;
   /** Folders directly inside `path`, or {error} when it can't be listed. */
   listFolders(path: string): Promise<{folders?: string[]; error?: string}>;
   /** DOCX's private storage: JSON kept under a name. */

@@ -47,6 +47,103 @@ object DocxReader {
         return null
     }
 
+    const val R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
+    /** The part a document relationship id points at, or null (external or missing). */
+    private fun relById(rels: Document?, id: String): String? {
+        var n = rels?.documentElement?.firstChild
+        while (n != null) {
+            if (n is Element && n.localName == "Relationship" && n.getAttribute("Id") == id && n.getAttribute("TargetMode") != "External") {
+                val target = n.getAttribute("Target")
+                return if (target.startsWith("/")) target.removePrefix("/") else "word/" + target.removePrefix("./")
+            }
+            n = n.nextSibling
+        }
+        return null
+    }
+
+    /**
+     * What DOCX can edit in a header or footer part. With only text in it, the whole part:
+     * its text (without the page number itself), page number and alignment. With a logo or
+     * table too ([HeaderFooter.other]), just its [editableLine].
+     */
+    fun headerFooter(part: Document): HeaderFooter {
+        val other = hasOtherContent(part)
+        val ps: List<Element> = if (other) {
+            listOfNotNull(editableLine(part))
+        } else {
+            val all = part.getElementsByTagNameNS(W, "p")
+            (0 until all.length).map { all.item(it) as Element }
+        }
+        val text = StringBuilder()
+        var pageNumber = false
+        var align = if (other) "right" else "left"
+        for (p in ps) {
+            val line = lineOf(p)
+            if (line.page) pageNumber = true
+            if (line.text.isNotBlank() || line.page) {
+                child(p, "pPr")?.let { child(it, "jc") }?.getAttributeNS(W, "val")?.takeIf { it.isNotEmpty() }?.let { align = if (it == "both") "justify" else it }
+            }
+            if (line.text.isNotBlank()) {
+                if (text.isNotEmpty()) text.append(" / ")
+                text.append(line.text.trim())
+            }
+        }
+        return HeaderFooter(text.toString(), pageNumber, align, other)
+    }
+
+    /**
+     * The one line of a header or footer that holds more than text which DOCX may change:
+     * the top-level paragraph with the page number, else an empty last paragraph, else
+     * none (a new line goes at the bottom).
+     */
+    fun editableLine(part: Document): Element? {
+        val top = elementChildren(part.documentElement).filter { it.localName == "p" }
+        top.firstOrNull { lineOf(it).page }?.let { return it }
+        val last = elementChildren(part.documentElement).lastOrNull()
+        return last?.takeIf { it.localName == "p" && lineOf(it).text.isBlank() && !hasOther(it) }
+    }
+
+    private class Line(val text: String, val page: Boolean)
+
+    /** A paragraph's shown text, leaving out a PAGE field's number, and whether it has one. */
+    private fun lineOf(p: Element): Line {
+        val t = StringBuilder()
+        var page = false
+        var inInstr = false
+        var instr = StringBuilder()
+        var skipping = false
+        fun walk(n: org.w3c.dom.Node) {
+            if (n !is Element) return
+            when (n.localName) {
+                "fldSimple" -> if (n.getAttributeNS(W, "instr").trim().startsWith("PAGE")) {
+                    page = true
+                    return
+                }
+                "fldChar" -> when (n.getAttributeNS(W, "fldCharType")) {
+                    "begin" -> { inInstr = true; instr = StringBuilder() }
+                    "separate" -> { inInstr = false; skipping = instr.trim().startsWith("PAGE"); if (skipping) page = true }
+                    "end" -> { if (inInstr && instr.trim().startsWith("PAGE")) page = true; inInstr = false; skipping = false }
+                }
+                "instrText" -> if (inInstr) instr.append(n.textContent)
+                "t" -> if (!inInstr && !skipping) t.append(n.textContent)
+                "tab" -> if (!inInstr && !skipping && n.parentNode?.localName == "r") t.append(' ')
+            }
+            var c = n.firstChild
+            while (c != null) { walk(c); c = c.nextSibling }
+        }
+        walk(p)
+        return Line(t.toString(), page)
+    }
+
+    private val OTHER = listOf("drawing", "pict", "object", "tbl", "sdt", "txbxContent")
+
+    private fun hasOther(e: Element) = OTHER.any { e.getElementsByTagNameNS(W, it).length > 0 } ||
+        e.getElementsByTagNameNS("http://schemas.openxmlformats.org/markup-compatibility/2006", "AlternateContent").length > 0
+
+    /** Whether a header or footer holds more than text and fields: pictures, shapes, tables, controls. */
+    fun hasOtherContent(part: Document): Boolean = part.documentElement?.let(::hasOther) ?: false
+
     /** Where the document's list definitions live: its numbering relationship, else word/numbering.xml. */
     fun numberingPart(rels: Document?): String {
         val root = rels?.documentElement ?: return "word/numbering.xml"
@@ -141,7 +238,12 @@ object DocxReader {
         val report: Report,
         val lists: Map<Int, ListDef> = emptyMap(),
         val page: PageSetup? = null,
+        val header: HeaderFooter? = null,
+        val footer: HeaderFooter? = null,
     )
+
+    /** The default header or footer of the last section: its text, whether it shows a page number, alignment. */
+    data class HeaderFooter(val text: String, val pageNumber: Boolean, val align: String, val other: Boolean = false)
 
     // ---------------------------------------------------------------- entry points
 
@@ -153,7 +255,18 @@ object DocxReader {
             for (e in zip.entries()) checkEntryName(e.name)
             val document = part(DOCUMENT_PART) ?: throw IllegalStateException("no $DOCUMENT_PART in package")
             val rels = part(DOCUMENT_RELS)
-            return read(document, part("word/styles.xml"), part(numberingPart(rels)), part(themePart(rels)))
+            val result = read(document, part("word/styles.xml"), part(numberingPart(rels)), part(themePart(rels)))
+            val all = document.getElementsByTagNameNS(W, "sectPr")
+            val sects = (0 until all.length).map { all.item(it) as Element }.filter { (it.parentNode as? Element)?.localName != "sectPrChange" }
+            // The last section's default header: its own, else the nearest section before it (Word's inheritance).
+            fun hf(tag: String): HeaderFooter? {
+                val ref = sects.asReversed().firstNotNullOfOrNull { s ->
+                    elementChildren(s).firstOrNull { it.localName == tag && it.getAttributeNS(W, "type").let { t -> t.isEmpty() || t == "default" } }
+                } ?: return null
+                val target = relById(rels, ref.getAttributeNS(R_NS, "id")) ?: return null
+                return headerFooter(part(target) ?: return null)
+            }
+            return result.copy(header = hf("headerReference"), footer = hf("footerReference"))
         }
     }
 

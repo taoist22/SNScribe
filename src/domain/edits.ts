@@ -39,7 +39,16 @@ export type Op =
   /** Page size, orientation and margins (twips) for the whole document; para is -1. */
   | {op: 'page'; para: -1; width?: number; height?: number; landscape?: boolean; top?: number; right?: number; bottom?: number; left?: number}
   /** The document's default font and size (half-points), for text without its own; para is -1. */
-  | {op: 'defaults'; para: -1; font?: string; size?: number};
+  | {op: 'defaults'; para: -1; font?: string; size?: number}
+  /**
+   * The header or footer on every page: one line aligned `align`, the text, then the page
+   * number when `pageNumber`. A logo or table already there stays; para is -1.
+   */
+  | {op: 'headerFooter'; para: -1; kind: 'header' | 'footer'; text: string; pageNumber: boolean; align: 'left' | 'center' | 'right'}
+  /** Make [start, end) a link to url. */
+  | {op: 'link'; para: number; start: number; end: number; url: string}
+  /** Remove the links overlapping [start, end) (a caret: the link it is in); the text stays. */
+  | {op: 'unlink'; para: number; start: number; end: number};
 
 /** A position between characters of paragraph `para` (Paragraph.index). */
 export type Pos = {para: number; offset: number};
@@ -318,6 +327,9 @@ export function applyOps(blocks: Block[], ops: Op[]): Block[] {
       }
       continue;
     }
+    if (op.op === 'headerFooter' || op.op === 'page') {
+      continue;
+    }
     const i = out.findIndex(b => b.type === 'p' && b.index === op.para);
     if (i < 0) {
       continue;
@@ -350,6 +362,119 @@ export function applyOps(blocks: Block[], ops: Op[]): Block[] {
       case 'para':
         out[i] = paraProps(p, op);
         break;
+      case 'link':
+        out[i] = {...p, runs: setLink(p.runs, op.start, op.end, true)};
+        break;
+      case 'unlink': {
+        const span = linkSpan(p, op.start, op.end);
+        if (span) {
+          out[i] = {...p, runs: setLink(p.runs, span.start, span.end, false)};
+        }
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+function setLink(runs: Run[], start: number, end: number, on: boolean): Run[] {
+  let offset = 0;
+  return splitRuns(runs, [start, end]).map(r => {
+    const s = offset;
+    offset += r.t.length;
+    return s >= start && offset <= end && r.t.length > 0 ? {...r, l: on} : r;
+  });
+}
+
+/**
+ * The whole extent of the links overlapping [start, end) — a caret (start === end) counts
+ * when it touches a link — or null when there are none.
+ */
+export function linkSpan(p: ParagraphBlock, start: number, end: number): {start: number; end: number} | null {
+  const hi = Math.max(end, start + 1);
+  let pos = 0;
+  let span: {start: number; end: number} | null = null;
+  const runs = p.runs.map(r => {
+    const s = pos;
+    pos += r.t.length;
+    return {r, s, e: pos};
+  });
+  for (const {r, s, e} of runs) {
+    if (r.l && s < hi && e > (start === end ? start - 1 : start)) {
+      span = span ? {start: Math.min(span.start, s), end: Math.max(span.end, e)} : {start: s, end: e};
+    }
+  }
+  if (!span) {
+    return null;
+  }
+  // Grow over neighbouring link runs: one link is often several runs.
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const {r, s, e} of runs) {
+      if (r.l && r.t.length > 0 && ((e === span.start && s < span.start) || (s === span.end && e > span.end))) {
+        span = {start: Math.min(span.start, s), end: Math.max(span.end, e)};
+        grew = true;
+      }
+    }
+  }
+  return span;
+}
+
+/** Why [start, end) of `p` can't become a link (empty, already linked, a field or object), or null. */
+export function linkProblem(p: ParagraphBlock, start: number, end: number): string | null {
+  if (end <= start) {
+    return 'Select the words to link first.';
+  }
+  let pos = 0;
+  for (const r of p.runs) {
+    const s = pos;
+    pos += r.t.length;
+    if (r.t.length === 0 || pos <= start || s >= end) {
+      continue;
+    }
+    if (r.l) {
+      return 'Part of that is already a link. Remove it first.';
+    }
+    if (r.k || r.obj) {
+      return 'A link can\'t cover a field, note or picture.';
+    }
+  }
+  return null;
+}
+
+/**
+ * What was typed as a link address, as a web address: a DOI (10.xxxx/…, doi:…) becomes
+ * https://doi.org/…, www.… and bare domains get https://. Null when it doesn't look like one.
+ */
+export function linkUrl(typed: string): string | null {
+  const t = typed.trim().replace(/[.,;]+$/, '');
+  if (!t || /\s/.test(t)) {
+    return null;
+  }
+  const doi = /^(?:doi:\s*|https?:\/\/(?:dx\.)?doi\.org\/)?(10\.\d{4,9}\/\S+)$/i.exec(t);
+  if (doi) {
+    return `https://doi.org/${doi[1]}`;
+  }
+  if (/^(https?:\/\/|mailto:)/i.test(t)) {
+    return t;
+  }
+  if (/^[^@\s]+@[^@\s]+\.[a-z]{2,}$/i.test(t)) {
+    return `mailto:${t}`;
+  }
+  if (/^(www\.)?[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}(\/\S*)?$/i.test(t)) {
+    return `https://${t}`;
+  }
+  return null;
+}
+
+export type HeaderFooter = {text: string; pageNumber: boolean; align: 'left' | 'center' | 'right' | 'justify'; other?: boolean};
+
+/** The header or footer after the edits (the last headerFooter op of that kind wins). */
+export function headerFooterAfter(current: HeaderFooter | undefined, kind: 'header' | 'footer', ops: Op[]): HeaderFooter | undefined {
+  let out = current;
+  for (const op of ops) {
+    if (op.op === 'headerFooter' && op.kind === kind) {
+      out = {text: op.text, pageNumber: op.pageNumber, align: op.align, other: current?.other};
     }
   }
   return out;

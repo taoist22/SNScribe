@@ -22,7 +22,11 @@ import {
   deletionRange,
   expectedTexts,
   formatOps,
+  headerFooterAfter,
   joinProblem,
+  linkProblem,
+  linkSpan,
+  linkUrl,
   pageAfter,
   rangesBetween,
   splitProblem,
@@ -78,7 +82,7 @@ type Frame = {x: number; top: number; height: number};
 type Selection = {from: Pos; to: Pos};
 type Typing = {mode: 'insert'; at: Pos} | {mode: 'replace'; range: Range};
 type Menu =
-  | 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count' | 'page' | 'preset'
+  | 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count' | 'page' | 'preset' | 'header' | 'link'
   | 'recent' | 'versions' | 'recover';
 
 /** Drop-down menu width; menus are kept inside the screen. */
@@ -109,6 +113,12 @@ export function Reader(): React.JSX.Element {
   const [fonts, setFonts] = useState<Set<string>>(new Set());
   /** Naming a new document: the name being typed, or null. */
   const [naming, setNaming] = useState<string | null>(null);
+  /** New from template: the .docx/.dotx the new document is copied from. */
+  const [template, setTemplate] = useState<string | null>(null);
+  /** The writer's last name, for MLA's header (remembered). */
+  const [lastName, setLastName] = useState('');
+  const [hfForm, setHfForm] = useState<{text: string; where: 'top' | 'bottom' | 'none'} | null>(null);
+  const [linkForm, setLinkForm] = useState<{para: number; start: number; end: number; url: string} | null>(null);
   /** Where New puts the document, and the folder being browsed to choose it. */
   const [newFolder, setNewFolder] = useState(DOCUMENTS);
   const [browse, setBrowse] = useState<{path: string; folders?: string[]; error?: string} | null>(null);
@@ -155,7 +165,10 @@ export function Reader(): React.JSX.Element {
       const refused = await log(`DOCX opened: NATIVE_BUILD=${nativeBuild()} read=${canRead} write=${canWrite} log=${name}`);
       // Remembered between sessions: text size, New's folder, recent documents.
       try {
-        const saved = JSON.parse((await Docx?.load('settings')) ?? '{}') as {scaleAt?: number; newFolder?: string};
+        const saved = JSON.parse((await Docx?.load('settings')) ?? '{}') as {scaleAt?: number; newFolder?: string; lastName?: string};
+        if (typeof saved.lastName === 'string') {
+          setLastName(saved.lastName);
+        }
         if (typeof saved.scaleAt === 'number') {
           setScaleAt(Math.max(0, Math.min(SCALES.length - 1, saved.scaleAt)));
         }
@@ -361,14 +374,51 @@ export function Reader(): React.JSX.Element {
     if (!mayDiscard('New')) {
       return;
     }
+    setTemplate(null);
     setNaming('Untitled');
     setMenu('name');
+  };
+
+  /** New from template: pick a .docx or .dotx; the new document starts as a copy of it. */
+  const startFromTemplate = async () => {
+    if (!mayDiscard('New')) {
+      return;
+    }
+    setMenu(null);
+    try {
+      if (!(await ensureFileReadPermission())) {
+        setStatus('File access was not allowed.');
+        return;
+      }
+      const picked = (await RattaFileSelector.selectFile({
+        selectType: 0,
+        maxNum: 1,
+        title: 'Choose a template or document to start from',
+        rightButtonText: 'Choose',
+        suffixList: ['docx', 'dotx'],
+      })) as string[] | null | undefined;
+      const path = picked?.find(p => typeof p === 'string' && p.length > 0);
+      if (!path) {
+        return;
+      }
+      if (!/\.(docx|dotx)$/i.test(path)) {
+        setStatus('Choose a .docx or .dotx file.');
+        return;
+      }
+      setTemplate(path);
+      setNaming(path.slice(path.lastIndexOf('/') + 1).replace(/\.(docx|dotx)$/i, ''));
+      setMenu('name');
+    } catch (error) {
+      setStatus(`No template chosen: ${errorText(error)}`);
+    }
   };
 
   /** A blank document in the Document folder, opened for editing; it saves over itself. */
   const createNew = async () => {
     const name = (naming ?? '').trim() || 'Untitled';
+    const from = template;
     setNaming(null);
+    setTemplate(null);
     setMenu(null);
     setBusy(true);
     try {
@@ -376,7 +426,7 @@ export function Reader(): React.JSX.Element {
         setStatus('Making a document needs file write permission.');
         return;
       }
-      const made = await Docx!.create(name, newFolder);
+      const made = from ? await Docx!.createFrom(from, name, newFolder) : await Docx!.create(name, newFolder);
       await openPath(made.path, {source: made.source});
     } catch (error) {
       setStatus(`Could not make the document: ${errorText(error)}`);
@@ -845,6 +895,91 @@ export function Reader(): React.JSX.Element {
   };
 
   const nothingSelected = () => setStatus('Select some text first, or tap inside a word.');
+
+  // ---------------------------------------------------------------- header, page numbers, links
+
+  const headerNow = () => headerFooterAfter(doc?.header, 'header', applied);
+  const footerNow = () => headerFooterAfter(doc?.footer, 'footer', applied);
+
+  const openHeaderForm = () => {
+    const h = headerNow();
+    const f = footerNow();
+    setHfForm({text: h?.text ?? '', where: h?.pageNumber ? 'top' : f?.pageNumber ? 'bottom' : 'none'});
+    setMenu('header');
+  };
+
+  /** The header line (text, page number top right) and, when it moves there or leaves, the footer's page number. */
+  const applyHeader = () => {
+    if (!hfForm) {
+      return;
+    }
+    const f = footerNow();
+    const ops: Op[] = [{op: 'headerFooter', para: -1, kind: 'header', text: hfForm.text.trim(), pageNumber: hfForm.where === 'top', align: 'right'}];
+    if (hfForm.where === 'bottom' || f?.pageNumber) {
+      const align = hfForm.where === 'bottom' ? 'center' : f?.align === 'justify' || !f ? 'left' : f.align;
+      ops.push({op: 'headerFooter', para: -1, kind: 'footer', text: f?.text ?? '', pageNumber: hfForm.where === 'bottom', align});
+    }
+    setMenu(null);
+    setHfForm(null);
+    commit(ops, 'header');
+    setStatus('Header set. It shows in Word; the Supernote page does not draw headers.');
+  };
+
+  /** Link…: the selection (within one paragraph) becomes a link; its text is offered as the address. */
+  const startLink = () => {
+    const ranges = !typing && selection ? rangesBetween(blocks, selection.from, selection.to).filter(r => r.end > r.start) : [];
+    if (ranges.length !== 1) {
+      setMenu(null);
+      setStatus(ranges.length > 1 ? 'A link has to stay within one paragraph.' : 'Select the words to link first.');
+      return;
+    }
+    const r = ranges[0];
+    const p = paragraph(r.para);
+    const problem = p ? linkProblem(p, r.start, r.end) : 'Paragraph not found.';
+    if (problem) {
+      setMenu(null);
+      setStatus(problem);
+      return;
+    }
+    const words = textOf(r.para).slice(r.start, r.end);
+    setLinkForm({...r, url: linkUrl(words) ? words.trim() : ''});
+    setMenu('link');
+  };
+
+  const applyLink = () => {
+    if (!linkForm) {
+      return;
+    }
+    const url = linkUrl(linkForm.url);
+    if (!url) {
+      setStatus('That isn\'t a web address or DOI (like https://… or 10.1037/…).');
+      return;
+    }
+    setMenu(null);
+    setLinkForm(null);
+    commit([{op: 'link', para: linkForm.para, start: linkForm.start, end: linkForm.end, url}], 'link');
+    setStatus(`Linked to ${url}`);
+  };
+
+  /** Remove link: the link at the caret, or the links the selection touches. */
+  const removeLink = () => {
+    setMenu(null);
+    const ranges: Range[] =
+      !typing && selection ? rangesBetween(blocks, selection.from, selection.to) : caretAt ? [{para: caretAt.para, start: caretAt.offset, end: caretAt.offset}] : [];
+    flushTyping();
+    const ops: Op[] = [];
+    for (const r of ranges) {
+      const p = paragraph(r.para);
+      if (p && linkSpan(p, r.start, r.end)) {
+        ops.push({op: 'unlink', para: r.para, start: r.start, end: r.end});
+      }
+    }
+    if (ops.length === 0) {
+      setStatus('There is no link here.');
+      return;
+    }
+    commit(ops, 'remove link');
+  };
 
   /** Paragraph formatting for the targeted paragraphs, as one undo step. The menu stays open. */
   const paraTool = (props: Omit<Extract<Op, {op: 'para'}>, 'op' | 'para'>, label: string) => {
@@ -1621,8 +1756,8 @@ export function Reader(): React.JSX.Element {
 
   // Settings are remembered between sessions.
   useEffect(() => {
-    Docx?.store('settings', JSON.stringify({scaleAt, newFolder}));
-  }, [scaleAt, newFolder]);
+    Docx?.store('settings', JSON.stringify({scaleAt, newFolder, lastName}));
+  }, [scaleAt, newFolder, lastName]);
 
   // The page follows the caret when it moves (typing, arrows) — not when the page is turned.
   const followCaret = useRef(false);
@@ -1768,9 +1903,11 @@ export function Reader(): React.JSX.Element {
         return (
           <>
             {item('New…', startNew)}
+            {item('New from template…', startFromTemplate)}
             {item('Open…', open)}
             {recent.length ? item('Recent…', () => setMenu('recent')) : null}
             {doc && !readOnly ? item('Page setup…', () => setMenu('page')) : null}
+            {doc && !readOnly ? item('Header & page numbers…', openHeaderForm) : null}
             {doc && !readOnly ? item('Paper format (APA, MLA, Chicago)…', () => setMenu('preset')) : null}
             {doc && !readOnly ? item('Save', save) : null}
             {doc && !readOnly ? item('Save a copy', saveCopy) : null}
@@ -1935,14 +2072,31 @@ export function Reader(): React.JSX.Element {
       case 'preset':
         return (
           <View>
+            <View style={[styles.row, styles.presetName]}>
+              <Text allowFontScaling={false} style={styles.menuText}>
+                {'Last name (MLA)'}
+              </Text>
+              <TextInput
+                style={styles.nameInput}
+                value={lastName}
+                onChangeText={setLastName}
+                allowFontScaling={false}
+                autoCorrect={false}
+                returnKeyType="done"
+              />
+            </View>
             {PAPER_FORMATS.map(f => (
               <Pressable
                 key={f.id}
                 onPress={once(`preset:${f.id}`, () => {
                   setMenu(null);
                   flushTyping();
-                  commit(presetOps(blocks, f.id), f.name);
-                  setStatus(`Formatted as ${f.name}. Undo puts it back as it was.`);
+                  commit(presetOps(blocks, f.id, lastName), f.name);
+                  setStatus(
+                    f.id === 'mla' && !lastName.trim()
+                      ? `Formatted as ${f.name}. Add your last name above to put it before the page number.`
+                      : `Formatted as ${f.name}. Undo puts it back as it was.`,
+                  );
                 })}
                 style={styles.menuItem}>
                 <Text allowFontScaling={false} style={[styles.menuText, styles.menuAction]}>
@@ -1953,11 +2107,86 @@ export function Reader(): React.JSX.Element {
                 </Text>
               </Pressable>
             ))}
-            <Text allowFontScaling={false} style={[styles.presetSummary, styles.folderPath]}>
-              {'Page numbers and running heads come with header editing.'}
-            </Text>
           </View>
         );
+      case 'header': {
+        if (!hfForm) {
+          return null;
+        }
+        const h = headerNow();
+        const chip = (label: string, on: boolean, action: () => void) => (
+          <Pressable key={label} onPress={once(`chip:${label}`, action)} style={[styles.chip, on ? styles.chipOn : null]}>
+            <Text allowFontScaling={false} style={[styles.chipText, on ? styles.chipTextOn : null]}>
+              {label}
+            </Text>
+          </Pressable>
+        );
+        return (
+          <View style={styles.paraMenu}>
+            <Text allowFontScaling={false} style={styles.paraLabel}>
+              {'Header text (top right; optional)'}
+            </Text>
+            <TextInput
+              style={styles.nameInput}
+              value={hfForm.text}
+              onChangeText={text => setHfForm(f => (f ? {...f, text} : f))}
+              allowFontScaling={false}
+              placeholder="e.g. your last name"
+              returnKeyType="done"
+            />
+            <Text allowFontScaling={false} style={styles.paraLabel}>
+              {'Page numbers'}
+            </Text>
+            <View style={styles.chips}>
+              {chip('Top right', hfForm.where === 'top', () => setHfForm(f => (f ? {...f, where: 'top'} : f)))}
+              {chip('Bottom center', hfForm.where === 'bottom', () => setHfForm(f => (f ? {...f, where: 'bottom'} : f)))}
+              {chip('None', hfForm.where === 'none', () => setHfForm(f => (f ? {...f, where: 'none'} : f)))}
+            </View>
+            {h?.other ? (
+              <Text allowFontScaling={false} style={styles.panelNote}>
+                {'This header has a logo or table. It stays; only the line with the text and page number changes.'}
+              </Text>
+            ) : null}
+            <Text allowFontScaling={false} style={styles.panelNote}>
+              {'Every page gets it (a different first page keeps its own). The Supernote page doesn\'t draw headers; Word does.'}
+            </Text>
+            <View style={styles.row}>
+              {button('Apply', applyHeader)}
+              {button('Cancel', () => {
+                setHfForm(null);
+                setMenu(null);
+              })}
+            </View>
+          </View>
+        );
+      }
+      case 'link':
+        return linkForm ? (
+          <View style={styles.nameForm}>
+            <Text allowFontScaling={false} style={styles.menuText}>
+              {`Link “${textOf(linkForm.para).slice(linkForm.start, linkForm.end).slice(0, 60)}” to:`}
+            </Text>
+            <TextInput
+              style={styles.nameInput}
+              value={linkForm.url}
+              onChangeText={url => setLinkForm(f => (f ? {...f, url} : f))}
+              autoFocus
+              autoCapitalize="none"
+              autoCorrect={false}
+              allowFontScaling={false}
+              placeholder="https://… or a DOI (10.1037/…)"
+              returnKeyType="done"
+              onSubmitEditing={applyLink}
+            />
+            <View style={styles.row}>
+              {button('Link', applyLink)}
+              {button('Cancel', () => {
+                setLinkForm(null);
+                setMenu(null);
+              })}
+            </View>
+          </View>
+        ) : null;
       case 'count': {
         const all = countWords(blocks.filter((b): b is ParagraphBlock => b.type === 'p').map(paragraphText));
         const sel = !typing && selection ? countWords([selectedText()]) : null;
@@ -2019,7 +2248,7 @@ export function Reader(): React.JSX.Element {
         return (
           <View style={styles.nameForm}>
             <Text allowFontScaling={false} style={styles.menuText}>
-              {'Name for the new document'}
+              {template ? `New from ${template.slice(template.lastIndexOf('/') + 1)}: name` : 'Name for the new document'}
             </Text>
             <TextInput
               style={styles.nameInput}
@@ -2043,7 +2272,10 @@ export function Reader(): React.JSX.Element {
             </View>
             <View style={styles.row}>
               {button('Create', createNew)}
-              {button('Cancel', () => setNaming(null))}
+              {button('Cancel', () => {
+                setNaming(null);
+                setTemplate(null);
+              })}
             </View>
           </View>
         );
@@ -2054,6 +2286,8 @@ export function Reader(): React.JSX.Element {
             {item('Copy', () => copy(false))}
             {item('Paste', pasteFromMenu)}
             {item('Delete', deleteFromMenu)}
+            {item('Link…', startLink)}
+            {item('Remove link', removeLink)}
             {item('Hide keyboard', done)}
           </>
         );
@@ -2391,6 +2625,7 @@ const styles = StyleSheet.create({
   panelHead: {flexDirection: 'row', alignItems: 'center', paddingVertical: 8, borderBottomWidth: 1, borderColor: '#000'},
   panelTitle: {flex: 1, color: '#000', fontSize: 18, fontWeight: '700'},
   panelNote: {color: '#333', fontSize: 15, marginTop: 16},
+  presetName: {paddingHorizontal: 12, paddingTop: 8, gap: 10},
   caretHint: {flex: 1, color: '#000', fontSize: 15},
   caret: {position: 'absolute', width: 3, backgroundColor: '#000'},
   statusText: {flex: 1, color: '#000', fontSize: 15},

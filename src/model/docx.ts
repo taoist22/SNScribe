@@ -89,6 +89,12 @@ export type DocxDocument = {
   /** Page size and margins (twips) of the last section. */
   page?: PageSetup;
   /**
+   * The default header and footer of the last section, as DOCX can edit them. `other`: it
+   * also has a logo or table, which stays; text and alignment are then of its page-number line.
+   */
+  header?: {text: string; pageNumber: boolean; align: 'left' | 'center' | 'right' | 'justify'; other?: boolean};
+  footer?: {text: string; pageNumber: boolean; align: 'left' | 'center' | 'right' | 'justify'; other?: boolean};
+  /**
    * Set for a document made with New: edits are applied to `source` (a pristine blank in
    * private storage) and saved over `saveTo` (the new file), instead of an "-edited" copy.
    */

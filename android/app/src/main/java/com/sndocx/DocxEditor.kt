@@ -98,6 +98,19 @@ object DocxEditor {
 
         /** The document's default font and size (half-points): what text without its own takes. */
         data class Defaults(val font: String?, val size: Int?) : Op()
+
+        /**
+         * The document's header or footer ([kind] "header" / "footer") on every page: one
+         * paragraph aligned [align], holding [text] and, when [pageNumber], Word's PAGE field
+         * after it. Empty text and no page number leaves it blank. Applies to every section.
+         */
+        data class HeaderFooter(val kind: String, val text: String, val pageNumber: Boolean, val align: String) : Op()
+
+        /** Makes characters [start, end) of one paragraph a hyperlink to [url]. */
+        data class Link(val para: Int, val start: Int, val end: Int, val url: String) : Op()
+
+        /** Removes hyperlinks that overlap characters [start, end) (their text stays). */
+        data class Unlink(val para: Int, val start: Int, val end: Int) : Op()
     }
 
     data class Saved(val dest: File, val changedParts: List<String>, val notes: List<String>)
@@ -136,55 +149,114 @@ object DocxEditor {
      * written to [dest], so [dest] never holds an unverified file. Throws with the reason
      * when anything fails; [dest] is then untouched.
      */
+    /**
+     * The package being edited: parts parsed on first use, parts changed in place, parts
+     * added (each registered in [Content_Types].xml and, when it belongs to the document,
+     * in document.xml.rels). Untouched parts are copied byte for byte.
+     */
+    class Pkg(private val zip: ZipFile?) {
+        private val parsed = HashMap<String, Document>()
+        val dirty = LinkedHashSet<String>()
+        val added = LinkedHashMap<String, Document>()
+
+        fun part(name: String): Document? =
+            added[name] ?: parsed[name] ?: zip?.getEntry(name)?.let { DocxReader.parse(DocxReader.readEntry(zip, it)) }?.also { parsed[name] = it }
+
+        fun exists(name: String) = added.containsKey(name) || zip?.getEntry(name) != null
+
+        /** Marks an existing part changed (it will be re-serialized). */
+        fun touch(name: String) {
+            if (name !in added) dirty.add(name)
+        }
+
+        /** Replaces an existing part's content wholesale. */
+        fun replace(name: String, doc: Document) {
+            if (name in added) added[name] = doc else parsed[name] = doc
+            touch(name)
+        }
+
+        /** A free part name like word/header3.xml. */
+        fun freeName(stem: String, ext: String = "xml"): String {
+            var n = 1
+            while (exists("$stem$n.$ext")) n++
+            return "$stem$n.$ext"
+        }
+
+        /**
+         * Adds a part, registers its content type, and relates it from the document
+         * ([relType] null = not related). Returns the relationship id.
+         */
+        fun add(name: String, doc: Document, contentType: String, relType: String?): String? {
+            added[name] = doc
+            val types = part(CONTENT_TYPES) ?: error("no $CONTENT_TYPES")
+            addOverride(types, "/$name", contentType)
+            touch(CONTENT_TYPES)
+            return relType?.let { relate(it, name.removePrefix("word/"), external = false) }
+        }
+
+        /** A new relationship from the document; returns its id. */
+        fun relate(type: String, target: String, external: Boolean): String {
+            val rels = part(DocxReader.DOCUMENT_RELS) ?: error("no ${DocxReader.DOCUMENT_RELS}")
+            touch(DocxReader.DOCUMENT_RELS)
+            return addRelationship(rels, type, target, external)
+        }
+
+        /** The target (as a part name) of the document relationship [id]. */
+        fun target(id: String): String? {
+            val rels = part(DocxReader.DOCUMENT_RELS) ?: return null
+            var n = rels.documentElement.firstChild
+            while (n != null) {
+                if (n is Element && n.getAttribute("Id") == id) {
+                    val t = n.getAttribute("Target")
+                    return if (t.startsWith("/")) t.removePrefix("/") else "word/" + t.removePrefix("./")
+                }
+                n = n.nextSibling
+            }
+            return null
+        }
+    }
+
     fun save(src: File, ops: List<Op>, dest: File, workDir: File, expected: List<String> = emptyList()): Saved {
         require(src.length() <= DocxReader.MAX_DOCX_BYTES) { "too large: ${src.length()} bytes" }
         val notes = ArrayList<String>()
         val changed = ArrayList<String>()
-        val added = LinkedHashMap<String, ByteArray>()
+        var addedNames: Set<String> = emptySet()
         workDir.mkdirs()
         val temp = File(workDir, "saving-${System.nanoTime()}.docx")
         try {
             ZipFile(src).use { zip ->
-                fun part(name: String) = zip.getEntry(name)?.let { DocxReader.parse(DocxReader.readEntry(zip, it)) }
-                val document = part(DOCUMENT_PART) ?: error("no $DOCUMENT_PART")
-                val styles = part(STYLES_PART)
-                val rels = part(DocxReader.DOCUMENT_RELS)
-                val numberingPath = DocxReader.numberingPart(rels)
-                val numbering = part(numberingPath)
+                val pkg = Pkg(zip)
+                val document = pkg.part(DOCUMENT_PART) ?: error("no $DOCUMENT_PART")
+                val styles = pkg.part(STYLES_PART)
+                val numberingPath = DocxReader.numberingPart(pkg.part(DocxReader.DOCUMENT_RELS))
+                val numbering = pkg.part(numberingPath)
                 val lists = Lists(numbering)
-                val stylesChanged = apply(document, styles, ops, notes, lists)
-
-                val replaced = LinkedHashMap<String, ByteArray>()
-                if (ops.isNotEmpty()) replaced[DOCUMENT_PART] = serialize(document)
-                if (stylesChanged && styles != null) replaced[STYLES_PART] = serialize(styles)
+                val stylesChanged = apply(document, styles, ops, notes, lists, pkg)
+                if (ops.isNotEmpty()) pkg.touch(DOCUMENT_PART)
+                if (stylesChanged && styles != null) pkg.touch(STYLES_PART)
                 if (lists.changed) {
-                    val bytes = serialize(lists.doc)
                     if (numbering != null) {
-                        replaced[numberingPath] = bytes
+                        pkg.touch(numberingPath)
                     } else {
                         // A document with no lists yet: add the part and register it.
-                        check(zip.getEntry(numberingPath) == null) { "unreadable $numberingPath" }
-                        added[numberingPath] = bytes
-                        val relsDoc = rels ?: error("no ${DocxReader.DOCUMENT_RELS}")
-                        addRelationship(relsDoc, DocxReader.REL_NUMBERING, numberingPath.removePrefix("word/"))
-                        replaced[DocxReader.DOCUMENT_RELS] = serialize(relsDoc)
-                        val types = part(CONTENT_TYPES) ?: error("no $CONTENT_TYPES")
-                        addOverride(types, "/$numberingPath", NUMBERING_TYPE)
-                        replaced[CONTENT_TYPES] = serialize(types)
+                        check(!pkg.exists(numberingPath)) { "unreadable $numberingPath" }
+                        pkg.add(numberingPath, lists.doc, NUMBERING_TYPE, DocxReader.REL_NUMBERING)
                     }
                 }
 
                 ZipOutputStream(FileOutputStream(temp)).use { out ->
                     for (entry in zip.entries()) {
                         DocxReader.checkEntryName(entry.name)
-                        putEntry(out, entry, replaced[entry.name] ?: DocxReader.readEntry(zip, entry))
+                        val bytes = if (entry.name in pkg.dirty) serialize(pkg.part(entry.name)!!) else DocxReader.readEntry(zip, entry)
+                        putEntry(out, entry, bytes)
                     }
-                    for ((name, bytes) in added) putEntry(out, ZipEntry(name).apply { method = ZipEntry.DEFLATED }, bytes)
+                    for ((name, doc) in pkg.added) putEntry(out, ZipEntry(name).apply { method = ZipEntry.DEFLATED }, serialize(doc))
                 }
-                changed.addAll(replaced.keys)
-                changed.addAll(added.keys)
+                changed.addAll(pkg.dirty)
+                changed.addAll(pkg.added.keys)
+                addedNames = pkg.added.keys.toSet()
             }
-            verify(src, temp, changed, ops, expected, added.keys)
+            verify(src, temp, changed, ops, expected, addedNames)
             copy(temp, dest)
             return Saved(dest, changed, notes)
         } finally {
@@ -232,7 +304,14 @@ object DocxEditor {
     // ---------------------------------------------------------------- apply
 
     /** Applies [ops] to the DOM. Returns whether styles.xml was changed (a style was added). */
-    fun apply(document: Document, styles: Document?, ops: List<Op>, notes: MutableList<String>, lists: Lists = Lists(null)): Boolean {
+    fun apply(
+        document: Document,
+        styles: Document?,
+        ops: List<Op>,
+        notes: MutableList<String>,
+        lists: Lists = Lists(null),
+        pkg: Pkg = Pkg(null),
+    ): Boolean {
         var paragraphs = bodyParagraphs(document)
         val styleIds = StyleIds(styles)
         var stylesTouched = false
@@ -249,6 +328,10 @@ object DocxEditor {
                 }
                 continue
             }
+            if (op is Op.HeaderFooter) {
+                headerFooter(document, pkg, op, notes)
+                continue
+            }
             val index = when (op) {
                 is Op.Format -> op.para
                 is Op.Style -> op.para
@@ -258,7 +341,9 @@ object DocxEditor {
                 is Op.ListItem -> op.para
                 is Op.RunStyle -> op.para
                 is Op.ParaProps -> op.para
-                is Op.PageSetup, is Op.Defaults -> error("unreachable")
+                is Op.Link -> op.para
+                is Op.Unlink -> op.para
+                is Op.PageSetup, is Op.Defaults, is Op.HeaderFooter -> error("unreachable")
             }
             val p = checkNotNull(paragraphs.getOrNull(index)) { "no paragraph $index for $op" }
             when (op) {
@@ -270,7 +355,9 @@ object DocxEditor {
                 is Op.ListItem -> setListItem(document, p, op, lists, styleIds, notes)
                 is Op.RunStyle -> runStyle(document, p, op, notes)
                 is Op.ParaProps -> paraProps(document, p, op, notes)
-                is Op.PageSetup, is Op.Defaults -> {}
+                is Op.Link -> link(document, p, op, pkg, styleIds, notes)
+                is Op.Unlink -> unlink(p, op, notes)
+                is Op.PageSetup, is Op.Defaults, is Op.HeaderFooter -> {}
             }
             // Splits and joins renumber the paragraphs after them.
             if (op is Op.Split || op is Op.Join) paragraphs = bodyParagraphs(document)
@@ -616,7 +703,7 @@ object DocxEditor {
         }
     }
 
-    private fun addRelationship(rels: Document, type: String, target: String) {
+    private fun addRelationship(rels: Document, type: String, target: String, external: Boolean = false): String {
         val root = rels.documentElement
         val ids = HashSet<String>()
         var n = root.firstChild
@@ -630,7 +717,9 @@ object DocxEditor {
         r.setAttribute("Id", "rId$i")
         r.setAttribute("Type", type)
         r.setAttribute("Target", target)
+        if (external) r.setAttribute("TargetMode", "External")
         root.appendChild(r)
+        return "rId$i"
     }
 
     private fun addOverride(types: Document, partName: String, contentType: String) {
@@ -702,6 +791,177 @@ object DocxEditor {
             }
             offset += len
         }
+    }
+
+    private const val R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    private const val REL_HEADER = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/header"
+    private const val REL_FOOTER = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer"
+    private const val REL_HYPERLINK = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
+    private const val HEADER_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"
+    private const val FOOTER_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"
+
+    /**
+     * Writes the default header or footer. Every default header part the sections use is
+     * rewritten (sections without their own inherit the one before, as in Word); a document
+     * with none gets a new part on its first section, which the rest inherit. A part holding
+     * more than text (a logo, a table) keeps all of it: only its page-number line changes
+     * (DocxReader.editableLine), or one is added at the bottom.
+     */
+    private fun headerFooter(document: Document, pkg: Pkg, op: Op.HeaderFooter, notes: MutableList<String>) {
+        val isHeader = op.kind == "header"
+        val refTag = if (isHeader) "headerReference" else "footerReference"
+        val all = document.getElementsByTagNameNS(W, "sectPr")
+        // A sectPr inside w:sectPrChange is a tracked earlier version: it can't hold references.
+        val sects = (0 until all.length).map { all.item(it) as Element }.filter { (it.parentNode as? Element)?.localName != "sectPrChange" }
+        fun isDefault(e: Element) = e.localName == refTag && e.getAttributeNS(W, "type").let { t -> t.isEmpty() || t == "default" }
+        val parts = sects.flatMap { elementChildren(it).filter(::isDefault) }
+            .map { it.getAttributeNS(R_NS, "id") }.distinct()
+            .mapNotNull { id -> pkg.target(id)?.takeIf { pkg.exists(it) }?.let { id to it } }
+        val rId: String
+        if (parts.isEmpty()) {
+            val name = pkg.freeName(if (isHeader) "word/header" else "word/footer")
+            rId = pkg.add(name, fill(isHeader, op), if (isHeader) HEADER_TYPE else FOOTER_TYPE, if (isHeader) REL_HEADER else REL_FOOTER)!!
+            notes.add("${op.kind}: added $name")
+        } else {
+            for ((_, name) in parts) {
+                val old = pkg.part(name)!!
+                if (!DocxReader.hasOtherContent(old)) {
+                    pkg.replace(name, fill(isHeader, op))
+                    continue
+                }
+                val line = old.importNode(fill(isHeader, op).documentElement.firstChild, true)
+                val at = DocxReader.editableLine(old)
+                if (at != null) old.documentElement.replaceChild(line, at) else old.documentElement.appendChild(line)
+                pkg.touch(name)
+            }
+            rId = parts.first().first
+            notes.add("${op.kind}: rewrote ${parts.joinToString { it.second }}")
+        }
+        // The first section has nothing to inherit from: it needs its own reference.
+        sects.firstOrNull()?.takeIf { s -> elementChildren(s).none(::isDefault) }?.let { sect ->
+            val ref = document.createElementNS(W, "w:$refTag")
+            ref.setAttributeNS(W, "w:type", "default")
+            ref.setAttributeNS(R_NS, "r:id", rId)
+            // References come first in sectPr: headers, then footers.
+            val before = if (isHeader) sect.firstChild else elementChildren(sect).firstOrNull { it.localName != "headerReference" }
+            sect.insertBefore(ref, before)
+        }
+        if (sects.any { s -> child(s, "titlePg") != null }) notes.add("${op.kind}: the document has a different first page; its first page keeps its own")
+    }
+
+    /** A header or footer part: one paragraph aligned [op.align], the text, and when asked Word's PAGE field. */
+    private fun fill(isHeader: Boolean, op: Op.HeaderFooter): Document {
+        val part = javax.xml.parsers.DocumentBuilderFactory.newInstance().apply { isNamespaceAware = true }.newDocumentBuilder().newDocument()
+        val root = part.createElementNS(W, if (isHeader) "w:hdr" else "w:ftr")
+        root.setAttributeNS("http://www.w3.org/2000/xmlns/", "xmlns:r", R_NS)
+        part.appendChild(root)
+        val p = part.createElementNS(W, "w:p")
+        root.appendChild(p)
+        val pPr = part.createElementNS(W, "w:pPr")
+        val jc = part.createElementNS(W, "w:jc")
+        jc.setAttributeNS(W, "w:val", if (op.align == "justify") "both" else op.align)
+        pPr.appendChild(jc)
+        p.appendChild(pPr)
+        if (op.text.isNotEmpty()) {
+            val r = part.createElementNS(W, "w:r")
+            val t = part.createElementNS(W, "w:t")
+            t.setAttributeNS(XMLConstants.XML_NS_URI, "xml:space", "preserve")
+            t.textContent = if (op.pageNumber) "${op.text.trimEnd()} " else op.text
+            r.appendChild(t)
+            p.appendChild(r)
+        }
+        if (op.pageNumber) {
+            val fld = part.createElementNS(W, "w:fldSimple")
+            fld.setAttributeNS(W, "w:instr", " PAGE ")
+            val r = part.createElementNS(W, "w:r")
+            val t = part.createElementNS(W, "w:t")
+            t.textContent = "1"
+            r.appendChild(t)
+            fld.appendChild(r)
+            p.appendChild(fld)
+        }
+        return part
+    }
+
+    /**
+     * Wraps characters [start, end) in a w:hyperlink to [op.url]. The runs covered must sit
+     * directly in the paragraph (not already in a link, field or control); the text takes
+     * the document's Hyperlink character style, or blue underline when it has none.
+     */
+    private fun link(document: Document, p: Element, op: Op.Link, pkg: Pkg, styleIds: StyleIds, notes: MutableList<String>) {
+        require(op.end > op.start) { "empty link" }
+        splitAt(p, op.start)
+        splitAt(p, op.end)
+        var offset = 0
+        val covered = ArrayList<Element>()
+        for (seg in DocxReader.segments(p)) {
+            val s0 = offset
+            offset += seg.length
+            if (seg.length == 0 || offset <= op.start || s0 >= op.end) continue
+            check(seg.isRun && seg.el.parentNode === p && !seg.locked) { "paragraph ${op.para}: part of that text is already a link, field or control" }
+            covered.add(seg.el)
+        }
+        check(covered.isNotEmpty()) { "nothing to link" }
+        // The covered runs must be adjacent: nothing else between them in the paragraph.
+        var n: org.w3c.dom.Node? = covered.first()
+        for (el in covered.drop(1)) {
+            do n = n?.nextSibling while (n != null && n !is Element)
+            check(n === el) { "paragraph ${op.para}: something sits inside that text; can't link it" }
+        }
+        val rId = pkg.relate(REL_HYPERLINK, op.url, external = true)
+        val h = document.createElementNS(W, "w:hyperlink")
+        h.setAttributeNS(R_NS, "r:id", rId)
+        h.setAttributeNS(W, "w:history", "1")
+        p.insertBefore(h, covered.first())
+        val styleId = styleIds.characterId("hyperlink")
+        for (r in covered) {
+            h.appendChild(r)
+            val rPr = child(r, "rPr") ?: document.createElementNS(W, "w:rPr").also { r.insertBefore(it, r.firstChild) }
+            if (styleId != null) {
+                child(rPr, "rStyle")?.let { rPr.removeChild(it) }
+                val st = document.createElementNS(W, "w:rStyle")
+                st.setAttributeNS(W, "w:val", styleId)
+                insertInOrder(rPr, st, RPR_ORDER)
+            } else {
+                for ((tag, value) in listOf("color" to "0563C1", "u" to "single")) {
+                    child(rPr, tag)?.let { rPr.removeChild(it) }
+                    val e = document.createElementNS(W, "w:$tag")
+                    e.setAttributeNS(W, "w:val", value)
+                    insertInOrder(rPr, e, RPR_ORDER)
+                }
+            }
+        }
+        notes.add("link p${op.para} [${op.start},${op.end}) → ${op.url}")
+    }
+
+    /** Unwraps hyperlinks overlapping [start, end): their runs move back into the paragraph. */
+    private fun unlink(p: Element, op: Op.Unlink, notes: MutableList<String>) {
+        var offset = 0
+        val links = LinkedHashSet<Element>()
+        for (seg in DocxReader.segments(p)) {
+            val s0 = offset
+            offset += seg.length
+            val parent = seg.el.parentNode
+            // A caret (start == end) counts when it touches the link, at either end, as on screen.
+            val touches = if (op.start == op.end) s0 <= op.start && offset >= op.start else s0 < op.end && offset > op.start
+            if (seg.link && parent is Element && parent.localName == "hyperlink" && seg.length > 0 && touches) links.add(parent)
+        }
+        for (h in links) {
+            while (h.firstChild != null) {
+                val c = h.firstChild
+                h.removeChild(c)
+                h.parentNode.insertBefore(c, h)
+                if (c is Element && c.localName == "r") {
+                    child(c, "rPr")?.let { rPr ->
+                        child(rPr, "rStyle")?.takeIf { it.getAttributeNS(W, "val").equals("Hyperlink", ignoreCase = true) }?.let { rPr.removeChild(it) }
+                        child(rPr, "color")?.takeIf { it.getAttributeNS(W, "val").equals("0563C1", ignoreCase = true) }?.let { rPr.removeChild(it) }
+                        child(rPr, "u")?.let { rPr.removeChild(it) }
+                    }
+                }
+            }
+            h.parentNode.removeChild(h)
+        }
+        notes.add("unlink p${op.para}: ${links.size} link(s)")
     }
 
     /** Applies [op] to every w:sectPr (the body's and any section breaks in paragraphs). */
@@ -888,10 +1148,14 @@ object DocxEditor {
         private val ids = HashSet<String>()
         private val next = HashMap<String, String>()
         private val raw = HashMap<String, Element>()
+        private val characterByName = HashMap<String, String>()
         private var defaultId: String? = null
 
         init {
             styles?.documentElement?.let { root ->
+                for (s in elementChildren(root).filter { it.localName == "style" && it.getAttributeNS(W, "type") == "character" }) {
+                    child(s, "name")?.getAttributeNS(W, "val")?.lowercase()?.let { characterByName.putIfAbsent(it, s.getAttributeNS(W, "styleId")) }
+                }
                 for (s in elementChildren(root).filter { it.localName == "style" && it.getAttributeNS(W, "type") == "paragraph" }) {
                     val id = s.getAttributeNS(W, "styleId")
                     ids.add(id)
@@ -902,6 +1166,9 @@ object DocxEditor {
                 }
             }
         }
+
+        /** A character style's id by its built-in name ("hyperlink"), or null. */
+        fun characterId(name: String): String? = characterByName[name]
 
         /** Whether paragraphs in style [id] are numbered by the style itself (w:numPr, through basedOn). */
         fun numbers(id: String): Boolean {

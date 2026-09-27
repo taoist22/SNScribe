@@ -39,6 +39,34 @@ object DocxBlank {
         }
     }
 
+    private const val TEMPLATE_MAIN = "application/vnd.openxmlformats-officedocument.wordprocessingml.template.main+xml"
+    private const val DOCUMENT_MAIN = "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
+
+    /**
+     * Copies [template] (.docx or .dotx) to [dest] as a document: every part byte for byte,
+     * except that a template's main part is declared a document in [Content_Types].xml.
+     * Macro-enabled templates are refused.
+     */
+    fun fromTemplate(template: File, dest: File) {
+        require(template.length() <= DocxReader.MAX_DOCX_BYTES) { "too large: ${template.length()} bytes" }
+        java.util.zip.ZipFile(template).use { zip ->
+            ZipOutputStream(FileOutputStream(dest)).use { out ->
+                for (entry in zip.entries()) {
+                    DocxReader.checkEntryName(entry.name)
+                    var bytes = DocxReader.readEntry(zip, entry)
+                    if (entry.name == "[Content_Types].xml") {
+                        val xml = bytes.toString(Charsets.UTF_8)
+                        require(!xml.contains("macroEnabled", ignoreCase = true)) { "Templates with macros can't be used" }
+                        bytes = xml.replace(TEMPLATE_MAIN, DOCUMENT_MAIN).toByteArray(Charsets.UTF_8)
+                    }
+                    out.putNextEntry(ZipEntry(entry.name))
+                    out.write(bytes)
+                    out.closeEntry()
+                }
+            }
+        }
+    }
+
     /** `<name>.docx`, or `<name> 2.docx` … in [dir], never an existing file. */
     fun freeName(dir: File, name: String): File {
         val stem = name.trim().replace(Regex("[\\\\/:*?\"<>|]"), "-").removeSuffix(".docx").ifEmpty { "Untitled" }

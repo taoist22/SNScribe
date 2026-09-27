@@ -33,7 +33,7 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
 
     companion object {
         /** Bumped with each native change; first log line, to spot stale installs. */
-        const val NATIVE_BUILD = 11
+        const val NATIVE_BUILD = 12
         private val EXPORT_DIR = File("/storage/emulated/0/EXPORT")
         private const val LOG_MAX_BYTES = 2L * 1024 * 1024
         private const val LOG_LINE_MAX = 4000
@@ -125,6 +125,16 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
                             putBoolean("landscape", pg.landscape)
                         })
                     }
+                    for ((key, hf) in listOf("header" to result.header, "footer" to result.footer)) {
+                        hf?.let {
+                            putMap(key, Arguments.createMap().apply {
+                                putString("text", it.text)
+                                putBoolean("pageNumber", it.pageNumber)
+                                putString("align", it.align)
+                                putBoolean("other", it.other)
+                            })
+                        }
+                    }
                     putArray("blocks", Arguments.createArray().apply { result.blocks.forEach { pushMap(block(it)) } })
                     putMap("lists", Arguments.createMap().apply {
                         for ((id, def) in result.lists) putMap(id.toString(), Arguments.createMap().apply {
@@ -203,6 +213,12 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
                             if (m.hasKey("font") && !m.isNull("font")) m.getString("font") else null,
                             if (m.hasKey("size") && !m.isNull("size")) m.getInt("size") else null,
                         )
+                        "headerFooter" -> DocxEditor.Op.HeaderFooter(
+                            m.getString("kind") ?: "header", m.getString("text") ?: "",
+                            m.hasKey("pageNumber") && m.getBoolean("pageNumber"), m.getString("align") ?: "right",
+                        )
+                        "link" -> DocxEditor.Op.Link(m.getInt("para"), m.getInt("start"), m.getInt("end"), m.getString("url") ?: "")
+                        "unlink" -> DocxEditor.Op.Unlink(m.getInt("para"), m.getInt("start"), m.getInt("end"))
                         "list" -> DocxEditor.Op.ListItem(m.getInt("para"), m.getString("kind") ?: "none", m.getString("listId") ?: "")
                         else -> throw IllegalArgumentException("unknown op ${m.getString("op")}")
                     }
@@ -251,6 +267,39 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
                 })
             } catch (t: Throwable) {
                 appendLog("create FAILED: $t")
+                promise.reject("DOCX_CREATE_FAILED", t.message ?: t.toString(), t)
+            }
+        }
+    }
+
+    /**
+     * A new document named [name] in [folder], copied from the template or document at
+     * [templatePath] (.docx or .dotx; a .dotx is turned into a document). Like [create], a
+     * pristine copy stays in private storage as the source saves start from.
+     * Resolves {path, source}.
+     */
+    @ReactMethod
+    fun createFrom(templatePath: String, name: String, folder: String, promise: Promise) {
+        worker.execute {
+            try {
+                val template = File(templatePath)
+                check(template.isFile) { "No such file: ${template.path}" }
+                val ext = template.extension.lowercase()
+                check(ext == "docx" || ext == "dotx") { "Choose a .docx or .dotx file" }
+                val dir = File(folder.ifEmpty { "/storage/emulated/0/Document" }).also { if (!it.isDirectory) it.mkdirs() }
+                check(dir.isDirectory) { "No such folder: ${dir.path}" }
+                val dest = DocxBlank.freeName(dir, name)
+                val source = File(File(reactContext.filesDir, "sn-docx-new").also { it.mkdirs() }, "template-${System.currentTimeMillis()}.docx")
+                DocxBlank.fromTemplate(template, source)
+                DocxReader.read(source) // refuse anything the reader can't open, before it lands in the folder
+                source.inputStream().use { input -> FileOutputStream(dest).use { input.copyTo(it) } }
+                appendLog("created ${dest.path} from ${template.path} (source ${source.name})")
+                promise.resolve(Arguments.createMap().apply {
+                    putString("path", dest.path)
+                    putString("source", source.path)
+                })
+            } catch (t: Throwable) {
+                appendLog("createFrom FAILED: $t")
                 promise.reject("DOCX_CREATE_FAILED", t.message ?: t.toString(), t)
             }
         }

@@ -1,6 +1,6 @@
 // Paper formats: one tap turns a whole document into APA 7, MLA 9 or Chicago (Turabian)
-// form, as ordinary edits (one undo step). Headers — the page number, MLA's name line —
-// come with header editing; these cover what paragraphs, fonts and pages can express.
+// form, as ordinary edits (one undo step): fonts, spacing, margins, headings, reference
+// lists, and the page number top right (after the last name, in MLA).
 
 import type {Op} from './edits';
 import {paragraphText, type Block, type ParagraphBlock} from '../model/docx';
@@ -8,9 +8,9 @@ import {paragraphText, type Block, type ParagraphBlock} from '../model/docx';
 export type PaperFormat = 'apa' | 'mla' | 'chicago';
 
 export const PAPER_FORMATS: Array<{id: PaperFormat; name: string; summary: string}> = [
-  {id: 'apa', name: 'APA 7', summary: 'Times New Roman 12, double spaced, 0.5″ first-line indents, bold headings (level 1 centered), 1″ margins, hanging indents under References.'},
-  {id: 'mla', name: 'MLA 9', summary: 'Times New Roman 12, double spaced, 0.5″ first-line indents, centered title, 1″ margins, hanging indents under Works Cited.'},
-  {id: 'chicago', name: 'Chicago', summary: 'Times New Roman 12, double-spaced text, 0.5″ first-line indents, centered level-1 headings, 1″ margins; Bibliography single spaced with a blank line between entries, hanging.'},
+  {id: 'apa', name: 'APA 7', summary: 'Times New Roman 12, double spaced, 0.5″ first-line indents, bold headings (level 1 centered), 1″ margins, page numbers top right, hanging indents under References.'},
+  {id: 'mla', name: 'MLA 9', summary: 'Times New Roman 12, double spaced, 0.5″ first-line indents, centered title, 1″ margins, last name and page number top right, hanging indents under Works Cited.'},
+  {id: 'chicago', name: 'Chicago', summary: 'Times New Roman 12, double-spaced text, 0.5″ first-line indents, centered level-1 headings, 1″ margins, page numbers top right; Bibliography single spaced with a blank line between entries, hanging.'},
 ];
 
 const FONT = 'Times New Roman';
@@ -25,10 +25,12 @@ const REFERENCES: Record<PaperFormat, RegExp> = {
   chicago: /^(bibliography|references)$/i,
 };
 
-export function presetOps(blocks: Block[], format: PaperFormat): Op[] {
+export function presetOps(blocks: Block[], format: PaperFormat, lastName = ''): Op[] {
   const ops: Op[] = [
     {op: 'page', para: -1, top: INCH, right: INCH, bottom: INCH, left: INCH},
     {op: 'defaults', para: -1, font: FONT, size: SIZE},
+    // Page numbers top right on every page; MLA puts the writer's last name before it.
+    {op: 'headerFooter', para: -1, kind: 'header', text: format === 'mla' ? lastName.trim() : '', pageNumber: true, align: 'right'},
   ];
   let inReferences = false;
   for (const b of blocks) {
