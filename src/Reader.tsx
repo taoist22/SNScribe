@@ -81,6 +81,8 @@ const DOUBLE_TAP_MS = 500;
 type Frame = {x: number; top: number; height: number};
 type Selection = {from: Pos; to: Pos};
 type Typing = {mode: 'insert'; at: Pos} | {mode: 'replace'; range: Range};
+type HfLine = {text: string; align: 'left' | 'center' | 'right'; page: boolean};
+
 type Menu =
   | 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count' | 'page' | 'preset' | 'header' | 'link'
   | 'recent' | 'versions' | 'recover';
@@ -117,7 +119,8 @@ export function Reader(): React.JSX.Element {
   const [template, setTemplate] = useState<string | null>(null);
   /** The writer's last name, for MLA's header (remembered). */
   const [lastName, setLastName] = useState('');
-  const [hfForm, setHfForm] = useState<{text: string; where: 'top' | 'bottom' | 'none'} | null>(null);
+  /** Header & footer form: each line as edited, and as it was when the form opened. */
+  const [hfForm, setHfForm] = useState<{header: HfLine; footer: HfLine; was: {header: HfLine; footer: HfLine}} | null>(null);
   const [linkForm, setLinkForm] = useState<{para: number; start: number; end: number; url: string} | null>(null);
   /** Where New puts the document, and the folder being browsed to choose it. */
   const [newFolder, setNewFolder] = useState(DOCUMENTS);
@@ -902,27 +905,35 @@ export function Reader(): React.JSX.Element {
   const footerNow = () => headerFooterAfter(doc?.footer, 'footer', applied);
 
   const openHeaderForm = () => {
-    const h = headerNow();
-    const f = footerNow();
-    setHfForm({text: h?.text ?? '', where: h?.pageNumber ? 'top' : f?.pageNumber ? 'bottom' : 'none'});
+    const line = (hf: ReturnType<typeof headerNow>, align: HfLine['align']): HfLine =>
+      hf ? {text: hf.text, align: hf.align === 'justify' ? 'left' : hf.align, page: hf.pageNumber} : {text: '', align, page: false};
+    const header = line(headerNow(), 'right');
+    const footer = line(footerNow(), 'center');
+    setHfForm({header, footer, was: {header, footer}});
     setMenu('header');
   };
 
-  /** The header line (text, page number top right) and, when it moves there or leaves, the footer's page number. */
+  /** Writes the header and/or footer — only the ones that were changed in the form. */
   const applyHeader = () => {
     if (!hfForm) {
       return;
     }
-    const f = footerNow();
-    const ops: Op[] = [{op: 'headerFooter', para: -1, kind: 'header', text: hfForm.text.trim(), pageNumber: hfForm.where === 'top', align: 'right'}];
-    if (hfForm.where === 'bottom' || f?.pageNumber) {
-      const align = hfForm.where === 'bottom' ? 'center' : f?.align === 'justify' || !f ? 'left' : f.align;
-      ops.push({op: 'headerFooter', para: -1, kind: 'footer', text: f?.text ?? '', pageNumber: hfForm.where === 'bottom', align});
+    const ops: Op[] = [];
+    for (const kind of ['header', 'footer'] as const) {
+      const now = hfForm[kind];
+      const was = hfForm.was[kind];
+      if (now.text.trim() !== was.text.trim() || now.align !== was.align || now.page !== was.page) {
+        ops.push({op: 'headerFooter', para: -1, kind, text: now.text.trim(), pageNumber: now.page, align: now.align});
+      }
     }
     setMenu(null);
     setHfForm(null);
-    commit(ops, 'header');
-    setStatus('Header set. It shows in Word; the Supernote page does not draw headers.');
+    if (ops.length === 0) {
+      setStatus('Header and footer unchanged.');
+      return;
+    }
+    commit(ops, 'header/footer');
+    setStatus('Saved with the document; Word shows it on every page. (The Supernote page does not draw headers or footers.)');
   };
 
   /** Link…: the selection (within one paragraph) becomes a link; its text is offered as the address. */
@@ -1907,7 +1918,7 @@ export function Reader(): React.JSX.Element {
             {item('Open…', open)}
             {recent.length ? item('Recent…', () => setMenu('recent')) : null}
             {doc && !readOnly ? item('Page setup…', () => setMenu('page')) : null}
-            {doc && !readOnly ? item('Header & page numbers…', openHeaderForm) : null}
+            {doc && !readOnly ? item('Header, footer & page numbers…', openHeaderForm) : null}
             {doc && !readOnly ? item('Paper format (APA, MLA, Chicago)…', () => setMenu('preset')) : null}
             {doc && !readOnly ? item('Save', save) : null}
             {doc && !readOnly ? item('Save a copy', saveCopy) : null}
@@ -2113,7 +2124,6 @@ export function Reader(): React.JSX.Element {
         if (!hfForm) {
           return null;
         }
-        const h = headerNow();
         const chip = (label: string, on: boolean, action: () => void) => (
           <Pressable key={label} onPress={once(`chip:${label}`, action)} style={[styles.chip, on ? styles.chipOn : null]}>
             <Text allowFontScaling={false} style={[styles.chipText, on ? styles.chipTextOn : null]}>
@@ -2121,34 +2131,40 @@ export function Reader(): React.JSX.Element {
             </Text>
           </Pressable>
         );
-        return (
-          <View style={styles.paraMenu}>
+        const set = (kind: 'header' | 'footer', change: Partial<HfLine>) =>
+          setHfForm(f => (f ? {...f, [kind]: {...f[kind], ...change}} : f));
+        const section = (kind: 'header' | 'footer', title: string, other?: boolean) => (
+          <View key={kind}>
             <Text allowFontScaling={false} style={styles.paraLabel}>
-              {'Header text (top right; optional)'}
+              {title}
             </Text>
             <TextInput
               style={styles.nameInput}
-              value={hfForm.text}
-              onChangeText={text => setHfForm(f => (f ? {...f, text} : f))}
+              value={hfForm[kind].text}
+              onChangeText={text => set(kind, {text})}
               allowFontScaling={false}
-              placeholder="e.g. your last name"
+              placeholder={kind === 'header' ? 'e.g. your last name (optional)' : 'optional'}
               returnKeyType="done"
             />
-            <Text allowFontScaling={false} style={styles.paraLabel}>
-              {'Page numbers'}
-            </Text>
-            <View style={styles.chips}>
-              {chip('Top right', hfForm.where === 'top', () => setHfForm(f => (f ? {...f, where: 'top'} : f)))}
-              {chip('Bottom center', hfForm.where === 'bottom', () => setHfForm(f => (f ? {...f, where: 'bottom'} : f)))}
-              {chip('None', hfForm.where === 'none', () => setHfForm(f => (f ? {...f, where: 'none'} : f)))}
+            <View style={[styles.chips, styles.hfChips]}>
+              {(['left', 'center', 'right'] as const).map(a =>
+                chip(a[0].toUpperCase() + a.slice(1), hfForm[kind].align === a, () => set(kind, {align: a})),
+              )}
+              {chip(hfForm[kind].page ? '✓ Page number' : 'Page number', hfForm[kind].page, () => set(kind, {page: !hfForm[kind].page}))}
             </View>
-            {h?.other ? (
+            {other ? (
               <Text allowFontScaling={false} style={styles.panelNote}>
-                {'This header has a logo or table. It stays; only the line with the text and page number changes.'}
+                {`This ${kind} has a logo or table. It stays; only the text and page number line changes.`}
               </Text>
             ) : null}
+          </View>
+        );
+        return (
+          <View style={styles.paraMenu}>
+            {section('header', 'Header (top of every page)', headerNow()?.other)}
+            {section('footer', 'Footer (bottom of every page)', footerNow()?.other)}
             <Text allowFontScaling={false} style={styles.panelNote}>
-              {'Every page gets it (a different first page keeps its own). The Supernote page doesn\'t draw headers; Word does.'}
+              {'Only what you change is written. A different first page keeps its own. Word shows these; the Supernote page does not.'}
             </Text>
             <View style={styles.row}>
               {button('Apply', applyHeader)}
@@ -2625,6 +2641,7 @@ const styles = StyleSheet.create({
   panelHead: {flexDirection: 'row', alignItems: 'center', paddingVertical: 8, borderBottomWidth: 1, borderColor: '#000'},
   panelTitle: {flex: 1, color: '#000', fontSize: 18, fontWeight: '700'},
   panelNote: {color: '#333', fontSize: 15, marginTop: 16},
+  hfChips: {marginTop: 8},
   presetName: {paddingHorizontal: 12, paddingTop: 8, gap: 10},
   caretHint: {flex: 1, color: '#000', fontSize: 15},
   caret: {position: 'absolute', width: 3, backgroundColor: '#000'},
