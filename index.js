@@ -19,7 +19,7 @@ installPluginRouter();
 PluginManager.registerButton(BUTTON_TYPE_TOOLBAR, ['NOTE', 'DOC'], {
   id: TOOLBAR_BUTTON_ID,
   name: 'DOCX',
-  icon: Image.resolveAssetSource(require('./assets/docx.png')).uri,
+  icon: Image.resolveAssetSource(require('./assets/academic-research.png')).uri,
   showType: SHOW_TYPE_WITH_UI,
 });
 
@@ -28,6 +28,6 @@ PluginManager.registerButton(BUTTON_TYPE_TOOLBAR, ['NOTE', 'DOC'], {
 PluginManager.registerButton(BUTTON_TYPE_TEXT_SELECTION, ['DOC'], {
   id: QUOTE_BUTTON_ID,
   name: 'Quote → DOCX',
-  icon: Image.resolveAssetSource(require('./assets/docx.png')).uri,
+  icon: Image.resolveAssetSource(require('./assets/academic-research.png')).uri,
   showType: SHOW_TYPE_WITH_UI,
 });

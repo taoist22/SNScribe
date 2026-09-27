@@ -1,7 +1,7 @@
 {
   "name": "DOCX",
   "desc": "Read and edit Word documents (.docx) on Supernote.",
-  "iconPath": "assets/docx.png",
+  "iconPath": "assets/academic-research.png",
   "versionName": "0.1.0",
   "versionCode": "1",
   "pluginID": "r7gdcjlpcbaedsws",
