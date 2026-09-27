@@ -1444,7 +1444,11 @@ export function Reader(): React.JSX.Element {
       return;
     }
     const now = typingScript();
+    // Keep typing where it left off: saving what was typed must leave the caret after it
+    // (it stayed where typing began, so the next character went there instead).
+    const at = caretAt;
     flushTyping();
+    setCaret(at);
     const next = now === prop ? 'none' : prop;
     setScript(next);
     setStatus(next === 'none' ? 'Back to normal text for what you type next.' : `${prop === 'sup' ? 'Superscript' : 'Subscript'} on for what you type next — choose it again to turn it off.`);
@@ -3133,6 +3137,7 @@ export function Reader(): React.JSX.Element {
             })}
             {item(`${(selection && !typing ? now.sup : typingScript() === 'sup') ? '✓ ' : ''}Superscript  x²`, () => scriptTool('sup'))}
             {item(`${(selection && !typing ? now.sub : typingScript() === 'sub') ? '✓ ' : ''}Subscript  x₂`, () => scriptTool('sub'))}
+            <View style={styles.menuDivider} />
             {fontChoices.map(f =>
               item(
                 `${f === cur ? '✓ ' : ''}${f}${fonts.has(f) ? '' : shownFont(f, fonts) ? ` (shown as ${shownFont(f, fonts)})` : ' (not on this Supernote)'}`,
@@ -3476,6 +3481,7 @@ const styles = StyleSheet.create({
   menuH2: {fontSize: 21, fontWeight: '700'},
   menuH3: {fontSize: 19, fontWeight: '700'},
   menuQuote: {fontStyle: 'italic', paddingLeft: 32},
+  menuDivider: {height: 3, backgroundColor: '#000', marginVertical: 4},
   findLabel: {marginTop: 10},
   findCase: {alignSelf: 'flex-start', marginTop: 10},
   menuTitle: {fontSize: 26},
