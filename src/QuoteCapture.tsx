@@ -6,7 +6,7 @@ import {cleanQuote, findDoi} from './domain/reference';
 import {Docx} from './services/native';
 
 /**
- * "Quote → DOCX": opened from the text-selection toolbar of a PDF or EPUB. Shows the
+ * "Quote → SNScribe": opened from the text-selection toolbar of a PDF or EPUB. Shows the
  * selected text (line-break hyphens joined, editable), its file and page, and a DOI found on
  * the first page; Keep adds it to the quote list DOCX's Edit ▸ Insert quote… offers.
  * (The selection toolbar keeps the selection alive, so getLastSelectedText works — as proven
@@ -23,7 +23,7 @@ async function capture(): Promise<Captured | string> {
   const textRes = (await PluginDocAPI.getLastSelectedText()) as Res<string>;
   const text = textRes?.success && textRes.result ? cleanQuote(textRes.result) : '';
   if (!text) {
-    return 'No text is selected. Select a passage, then tap Quote → DOCX.';
+    return 'No text is selected. Select a passage, then tap Quote → SNScribe.';
   }
   const pageRes = (await PluginCommAPI.getCurrentPageNum()) as Res<number>;
   const page = pageRes?.success && typeof pageRes.result === 'number' ? pageRes.result + 1 : 1;
@@ -95,7 +95,7 @@ export function QuoteCapture({onDone}: {onDone: () => void}): React.JSX.Element 
       };
       await Docx?.store(QUOTES_KEY, JSON.stringify([q, ...list]));
       setKept(true);
-      setMessage(`Kept (${list.length + 1} waiting). In DOCX: Edit → Insert quote…`);
+      setMessage(`Kept (${list.length + 1} waiting). In SNScribe: Edit → Insert quote…`);
       setTimeout(close, 1500);
     } catch (e) {
       setMessage(`Not kept: ${e instanceof Error ? e.message : String(e)}`);
@@ -106,7 +106,7 @@ export function QuoteCapture({onDone}: {onDone: () => void}): React.JSX.Element 
     <View style={styles.screen}>
       <ScrollView contentContainerStyle={styles.panel} keyboardShouldPersistTaps="always">
         <Text allowFontScaling={false} style={styles.title}>
-          {'Quote → DOCX'}
+          {'Quote → SNScribe'}
         </Text>
         {got ? (
           <>

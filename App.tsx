@@ -6,7 +6,7 @@ import {BUTTON_ID_QUOTE, getLastButtonEvent, subscribeToButtonEvents} from './sr
 
 /**
  * The editor always stays mounted (an open document and its unsaved edits survive); the
- * "Quote → DOCX" selection-toolbar button shows the capture screen over it.
+ * "Quote → SNScribe" selection-toolbar button shows the capture screen over it.
  */
 export default function App(): React.JSX.Element {
   const [capture, setCapture] = useState(getLastButtonEvent()?.id === BUTTON_ID_QUOTE ? 1 : 0);

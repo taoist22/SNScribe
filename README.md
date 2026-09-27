@@ -1,6 +1,6 @@
-# DOCX (sn-docx)
+# SNScribe (sn-docx)
 
-A Word (.docx) document editor for Supernote: reading, editing, formatting, paper formats
+SNScribe is a Word (.docx) document editor for Supernote: reading, editing, formatting, paper formats
 (APA, MLA, Chicago), comments and tracked changes, handwritten margin notes, citations from
 Zotero and quotes from PDFs/EPUBs, and spell checking. Plan: `../sn-docx-editor-PLAN.md`;
 the feasibility evidence is in `../sn-docx-probe`.

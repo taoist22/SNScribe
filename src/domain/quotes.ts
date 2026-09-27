@@ -1,4 +1,4 @@
-// Quotes kept from PDFs and EPUBs (the "Quote → DOCX" button on their selection toolbar), and
+// Quotes kept from PDFs and EPUBs (the "Quote → SNScribe" button on their selection toolbar), and
 // where each source file's citation details come from (chosen once per file, remembered).
 
 import {paragraphText, type Block} from '../model/docx';

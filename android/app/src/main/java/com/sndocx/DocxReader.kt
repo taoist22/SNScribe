@@ -191,6 +191,7 @@ object DocxReader {
     const val WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
     const val A = "http://schemas.openxmlformats.org/drawingml/2006/main"
     /** docPr name of a handwritten note DOCX puts in the margin; the note id follows. */
+    // Stays "DOCX ink note" after the rename to SNScribe: it marks notes already in documents.
     const val INK_NAME = "DOCX ink note "
 
     /** The note id of a w:drawing that is one of DOCX's handwritten margin notes, else null. */

@@ -14,7 +14,7 @@
 import {PluginManager} from 'sn-plugin-lib';
 
 export const BUTTON_ID_TOOLBAR = 100;
-/** "Quote → DOCX" on the PDF/EPUB text-selection toolbar. */
+/** "Quote → SNScribe" on the PDF/EPUB text-selection toolbar. */
 export const BUTTON_ID_QUOTE = 101;
 
 export type ButtonEvent = {

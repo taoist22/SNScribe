@@ -1,6 +1,6 @@
 {
-  "name": "DOCX",
-  "desc": "Read and edit Word documents (.docx) on Supernote.",
+  "name": "SNScribe",
+  "desc": "Write, format and cite in Word (.docx) documents on Supernote.",
   "iconPath": "assets/academic-research.png",
   "versionName": "0.1.0",
   "versionCode": "1",

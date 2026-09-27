@@ -1184,7 +1184,7 @@ export function Reader(): React.JSX.Element {
     }
     // Without it the Supernote blocks the request before it leaves (CT: "Could not reach Zotero").
     if (!(await ensureInternetPermission())) {
-      setCite(c => ({...c, message: 'DOCX needs permission to use the internet to reach Zotero. Allow it when asked.'}));
+      setCite(c => ({...c, message: 'SNScribe needs permission to use the internet to reach Zotero. Allow it when asked.'}));
       return;
     }
     setCite(c => ({...c, busy: true, message: 'Checking with Zotero…'}));
@@ -1244,7 +1244,7 @@ export function Reader(): React.JSX.Element {
       return;
     }
     if (!(await ensureInternetPermission())) {
-      setCite(c => ({...c, message: 'DOCX needs permission to use the internet to reach Zotero. Allow it when asked.'}));
+      setCite(c => ({...c, message: 'SNScribe needs permission to use the internet to reach Zotero. Allow it when asked.'}));
       return;
     }
     setCite(c => ({...c, busy: true, chosen: null, message: 'Searching…'}));
@@ -1444,7 +1444,7 @@ export function Reader(): React.JSX.Element {
     setCaret(at);
     const quotes = parseList<SavedQuote>(await Docx?.load(QUOTES_KEY));
     const sources = parseMap<SourceRef>(await Docx?.load(SOURCES_KEY));
-    setQp(q => ({...q, mode: 'list', quotes, sources, chosen: null, source: null, results: [], message: quotes.length ? '' : 'No quotes yet. In a PDF or EPUB, select text and tap Quote → DOCX.'}));
+    setQp(q => ({...q, mode: 'list', quotes, sources, chosen: null, source: null, results: [], message: quotes.length ? '' : 'No quotes yet. In a PDF or EPUB, select text and tap Quote → SNScribe.'}));
     setMenu('quotes');
   };
 
@@ -1462,7 +1462,7 @@ export function Reader(): React.JSX.Element {
       throw new Error('Connect Zotero first (Edit → Cite from Zotero…).');
     }
     if (!(await ensureInternetPermission())) {
-      throw new Error('DOCX needs permission to use the internet to reach Zotero.');
+      throw new Error('SNScribe needs permission to use the internet to reach Zotero.');
     }
     return zoteroItem(zotero, ref.key, CITE_STYLES.find(x => x.id === citeStyle)!.csl);
   };
@@ -1506,7 +1506,7 @@ export function Reader(): React.JSX.Element {
       return;
     }
     if (!(await ensureInternetPermission())) {
-      setQp(q => ({...q, message: 'DOCX needs permission to use the internet to look up the DOI.'}));
+      setQp(q => ({...q, message: 'SNScribe needs permission to use the internet to look up the DOI.'}));
       return;
     }
     setQp(q => ({...q, busy: true, message: `Looking up ${doi}…`}));
@@ -1554,7 +1554,7 @@ export function Reader(): React.JSX.Element {
       return;
     }
     if (!(await ensureInternetPermission())) {
-      setQp(q => ({...q, message: 'DOCX needs permission to use the internet to reach Zotero.'}));
+      setQp(q => ({...q, message: 'SNScribe needs permission to use the internet to reach Zotero.'}));
       return;
     }
     setQp(q => ({...q, busy: true, message: 'Searching…'}));
@@ -2606,7 +2606,7 @@ export function Reader(): React.JSX.Element {
       if (onDisk !== diskStamp) {
         const copy = await Docx.copyName(doc.saveTo);
         const res = await Docx.save(doc.source, ops, copy, expectedTexts(doc.blocks, ops));
-        setStatus(`The document changed outside DOCX since it was opened, so it was not overwritten. Your version was saved as ${res.name}.`);
+        setStatus(`The document changed outside SNScribe since it was opened, so it was not overwritten. Your version was saved as ${res.name}.`);
         log(`save conflict: ${doc.saveTo} was ${diskStamp}, now ${onDisk}; saved ${res.dest}`);
         return;
       }
@@ -4125,7 +4125,7 @@ export function Reader(): React.JSX.Element {
       <View style={styles.header}>
         {menuButton('File', 'file')}
         <Text allowFontScaling={false} style={styles.title} numberOfLines={1}>
-          {doc ? `${dirty || pending.length > 0 ? '• ' : ''}${doc.name.replace(/\.docx$/i, '')}` : 'DOCX'}
+          {doc ? `${dirty || pending.length > 0 ? '• ' : ''}${doc.name.replace(/\.docx$/i, '')}` : 'SNScribe'}
         </Text>
         {doc ? button(contents ? 'Back to page' : 'Contents', () => setContents(c => !c), headings.length === 0) : null}
         {doc ? menuButton('View', 'view') : null}

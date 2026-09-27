@@ -26,20 +26,20 @@ async function ensurePermission(permission: string, description: string): Promis
 export function ensureFileReadPermission(): Promise<boolean> {
   return ensurePermission(
     'plugin.permission.FILE:READ',
-    'Allow DOCX to open the Word documents you pick.',
+    'Allow SNScribe to open the Word documents you pick.',
   );
 }
 
 export function ensureInternetPermission(): Promise<boolean> {
   return ensurePermission(
     'plugin.permission.INTERNET',
-    'Allow DOCX to search your Zotero library for citations (api.zotero.org).',
+    'Allow SNScribe to search your Zotero library for citations (api.zotero.org).',
   );
 }
 
 export function ensureFileWritePermission(): Promise<boolean> {
   return ensurePermission(
     'plugin.permission.FILE:WRITE',
-    'Allow DOCX to keep its log in EXPORT and, later, to save your edited copies.',
+    'Allow SNScribe to keep its log in EXPORT and, later, to save your edited copies.',
   );
 }

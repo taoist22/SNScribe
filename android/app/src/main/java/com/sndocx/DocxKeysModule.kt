@@ -95,7 +95,7 @@ class DocxKeysModule(private val reactContext: ReactApplicationContext) : ReactC
     fun copy(text: String, promise: Promise) {
         UiThreadUtil.runOnUiThread {
             val ok = runCatching {
-                clipboard()?.setPrimaryClip(ClipData.newPlainText("DOCX", text)) != null
+                clipboard()?.setPrimaryClip(ClipData.newPlainText("SNScribe", text)) != null
             }.getOrDefault(false)
             promise.resolve(ok)
         }

@@ -18,7 +18,7 @@ installPluginRouter();
 // NOTE and DOC: a plugin can only be launched from a note or a PDF/EPUB toolbar.
 PluginManager.registerButton(BUTTON_TYPE_TOOLBAR, ['NOTE', 'DOC'], {
   id: TOOLBAR_BUTTON_ID,
-  name: 'DOCX',
+  name: 'SNScribe',
   icon: Image.resolveAssetSource(require('./assets/academic-research.png')).uri,
   showType: SHOW_TYPE_WITH_UI,
 });
@@ -27,7 +27,7 @@ PluginManager.registerButton(BUTTON_TYPE_TOOLBAR, ['NOTE', 'DOC'], {
 // when the capture screen opens, so getLastSelectedText returns it (proven in sn-commonplacer).
 PluginManager.registerButton(BUTTON_TYPE_TEXT_SELECTION, ['DOC'], {
   id: QUOTE_BUTTON_ID,
-  name: 'Quote → DOCX',
+  name: 'Quote → SNScribe',
   icon: Image.resolveAssetSource(require('./assets/academic-research.png')).uri,
   showType: SHOW_TYPE_WITH_UI,
 });

@@ -1166,7 +1166,7 @@ object DocxEditor {
 
         val c = comments.createElementNS(W, "w:comment")
         c.setAttributeNS(W, "w:id", id)
-        c.setAttributeNS(W, "w:author", op.author.ifBlank { "DOCX" })
+        c.setAttributeNS(W, "w:author", op.author.ifBlank { "SNScribe" })
         c.setAttributeNS(W, "w:date", op.date)
         c.setAttributeNS(W, "w:initials", op.initials)
         val lines = op.text.split('\n').ifEmpty { listOf("") }
