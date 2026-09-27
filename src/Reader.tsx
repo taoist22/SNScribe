@@ -35,6 +35,7 @@ import {
   linkSpan,
   linkUrl,
   nextCommentId,
+  penSelection,
   pageAfter,
   replaceAllOps,
   rangesBetween,
@@ -896,17 +897,20 @@ export function Reader(): React.JSX.Element {
         setStatus('');
         return;
       }
-      // Order by the character under each end, then snap both ends to whole words.
+      // Order by the character under each end. A double tap takes the word; a drag takes
+      // whole words, or exact characters when it stays inside one word.
       const [s, e] = comparePos({para: ha.para, offset: ha.char}, {para: hb.para, offset: hb.char}) <= 0 ? [ha, hb] : [hb, ha];
-      const ws = wordAround(textOf(s.para), s.char, 'right');
-      const we = wordAround(textOf(e.para), e.char, 'left');
-      const from = {para: s.para, offset: ws?.start ?? s.offset};
-      const to = {para: e.para, offset: we?.end ?? e.offset};
-      if (comparePos(from, to) >= 0) {
+      const ws = doubleTap ? wordAround(textOf(s.para), s.char, 'right') : null;
+      const picked = doubleTap
+        ? ws
+          ? {from: {para: s.para, offset: ws.start}, to: {para: s.para, offset: ws.end}}
+          : null
+        : penSelection(textOf(s.para), textOf(e.para), s, e);
+      if (!picked) {
         setSelection(null);
         return;
       }
-      setSelection({from, to});
+      setSelection(picked);
       setCaret(null);
       setTyping(null);
       setStatus('');

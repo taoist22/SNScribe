@@ -58,3 +58,19 @@ describe('find & replace', () => {
     expect(paragraphText(out[1])).toBe(`dog${OBJECT}cat`);
   });
 });
+
+import {penSelection} from '../src/domain/edits';
+
+describe('pen selection', () => {
+  const t = 'Water is H2O here.';
+  const at = (char: number) => ({para: 0, char, offset: char});
+
+  it('inside one word: exactly the characters crossed', () => {
+    expect(penSelection(t, t, at(10), at(10))).toEqual({from: {para: 0, offset: 10}, to: {para: 0, offset: 11}}); // "2"
+    expect(penSelection(t, t, at(9), at(10))).toEqual({from: {para: 0, offset: 9}, to: {para: 0, offset: 11}}); // "H2"
+  });
+
+  it('across words: whole words', () => {
+    expect(penSelection(t, t, at(2), at(10))).toEqual({from: {para: 0, offset: 0}, to: {para: 0, offset: 12}}); // "Water is H2O"
+  });
+});

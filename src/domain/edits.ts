@@ -925,6 +925,31 @@ export function styleOps(ranges: Range[], kind: StyleKind): Op[] {
 const isSpace = (ch: string | undefined) => ch === undefined || /\s/.test(ch);
 
 /**
+ * A pen drag's selection, from the characters under its two ends (in order). A drag across
+ * several words snaps to whole words; a drag that stays inside one word selects exactly the
+ * characters it crossed — one digit for a superscript, say (CT: whole-word snapping made a
+ * single character impossible to select).
+ */
+export function penSelection(
+  textStart: string,
+  textEnd: string,
+  start: {para: number; char: number; offset: number},
+  end: {para: number; char: number; offset: number},
+): {from: Pos; to: Pos} | null {
+  const ws = wordAround(textStart, start.char, 'right');
+  const we = wordAround(textEnd, end.char, 'left');
+  const sameWord = start.para === end.para && !!ws && !!we && ws.start === we.start && ws.end === we.end && !isSpace(textStart[start.char]);
+  if (sameWord) {
+    const lo = Math.min(start.char, end.char);
+    const hi = Math.max(start.char, end.char) + 1;
+    return {from: {para: start.para, offset: lo}, to: {para: start.para, offset: Math.min(hi, textStart.length)}};
+  }
+  const from = {para: start.para, offset: ws?.start ?? start.offset};
+  const to = {para: end.para, offset: we?.end ?? end.offset};
+  return comparePos(from, to) < 0 ? {from, to} : null;
+}
+
+/**
  * The word containing character `ch`; on whitespace, the next word in `dir`. A selection's
  * start looks right and its end looks left, so a pen in a gap never grabs the far word.
  */
