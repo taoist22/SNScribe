@@ -36,7 +36,19 @@ type DocxTextModule = {
   offsetAt(tag: number, x: number, y: number): Promise<OffsetResult>;
   /** Where a caret before character `offset` goes: px relative to the Text view. */
   caretRect(tag: number, offset: number): Promise<{x?: number; top?: number; bottom?: number; error?: string}>;
+  /** The offset one line up (dir -1) or down (+1) at the same x, or {outside} past the paragraph. */
+  lineMove(tag: number, offset: number, dir: number): Promise<{offset?: number; outside?: boolean; error?: string}>;
 };
+
+/** A key the native listener caught: DEL_FWD, arrows, HOME/END, or a Ctrl/Cmd letter; `text` for a paste. */
+export type KeyPress = {key: string; shift: boolean; text?: string};
+
+type DocxKeysModule = {
+  attach(tag: number): Promise<string>;
+  copy(text: string): Promise<boolean>;
+};
+
+export const DocxKeys = NativeModules.DocxKeys as DocxKeysModule | undefined;
 
 export const DocxText = NativeModules.DocxText as DocxTextModule | undefined;
 

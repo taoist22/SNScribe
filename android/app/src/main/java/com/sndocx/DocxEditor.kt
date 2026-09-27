@@ -56,12 +56,34 @@ object DocxEditor {
 
         /** Joins paragraph [para] onto the end of [para] - 1 (Backspace at its start). */
         data class Join(val para: Int) : Op()
+
+        /**
+         * Makes a paragraph a list item, or not. [kind] "number" / "bullet" / "none".
+         * [listId]: a number = an existing list of the document (continue it); anything else
+         * names a new list made in this save — every op with the same name joins the same
+         * new list, which starts at 1.
+         */
+        data class ListItem(val para: Int, val kind: String, val listId: String) : Op()
     }
 
     data class Saved(val dest: File, val changedParts: List<String>, val notes: List<String>)
 
     private const val DOCUMENT_PART = "word/document.xml"
     private const val STYLES_PART = "word/styles.xml"
+    private const val CONTENT_TYPES = "[Content_Types].xml"
+    private const val NUMBERING_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"
+    private const val PKG_RELS = "http://schemas.openxmlformats.org/package/2006/relationships"
+    private const val PKG_TYPES = "http://schemas.openxmlformats.org/package/2006/content-types"
+
+    /** Schema order of w:pPr children (CT_PPrBase + rPr, sectPr, pPrChange). */
+    private val PPR_ORDER = listOf(
+        "pStyle", "keepNext", "keepLines", "pageBreakBefore", "framePr", "widowControl", "numPr",
+        "suppressLineNumbers", "pBdr", "shd", "tabs", "suppressAutoHyphens", "kinsoku", "wordWrap",
+        "overflowPunct", "topLinePunct", "autoSpaceDE", "autoSpaceDN", "bidi", "adjustRightInd",
+        "snapToGrid", "spacing", "ind", "contextualSpacing", "mirrorIndents", "suppressOverlap", "jc",
+        "textDirection", "textAlignment", "textboxTightWrap", "outlineLvl", "divId", "cnfStyle", "rPr",
+        "sectPr", "pPrChange",
+    )
 
     /** Schema order of w:rPr children (CT_RPr is a sequence; Word calls a file damaged otherwise). */
     private val RPR_ORDER = listOf(
@@ -84,31 +106,51 @@ object DocxEditor {
         require(src.length() <= DocxReader.MAX_DOCX_BYTES) { "too large: ${src.length()} bytes" }
         val notes = ArrayList<String>()
         val changed = ArrayList<String>()
+        val added = LinkedHashMap<String, ByteArray>()
         workDir.mkdirs()
         val temp = File(workDir, "saving-${System.nanoTime()}.docx")
         try {
             ZipFile(src).use { zip ->
-                val documentXml = DocxReader.readEntry(zip, zip.getEntry(DOCUMENT_PART) ?: error("no $DOCUMENT_PART"))
-                val stylesEntry = zip.getEntry(STYLES_PART)
-                val document = DocxReader.parse(documentXml)
-                val styles = stylesEntry?.let { DocxReader.parse(DocxReader.readEntry(zip, it)) }
-                val stylesChanged = apply(document, styles, ops, notes)
-                val newDocument = serialize(document)
-                val newStyles = if (stylesChanged && styles != null) serialize(styles) else null
+                fun part(name: String) = zip.getEntry(name)?.let { DocxReader.parse(DocxReader.readEntry(zip, it)) }
+                val document = part(DOCUMENT_PART) ?: error("no $DOCUMENT_PART")
+                val styles = part(STYLES_PART)
+                val rels = part(DocxReader.DOCUMENT_RELS)
+                val numberingPath = DocxReader.numberingPart(rels)
+                val numbering = part(numberingPath)
+                val lists = Lists(numbering)
+                val stylesChanged = apply(document, styles, ops, notes, lists)
+
+                val replaced = LinkedHashMap<String, ByteArray>()
+                if (ops.isNotEmpty()) replaced[DOCUMENT_PART] = serialize(document)
+                if (stylesChanged && styles != null) replaced[STYLES_PART] = serialize(styles)
+                if (lists.changed) {
+                    val bytes = serialize(lists.doc)
+                    if (numbering != null) {
+                        replaced[numberingPath] = bytes
+                    } else {
+                        // A document with no lists yet: add the part and register it.
+                        check(zip.getEntry(numberingPath) == null) { "unreadable $numberingPath" }
+                        added[numberingPath] = bytes
+                        val relsDoc = rels ?: error("no ${DocxReader.DOCUMENT_RELS}")
+                        addRelationship(relsDoc, DocxReader.REL_NUMBERING, numberingPath.removePrefix("word/"))
+                        replaced[DocxReader.DOCUMENT_RELS] = serialize(relsDoc)
+                        val types = part(CONTENT_TYPES) ?: error("no $CONTENT_TYPES")
+                        addOverride(types, "/$numberingPath", NUMBERING_TYPE)
+                        replaced[CONTENT_TYPES] = serialize(types)
+                    }
+                }
 
                 ZipOutputStream(FileOutputStream(temp)).use { out ->
                     for (entry in zip.entries()) {
                         DocxReader.checkEntryName(entry.name)
-                        val bytes = when {
-                            entry.name == DOCUMENT_PART && ops.isNotEmpty() -> newDocument.also { changed.add(entry.name) }
-                            entry.name == STYLES_PART && newStyles != null -> newStyles.also { changed.add(entry.name) }
-                            else -> DocxReader.readEntry(zip, entry)
-                        }
-                        putEntry(out, entry, bytes)
+                        putEntry(out, entry, replaced[entry.name] ?: DocxReader.readEntry(zip, entry))
                     }
+                    for ((name, bytes) in added) putEntry(out, ZipEntry(name).apply { method = ZipEntry.DEFLATED }, bytes)
                 }
+                changed.addAll(replaced.keys)
+                changed.addAll(added.keys)
             }
-            verify(src, temp, changed, ops, expected)
+            verify(src, temp, changed, ops, expected, added.keys)
             copy(temp, dest)
             return Saved(dest, changed, notes)
         } finally {
@@ -120,7 +162,7 @@ object DocxEditor {
      * Every paragraph's text is exactly what the ops say (original + text edits as string
      * splices) and what the screen expected; every untouched part is byte-identical.
      */
-    private fun verify(src: File, written: File, changed: List<String>, ops: List<Op>, expected: List<String>) {
+    private fun verify(src: File, written: File, changed: List<String>, ops: List<Op>, expected: List<String>, added: Set<String>) {
         val before = DocxReader.read(src).blocks.filterIsInstance<DocxReader.Paragraph>()
         val after = DocxReader.read(written).blocks.filterIsInstance<DocxReader.Paragraph>()
         // The same edits on plain strings: what every paragraph must now say.
@@ -147,7 +189,7 @@ object DocxEditor {
         }
         val ha = hashes(src)
         val hb = hashes(written)
-        check(ha.keys == hb.keys) { "verify: package parts differ: ${ha.keys - hb.keys} / ${hb.keys - ha.keys}" }
+        check(hb.keys == ha.keys + added) { "verify: package parts differ: ${ha.keys - hb.keys} / ${hb.keys - ha.keys}" }
         for ((name, hash) in ha) {
             if (name !in changed) check(hb[name] == hash) { "verify: $name changed but was not edited" }
         }
@@ -156,7 +198,7 @@ object DocxEditor {
     // ---------------------------------------------------------------- apply
 
     /** Applies [ops] to the DOM. Returns whether styles.xml was changed (a style was added). */
-    fun apply(document: Document, styles: Document?, ops: List<Op>, notes: MutableList<String>): Boolean {
+    fun apply(document: Document, styles: Document?, ops: List<Op>, notes: MutableList<String>, lists: Lists = Lists(null)): Boolean {
         var paragraphs = bodyParagraphs(document)
         val styleIds = StyleIds(styles)
         for (op in ops) {
@@ -166,6 +208,7 @@ object DocxEditor {
                 is Op.Text -> op.para
                 is Op.Split -> op.para
                 is Op.Join -> op.para
+                is Op.ListItem -> op.para
             }
             val p = checkNotNull(paragraphs.getOrNull(index)) { "no paragraph $index for $op" }
             when (op) {
@@ -174,6 +217,7 @@ object DocxEditor {
                 is Op.Text -> replaceText(document, p, op, notes)
                 is Op.Split -> splitParagraph(document, p, op, styleIds, notes)
                 is Op.Join -> joinParagraph(checkNotNull(paragraphs.getOrNull(index - 1)) { "nothing before paragraph $index to join onto" }, p, op, notes)
+                is Op.ListItem -> setListItem(document, p, op, lists, styleIds, notes)
             }
             // Splits and joins renumber the paragraphs after them.
             if (op is Op.Split || op is Op.Join) paragraphs = bodyParagraphs(document)
@@ -399,6 +443,147 @@ object DocxEditor {
         "permStart", "permEnd", "moveFromRangeStart", "moveFromRangeEnd", "moveToRangeStart", "moveToRangeEnd",
     )
 
+    /**
+     * Puts [p] in a list, or takes it out. Out: the paragraph's own numbering goes; if its
+     * style numbers it, an explicit numId 0 switches that off.
+     */
+    private fun setListItem(document: Document, p: Element, op: Op.ListItem, lists: Lists, styleIds: StyleIds, notes: MutableList<String>) {
+        var pPr = child(p, "pPr")
+        pPr?.let { pp -> child(pp, "numPr")?.let { pp.removeChild(it) } }
+        val styleId = pPr?.let { child(it, "pStyle") }?.getAttributeNS(W, "val")
+        val numId = when (op.kind) {
+            "number", "bullet" -> lists.numIdFor(op.listId, op.kind)
+            else -> if (styleId != null && styleIds.numbers(styleId)) 0 else null
+        }
+        if (numId != null) {
+            if (pPr == null) {
+                pPr = document.createElementNS(W, "w:pPr")
+                p.insertBefore(pPr, p.firstChild)
+            }
+            val numPr = document.createElementNS(W, "w:numPr")
+            val ilvl = document.createElementNS(W, "w:ilvl")
+            ilvl.setAttributeNS(W, "w:val", "0")
+            val id = document.createElementNS(W, "w:numId")
+            id.setAttributeNS(W, "w:val", numId.toString())
+            numPr.appendChild(ilvl)
+            numPr.appendChild(id)
+            insertInOrder(pPr!!, numPr, PPR_ORDER)
+        }
+        notes.add("list p${op.para}: ${op.kind} ${op.listId} → numId $numId")
+    }
+
+    /** Inserts [el] among [parent]'s children at its schema position; unknown children sort last. */
+    private fun insertInOrder(parent: Element, el: Element, order: List<String>) {
+        val rank = order.indexOf(el.localName)
+        val before = elementChildren(parent).firstOrNull { (order.indexOf(it.localName).takeIf { i -> i >= 0 } ?: 1000) > rank }
+        parent.insertBefore(el, before)
+    }
+
+    /**
+     * The document's list definitions (numbering.xml), with new lists added as needed. A new
+     * list gets its own w:num pointing at one shared definition per kind (decimal "1.",
+     * "a.", "i." … or bullets "•", "◦", "▪"), restarted at 1 with a startOverride.
+     */
+    class Lists(existing: Document?) {
+        val doc: Document = existing ?: newNumbering()
+        var changed = false
+            private set
+        private val abstractFor = HashMap<String, Int>()
+        private val numFor = HashMap<String, Int>()
+
+        fun numIdFor(listId: String, kind: String): Int {
+            listId.toIntOrNull()?.let { return it }
+            return numFor.getOrPut(listId) {
+                changed = true
+                createNum(abstractFor.getOrPut(kind) { createAbstract(kind) })
+            }
+        }
+
+        private fun root() = doc.documentElement
+        private fun children(name: String) = elementChildren(root()).filter { it.localName == name && it.namespaceURI == W }
+        private fun el(tag: String, value: String? = null): Element =
+            doc.createElementNS(W, "w:$tag").also { if (value != null) it.setAttributeNS(W, "w:val", value) }
+
+        private fun createAbstract(kind: String): Int {
+            val id = (children("abstractNum").mapNotNull { it.getAttributeNS(W, "abstractNumId").toIntOrNull() }.maxOrNull() ?: -1) + 1
+            val a = doc.createElementNS(W, "w:abstractNum")
+            a.setAttributeNS(W, "w:abstractNumId", id.toString())
+            a.appendChild(el("multiLevelType", "hybridMultilevel"))
+            val numberFormats = listOf("decimal", "lowerLetter", "lowerRoman")
+            val bullets = listOf("\u2022", "\u25E6", "\u25AA")
+            for (i in 0..8) {
+                val lvl = doc.createElementNS(W, "w:lvl")
+                lvl.setAttributeNS(W, "w:ilvl", i.toString())
+                lvl.appendChild(el("start", "1"))
+                if (kind == "bullet") {
+                    lvl.appendChild(el("numFmt", "bullet"))
+                    lvl.appendChild(el("lvlText", bullets[i % 3]))
+                } else {
+                    lvl.appendChild(el("numFmt", numberFormats[i % 3]))
+                    lvl.appendChild(el("lvlText", "%${i + 1}."))
+                }
+                lvl.appendChild(el("lvlJc", "left"))
+                val pPr = el("pPr")
+                val ind = el("ind")
+                ind.setAttributeNS(W, "w:left", (720 * (i + 1)).toString())
+                ind.setAttributeNS(W, "w:hanging", "360")
+                pPr.appendChild(ind)
+                lvl.appendChild(pPr)
+                a.appendChild(lvl)
+            }
+            // Every abstractNum comes before every num.
+            root().insertBefore(a, children("num").firstOrNull() ?: children("numIdMacAtCleanup").firstOrNull())
+            return id
+        }
+
+        private fun createNum(abstractId: Int): Int {
+            val id = (children("num").mapNotNull { it.getAttributeNS(W, "numId").toIntOrNull() }.maxOrNull() ?: 0) + 1
+            val n = doc.createElementNS(W, "w:num")
+            n.setAttributeNS(W, "w:numId", id.toString())
+            n.appendChild(el("abstractNumId", abstractId.toString()))
+            val override = el("lvlOverride")
+            override.setAttributeNS(W, "w:ilvl", "0")
+            override.appendChild(el("startOverride", "1"))
+            n.appendChild(override)
+            root().insertBefore(n, children("numIdMacAtCleanup").firstOrNull())
+            return id
+        }
+
+        companion object {
+            private fun newNumbering(): Document {
+                val f = javax.xml.parsers.DocumentBuilderFactory.newInstance()
+                f.isNamespaceAware = true
+                val d = f.newDocumentBuilder().newDocument()
+                d.appendChild(d.createElementNS(W, "w:numbering"))
+                return d
+            }
+        }
+    }
+
+    private fun addRelationship(rels: Document, type: String, target: String) {
+        val root = rels.documentElement
+        val ids = HashSet<String>()
+        var n = root.firstChild
+        while (n != null) {
+            if (n is Element) ids.add(n.getAttribute("Id"))
+            n = n.nextSibling
+        }
+        var i = 1
+        while ("rId$i" in ids) i++
+        val r = rels.createElementNS(PKG_RELS, "Relationship")
+        r.setAttribute("Id", "rId$i")
+        r.setAttribute("Type", type)
+        r.setAttribute("Target", target)
+        root.appendChild(r)
+    }
+
+    private fun addOverride(types: Document, partName: String, contentType: String) {
+        val o = types.createElementNS(PKG_TYPES, "Override")
+        o.setAttribute("PartName", partName)
+        o.setAttribute("ContentType", contentType)
+        types.documentElement.appendChild(o)
+    }
+
     /** The run segment holding character [ch], or null (out of range or not a text run). */
     private fun sourceRun(segs: List<DocxReader.Segment>, ch: Int): DocxReader.Segment? {
         if (ch < 0) return null
@@ -510,6 +695,7 @@ object DocxEditor {
         private val byName = HashMap<String, String>()
         private val ids = HashSet<String>()
         private val next = HashMap<String, String>()
+        private val raw = HashMap<String, Element>()
         private var defaultId: String? = null
 
         init {
@@ -517,11 +703,25 @@ object DocxEditor {
                 for (s in elementChildren(root).filter { it.localName == "style" && it.getAttributeNS(W, "type") == "paragraph" }) {
                     val id = s.getAttributeNS(W, "styleId")
                     ids.add(id)
+                    raw[id] = s
                     child(s, "name")?.getAttributeNS(W, "val")?.lowercase()?.let { byName.putIfAbsent(it, id) }
                     child(s, "next")?.getAttributeNS(W, "val")?.takeIf { it.isNotEmpty() }?.let { next[id] = it }
                     if (s.getAttributeNS(W, "default").let { it == "1" || it == "true" }) defaultId = id
                 }
             }
+        }
+
+        /** Whether paragraphs in style [id] are numbered by the style itself (w:numPr, through basedOn). */
+        fun numbers(id: String): Boolean {
+            val seen = HashSet<String>()
+            var cur: String? = id
+            while (cur != null && seen.add(cur)) {
+                val s = raw[cur] ?: return false
+                val numPr = child(s, "pPr")?.let { child(it, "numPr") }
+                if (numPr != null) return (child(numPr, "numId")?.getAttributeNS(W, "val")?.toIntOrNull() ?: 0) > 0
+                cur = child(s, "basedOn")?.getAttributeNS(W, "val")
+            }
+            return false
         }
 
         /** The style Word gives the paragraph after one in [id] (heading → Normal). */

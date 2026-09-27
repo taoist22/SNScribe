@@ -37,6 +37,8 @@ export type ParagraphBlock = {
   runs: Run[];
   /** Its paragraph mark ends a section: nothing may be joined onto it. */
   sect?: boolean;
+  /** The list it belongs to — a document list id (number) or a list made while editing (string) — and its level. */
+  num?: {id: number | string; lvl: number};
 };
 
 export type TableBlock = {type: 'table'; rows: number; cols: number; preview: string};
@@ -53,6 +55,10 @@ export type Report = {
   contentControls: number;
 };
 
+export type ListLevel = {fmt: string; text: string; start: number} | null;
+/** A list's levels, and the numbers it restarts at. */
+export type ListDef = {levels: ListLevel[]; starts: Record<string, number>};
+
 export type DocxDocument = {
   path: string;
   name: string;
@@ -60,6 +66,8 @@ export type DocxDocument = {
   ms: number;
   report: Report;
   blocks: Block[];
+  /** Definitions of the lists the paragraphs use, by id. */
+  lists: Record<string, ListDef>;
 };
 
 export function paragraphText(p: ParagraphBlock): string {

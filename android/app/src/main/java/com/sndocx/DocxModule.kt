@@ -31,7 +31,7 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
 
     companion object {
         /** Bumped with each native change; first log line, to spot stale installs. */
-        const val NATIVE_BUILD = 4
+        const val NATIVE_BUILD = 5
         private val EXPORT_DIR = File("/storage/emulated/0/EXPORT")
         private const val LOG_MAX_BYTES = 2L * 1024 * 1024
         private const val LOG_LINE_MAX = 4000
@@ -117,6 +117,20 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
                     putDouble("ms", ms.toDouble())
                     putMap("report", report(result.report))
                     putArray("blocks", Arguments.createArray().apply { result.blocks.forEach { pushMap(block(it)) } })
+                    putMap("lists", Arguments.createMap().apply {
+                        for ((id, def) in result.lists) putMap(id.toString(), Arguments.createMap().apply {
+                            putArray("levels", Arguments.createArray().apply {
+                                for (l in def.levels) {
+                                    if (l == null) pushNull() else pushMap(Arguments.createMap().apply {
+                                        putString("fmt", l.fmt)
+                                        putString("text", l.text)
+                                        putInt("start", l.start)
+                                    })
+                                }
+                            })
+                            putMap("starts", Arguments.createMap().apply { for ((k, v) in def.starts) putInt(k.toString(), v) })
+                        })
+                    })
                 })
             } catch (t: Throwable) {
                 appendLog("open FAILED $path: $t")
@@ -149,6 +163,7 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
                         )
                         "split" -> DocxEditor.Op.Split(m.getInt("para"), m.getInt("offset"))
                         "join" -> DocxEditor.Op.Join(m.getInt("para"))
+                        "list" -> DocxEditor.Op.ListItem(m.getInt("para"), m.getString("kind") ?: "none", m.getString("listId") ?: "")
                         else -> throw IllegalArgumentException("unknown op ${m.getString("op")}")
                     }
                 }
@@ -193,6 +208,7 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
                 putInt("indent", b.indentTwips)
                 b.listLabel?.let { putString("list", it) }
                 if (b.sectionBreak) putBoolean("sect", true)
+                b.numId?.let { id -> putMap("num", Arguments.createMap().apply { putInt("id", id); putInt("lvl", b.ilvl) }) }
                 putArray("runs", Arguments.createArray().apply {
                     for (r in b.runs) pushMap(Arguments.createMap().apply {
                         putString("t", r.text)

@@ -90,4 +90,33 @@ class DocxTextModule(private val reactContext: ReactApplicationContext) :
             promise.resolve(result)
         }
     }
+    /**
+     * The caret's offset one line up (dir -1) or down (+1), keeping its x — or
+     * {outside: true} when that line is past the paragraph. Never rejects.
+     */
+    @ReactMethod
+    fun lineMove(tag: Double, offset: Double, dir: Double, promise: Promise) {
+        UiThreadUtil.runOnUiThread {
+            val result = Arguments.createMap()
+            try {
+                val reactTag = tag.toInt()
+                val view = UIManagerHelper.getUIManagerForReactTag(reactContext, reactTag)?.resolveView(reactTag)
+                val layout = (view as? TextView)?.layout
+                if (layout == null) {
+                    result.putString("error", "no text layout")
+                } else {
+                    val o = offset.toInt().coerceIn(0, layout.text.length)
+                    val target = layout.getLineForOffset(o) + dir.toInt()
+                    if (target < 0 || target >= layout.lineCount) {
+                        result.putBoolean("outside", true)
+                    } else {
+                        result.putInt("offset", layout.getOffsetForHorizontal(target, layout.getPrimaryHorizontal(o)))
+                    }
+                }
+            } catch (t: Throwable) {
+                result.putString("error", t.toString())
+            }
+            promise.resolve(result)
+        }
+    }
 }

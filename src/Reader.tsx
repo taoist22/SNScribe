@@ -1,5 +1,6 @@
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
+  DeviceEventEmitter,
   Keyboard,
   PixelRatio,
   Pressable,
@@ -32,10 +33,11 @@ import {
   type Range,
   type StyleKind,
 } from './domain/edits';
+import {listKind, recount} from './domain/lists';
 import {anchorAfter, findBreak, windowEnd, type Anchor, type BlockBox, type Break, type LineBox} from './domain/paging';
 import {outline, paragraphText, wordCount, type DocxDocument, type ParagraphBlock} from './model/docx';
 import {ensureFileReadPermission, ensureFileWritePermission} from './pluginPermissions';
-import {Docx, DocxText, errorText, log, nativeBuild} from './services/native';
+import {Docx, DocxKeys, DocxText, errorText, log, nativeBuild, type KeyPress} from './services/native';
 
 /**
  * Read a Word document a page at a time (M1) and mark it up (M2).
@@ -125,7 +127,8 @@ export function Reader(): React.JSX.Element {
     const r = typedRange(typing);
     return [{op: 'text', para: r.para, start: r.start, end: r.end, text}];
   }, [typing, input]);
-  const blocks = useMemo(() => applyOps(committed, pending), [committed, pending]);
+  // List numbers are recounted after every edit, as Word does.
+  const blocks = useMemo(() => recount(applyOps(committed, pending), doc?.lists ?? {}), [committed, pending, doc]);
   /** Where the caret is drawn: after the typed text while typing. */
   const caretAt: Pos | null = typing
     ? {para: typedRange(typing).para, offset: typedRange(typing).start + clean(input).length}
@@ -516,6 +519,10 @@ export function Reader(): React.JSX.Element {
     }
     const at = caretAt;
     const p = paragraph(at.para);
+    if (pending.length === 0 && p?.num && paragraphText(p) === '' && endListAt(at)) {
+      setTyping({mode: 'insert', at});
+      return;
+    }
     const problem = p ? splitProblem(p, at.offset) : 'Paragraph not found.';
     flushTyping();
     setSelection(null);
@@ -578,6 +585,12 @@ export function Reader(): React.JSX.Element {
     if (!p) {
       return;
     }
+    if (at.offset === 0 && p.num) {
+      // At the start of a list item: the number or bullet goes first, as in Word.
+      endListAt(at);
+      setTyping({mode: 'insert', at});
+      return;
+    }
     if (at.offset === 0) {
       // At the start of a paragraph: join it onto the one before, caret at the join.
       const problem = joinProblem(blocks, at.para);
@@ -600,9 +613,57 @@ export function Reader(): React.JSX.Element {
   };
 
   /** Every change of the invisible field: the first key decides what it does. */
+  /** New lists made while editing get names "n1", "b2" … (the writer gives each its own list). */
+  const listCounter = useRef(0);
+
+  /**
+   * Word's automatic lists: "1." / "1)" / "-" / "*" and a space typed at the start of a
+   * body paragraph turn it into a numbered or bulleted list item. Two undo steps, like
+   * Word: the typed marker, then the conversion — so Undo brings the marker back.
+   * A list made just above is continued; otherwise a new one starts at 1.
+   */
+  const autoList = (text: string): boolean => {
+    if (!typing || typing.mode !== 'insert' || typing.at.offset !== 0) {
+      return false;
+    }
+    const m = /^(1[.)]|[-*]) $/.exec(text);
+    const p = paragraph(typing.at.para);
+    if (!m || !p || p.num || p.kind !== 'body') {
+      return false;
+    }
+    const kind = m[1].startsWith('1') ? 'number' : 'bullet';
+    const prev = blocks[blocks.indexOf(p) - 1];
+    const listId =
+      prev?.type === 'p' && prev.num && listKind(prev.num.id) === kind ? String(prev.num.id) : `${kind[0]}${++listCounter.current}`;
+    const para = typing.at.para;
+    commit([{op: 'text', para, start: 0, end: 0, text}], 'typing');
+    commit(
+      [
+        {op: 'text', para, start: 0, end: text.length, text: ''},
+        {op: 'list', para, kind, listId},
+      ],
+      'automatic list',
+    );
+    setInput('');
+    setTyping({mode: 'insert', at: {para, offset: 0}});
+    return true;
+  };
+
+  /** Enter or Backspace on an empty list item ends the list there, as in Word. */
+  const endListAt = (at: Pos): boolean => {
+    const p = paragraph(at.para);
+    if (!p?.num || (paragraphText(p) !== '' && at.offset !== 0)) {
+      return false;
+    }
+    commit([{op: 'list', para: at.para, kind: 'none', listId: ''}], 'end list');
+    return true;
+  };
+
   const onKeysText = (text: string) => {
     if (typing) {
-      setInput(text);
+      if (!autoList(text)) {
+        setInput(text);
+      }
       return;
     }
     if (text === '') {
@@ -643,6 +704,9 @@ export function Reader(): React.JSX.Element {
       return;
     }
     let at = caret;
+    if (!selection && at && paragraph(at.para)?.num && textOf(at.para) === '' && endListAt(at)) {
+      return;
+    }
     if (selection) {
       at = remove();
     } else if (at) {
@@ -659,6 +723,226 @@ export function Reader(): React.JSX.Element {
     commit([{op: 'split', para: at.para, offset: at.offset}], 'new paragraph');
     setCaret({para: at.para + 1, offset: 0});
   };
+
+  // ---------------------------------------------------------------- keyboard
+
+  /** Where the caret or the moving end of the selection is, committing any typing first. */
+  const cursorForKeys = (): Pos | null => {
+    const at = caretAt;
+    flushTyping();
+    return at;
+  };
+
+  /** Delete (forward): the selection, else the character after the caret, else joins the next paragraph on. */
+  const forwardDelete = () => {
+    if (!typing && selection) {
+      remove();
+      return;
+    }
+    const at = cursorForKeys();
+    const p = at && paragraph(at.para);
+    if (!at || !p) {
+      return;
+    }
+    if (at.offset < paragraphText(p).length) {
+      const problem = textEditProblem(p, at.offset, at.offset + 1);
+      if (problem) {
+        setStatus(problem);
+        return;
+      }
+      commit([{op: 'text', para: at.para, start: at.offset, end: at.offset + 1, text: ''}], 'delete');
+    } else {
+      const problem = joinProblem(blocks, at.para + 1);
+      if (problem) {
+        setStatus(problem);
+        return;
+      }
+      commit([{op: 'join', para: at.para + 1}], 'join paragraphs');
+    }
+    setCaret(at);
+  };
+
+  /** One step of caret movement. Up/Down ask the paragraph's own layout for the line above or below. */
+  const step = async (pos: Pos, key: string): Promise<Pos | null> => {
+    const len = textOf(pos.para).length;
+    const prevEnd = paragraph(pos.para - 1) ? {para: pos.para - 1, offset: textOf(pos.para - 1).length} : null;
+    const nextStart = paragraph(pos.para + 1) ? {para: pos.para + 1, offset: 0} : null;
+    switch (key) {
+      case 'LEFT':
+        return pos.offset > 0 ? {para: pos.para, offset: pos.offset - 1} : prevEnd;
+      case 'RIGHT':
+        return pos.offset < len ? {para: pos.para, offset: pos.offset + 1} : nextStart;
+      case 'HOME':
+        return {para: pos.para, offset: 0};
+      case 'END':
+        return {para: pos.para, offset: len};
+      default: {
+        const up = key === 'UP';
+        const i = window.findIndex(b => b.type === 'p' && b.index === pos.para);
+        const tag = i >= 0 ? findNodeHandle(textRefs.current[i] ?? null) : null;
+        if (tag !== null && DocxText) {
+          const r = await DocxText.lineMove(tag, pos.offset, up ? -1 : 1);
+          if (r.offset !== undefined) {
+            return {para: pos.para, offset: r.offset};
+          }
+        }
+        return up ? prevEnd : nextStart;
+      }
+    }
+  };
+
+  /** Arrows, Home, End; with Shift they extend the selection from where it started. */
+  const move = async (key: string, shift: boolean) => {
+    const sel = typing ? null : selection;
+    const from = cursorForKeys();
+    const cur = sel ? sel.to : from;
+    if (!cur) {
+      return;
+    }
+    if (!shift && sel) {
+      // Collapse the selection to the side the arrow points to.
+      const [s, e] = comparePos(sel.from, sel.to) <= 0 ? [sel.from, sel.to] : [sel.to, sel.from];
+      setSelection(null);
+      setCaret(key === 'LEFT' || key === 'UP' || key === 'HOME' ? s : e);
+      return;
+    }
+    const next = await step(cur, key);
+    if (!next) {
+      return;
+    }
+    if (!shift) {
+      setSelection(null);
+      setCaret(next);
+      return;
+    }
+    const anchorPos = sel ? sel.from : cur;
+    if (comparePos(anchorPos, next) === 0) {
+      setSelection(null);
+      setCaret(next);
+    } else {
+      setSelection({from: anchorPos, to: next});
+      setCaret(null);
+    }
+  };
+
+  const selectedText = (): string =>
+    selection
+      ? rangesBetween(blocks, selection.from, selection.to)
+          .map(r => textOf(r.para).slice(r.start, r.end))
+          .join('\n')
+      : '';
+
+  const copy = async (cut: boolean) => {
+    if (typing || !selection) {
+      return;
+    }
+    const ok = await DocxKeys?.copy(selectedText());
+    setStatus(ok ? (cut ? 'Cut.' : 'Copied.') : 'Could not use the clipboard.');
+    if (ok && cut) {
+      remove();
+    }
+  };
+
+  /** Paste plain text at the caret (or over the selection); line breaks become new paragraphs. One undo step. */
+  const paste = (raw: string) => {
+    const lines = raw.replace(/\r\n?/g, '\n').split('\n').map(clean);
+    let at: Pos | null;
+    if (typing) {
+      at = cursorForKeys();
+    } else if (selection) {
+      at = remove();
+    } else {
+      at = caret;
+      const p = at && paragraph(at.para);
+      const problem = p && at ? textEditProblem(p, at.offset, at.offset) : null;
+      if (problem) {
+        setStatus(problem);
+        return;
+      }
+    }
+    if (!at) {
+      return;
+    }
+    const ops: Op[] = [];
+    let pos = at;
+    lines.forEach((line, i) => {
+      if (line) {
+        ops.push({op: 'text', para: pos.para, start: pos.offset, end: pos.offset, text: line});
+        pos = {para: pos.para, offset: pos.offset + line.length};
+      }
+      if (i < lines.length - 1) {
+        ops.push({op: 'split', para: pos.para, offset: pos.offset});
+        pos = {para: pos.para + 1, offset: 0};
+      }
+    });
+    commit(ops, 'paste');
+    setSelection(null);
+    setCaret(pos);
+  };
+
+  /** Keys the native listener caught (DocxKeysModule). Ctrl and Cmd both work. */
+  const onKey = (e: KeyPress) => {
+    switch (e.key) {
+      case 'DEL_FWD':
+        forwardDelete();
+        return;
+      case 'TAB':
+        paste('\t');
+        return;
+      case 'LEFT':
+      case 'RIGHT':
+      case 'UP':
+      case 'DOWN':
+      case 'HOME':
+      case 'END':
+        move(e.key, e.shift);
+        return;
+      case 'Z':
+        if (e.shift) {
+          redo();
+        } else {
+          undo();
+        }
+        return;
+      case 'Y':
+        redo();
+        return;
+      case 'B':
+      case 'I':
+      case 'U':
+        if (!typing && selection) {
+          format(e.key === 'B' ? 'b' : e.key === 'I' ? 'i' : 'u', `${e.key} shortcut`);
+        }
+        return;
+      case 'C':
+      case 'X':
+        copy(e.key === 'X');
+        return;
+      case 'V':
+        if (e.text !== undefined) {
+          paste(e.text);
+        }
+        return;
+    }
+  };
+  const onKeyRef = useRef(onKey);
+  onKeyRef.current = onKey;
+
+  useEffect(() => {
+    const sub = DeviceEventEmitter.addListener('DocxKey', (e: KeyPress) => onKeyRef.current(e));
+    return () => sub.remove();
+  }, []);
+
+  // The listener goes on the invisible field whenever a new one mounts (a document opens).
+  useEffect(() => {
+    const tag = findNodeHandle(keys.current);
+    if (!doc || readOnly || tag === null || !DocxKeys) {
+      return;
+    }
+    DocxKeys.attach(tag)
+      .then(r => log(`keys: ${r}`))
+      .catch(error => log(`keys attach failed: ${errorText(error)}`));
+  }, [doc, readOnly]);
 
   const undo = () => {
     flushTyping();

@@ -28,6 +28,24 @@ object DocxReader {
     const val W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
     const val OBJECT = '￼'
     private const val DOCUMENT_PART = "word/document.xml"
+    const val DOCUMENT_RELS = "word/_rels/document.xml.rels"
+    const val REL_NUMBERING = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering"
+
+    /** Where the document's list definitions live: its numbering relationship, else word/numbering.xml. */
+    fun numberingPart(rels: Document?): String {
+        val root = rels?.documentElement ?: return "word/numbering.xml"
+        var n = root.firstChild
+        while (n != null) {
+            if (n is Element && n.localName == "Relationship" && n.getAttribute("Type") == REL_NUMBERING &&
+                n.getAttribute("TargetMode") != "External"
+            ) {
+                val target = n.getAttribute("Target")
+                return if (target.startsWith("/")) target.removePrefix("/") else "word/" + target.removePrefix("./")
+            }
+            n = n.nextSibling
+        }
+        return "word/numbering.xml"
+    }
     const val MAX_DOCX_BYTES = 30L * 1024 * 1024
     private const val MAX_PART_BYTES = 40L * 1024 * 1024
 
@@ -62,6 +80,9 @@ object DocxReader {
         val runs: List<Run>,
         /** Its paragraph mark carries a section break (w:sectPr): it must not be joined away. */
         val sectionBreak: Boolean = false,
+        /** The list it belongs to (w:numId, direct or from its style) and its level; null = none. */
+        val numId: Int? = null,
+        val ilvl: Int = 0,
     ) : Block() {
         val text: String get() = runs.joinToString("") { it.text }
     }
@@ -80,7 +101,14 @@ object DocxReader {
         val contentControls: Int,
     )
 
-    data class Result(val blocks: List<Block>, val report: Report)
+    /** One list level: number format ("decimal", "bullet", …), label pattern ("%1."), first number. */
+    data class ListLevel(val fmt: String, val text: String, val start: Int)
+
+    /** A list (w:num): its levels, and start overrides that restart it. */
+    data class ListDef(val levels: List<ListLevel?>, val starts: Map<Int, Int>)
+
+    /** [lists] holds the definitions of every list a paragraph uses, so the screen can recount. */
+    data class Result(val blocks: List<Block>, val report: Report, val lists: Map<Int, ListDef> = emptyMap())
 
     // ---------------------------------------------------------------- entry points
 
@@ -91,7 +119,7 @@ object DocxReader {
             fun part(name: String): Document? = zip.getEntry(name)?.let { parse(readEntry(zip, it)) }
             for (e in zip.entries()) checkEntryName(e.name)
             val document = part(DOCUMENT_PART) ?: throw IllegalStateException("no $DOCUMENT_PART in package")
-            return read(document, part("word/styles.xml"), part("word/numbering.xml"))
+            return read(document, part("word/styles.xml"), part(numberingPart(part(DOCUMENT_RELS))))
         }
     }
 
@@ -123,7 +151,8 @@ object DocxReader {
                 // sectPr, bookmarkStart/End, proofErr and other markers carry no content.
             }
         }
-        return Result(blocks, ctx.report())
+        val used = blocks.filterIsInstance<Paragraph>().mapNotNull { it.numId }.toSet()
+        return Result(blocks, ctx.report(), used.mapNotNull { id -> ctx.numbering.definition(id)?.let { id to it } }.toMap())
     }
 
     // ---------------------------------------------------------------- paragraphs
@@ -192,6 +221,8 @@ object DocxReader {
                 listLabel = label,
                 runs = mergeAdjacent(runs),
                 sectionBreak = pPr?.let { child(it, "sectPr") } != null,
+                numId = numId?.takeIf { it > 0 && label != null },
+                ilvl = ilvl.coerceIn(0, 8),
             )
         }
 
@@ -530,6 +561,11 @@ object DocxReader {
         }
 
         fun indent(numId: Int, ilvl: Int): Int? = levels(numId)?.first?.getOrNull(ilvl)?.indent
+
+        fun definition(numId: Int): ListDef? {
+            val (levels, overrides) = levels(numId) ?: return null
+            return ListDef(levels.map { l -> l?.let { ListLevel(it.fmt, it.text, it.start) } }, overrides)
+        }
 
         fun label(numId: Int, ilvl: Int): String? {
             val (levels, overrides) = levels(numId) ?: return null

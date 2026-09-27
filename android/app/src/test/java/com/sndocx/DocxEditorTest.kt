@@ -186,6 +186,71 @@ class DocxEditorTest {
         }
     }
 
+    @Test
+    fun makesNewNumberedAndBulletedLists() {
+        val src = File(fixtures, "probe-fixture.docx")
+        val (dest, saved) = save(
+            src,
+            listOf(
+                Op.ListItem(1, "number", "n1"),
+                Op.ListItem(2, "number", "n1"),
+                Op.ListItem(3, "bullet", "b1"),
+            ),
+        )
+        assertTrue(saved.changedParts.contains("word/numbering.xml"))
+        val ps = paragraphs(dest)
+        assertEquals("1.", ps[1].listLabel)
+        assertEquals("2.", ps[2].listLabel)
+        assertEquals(ps[1].numId, ps[2].numId)
+        assertEquals("•", ps[3].listLabel)
+        // Taking one out again.
+        val (out, _) = DocxEditor.save(dest, listOf(Op.ListItem(2, "none", "")), File(work, "out.docx"), File(work, "tmp")).let { File(work, "out.docx") to it }
+        assertEquals(null, paragraphs(out)[2].listLabel)
+        assertEquals("1.", paragraphs(out)[1].listLabel)
+    }
+
+    @Test
+    fun addsListDefinitionsToADocumentWithNone() {
+        // The fixture without its numbering part, relationship and content type.
+        val bare = File(work, "no-lists.docx")
+        java.util.zip.ZipFile(File(fixtures, "probe-fixture.docx")).use { zip ->
+            java.util.zip.ZipOutputStream(bare.outputStream()).use { out ->
+                for (e in zip.entries()) {
+                    if (e.name == "word/numbering.xml") continue
+                    var bytes = zip.getInputStream(e).readBytes()
+                    if (e.name == "word/_rels/document.xml.rels" || e.name == "[Content_Types].xml") {
+                        bytes = String(bytes).replace(Regex("<(Relationship|Override)[^>]*numbering[^>]*/>"), "").toByteArray()
+                    }
+                    out.putNextEntry(java.util.zip.ZipEntry(e.name))
+                    out.write(bytes)
+                    out.closeEntry()
+                }
+            }
+        }
+        assertEquals(null, paragraphs(bare)[1].listLabel)
+        val (dest, saved) = save(bare, listOf(Op.ListItem(1, "number", "n1"), Op.ListItem(2, "number", "n1")))
+        assertTrue(saved.changedParts.containsAll(listOf("word/numbering.xml", "word/_rels/document.xml.rels", "[Content_Types].xml")))
+        assertEquals(listOf("1.", "2."), paragraphs(dest).subList(1, 3).map { it.listLabel })
+    }
+
+    /** Stress (lists): number every third editable paragraph into one new list, and take existing items out. */
+    @Test
+    fun listEditsOnRealDocuments() {
+        val dir = System.getProperty("docx.samples").orEmpty()
+        if (dir.isEmpty()) return
+        val files = File(dir).listFiles { f -> f.name.endsWith(".docx") }.orEmpty().sortedBy { it.name }
+        for (f in files) {
+            val ps = paragraphs(f)
+            val ops = ps.filterIndexed { i, _ -> i % 3 == 0 }.map { p ->
+                if (p.numId != null) Op.ListItem(p.index, "none", "") else Op.ListItem(p.index, "number", "n1")
+            }
+            val (dest, saved) = save(f, ops)
+            val numbered = paragraphs(dest).filter { it.listLabel?.firstOrNull()?.isDigit() == true }.size
+            println("${f.name}: ${ops.size} list ops, ${saved.changedParts}, $numbered numbered paragraphs")
+            assertTrue(paragraphs(dest).filterIndexed { i, _ -> i % 3 == 0 }.all { p -> (p.numId == null) == (ps[p.index].numId != null) })
+        }
+    }
+
     /**
      * Stress: on every real document in DOCX_SAMPLES, bold the first word, highlight the
      * middle third and italicise the end of every paragraph, and make paragraph 1 a

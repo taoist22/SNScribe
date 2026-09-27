@@ -19,7 +19,9 @@ export type Op =
   /** Enter: the text from `offset` on becomes a new paragraph after `para`. */
   | {op: 'split'; para: number; offset: number}
   /** Backspace at the start of `para`: it joins onto the end of `para` - 1. */
-  | {op: 'join'; para: number};
+  | {op: 'join'; para: number}
+  /** In or out of a list. listId: a document list (number as text) or a new list's name ("n1", "b2"). */
+  | {op: 'list'; para: number; kind: 'number' | 'bullet' | 'none'; listId: string};
 
 /** A position between characters of paragraph `para` (Paragraph.index). */
 export type Pos = {para: number; offset: number};
@@ -212,6 +214,18 @@ function join(out: Block[], i: number): void {
   renumber(out, i, -1);
 }
 
+/**
+ * Mirrors DocxEditor.setListItem. The label is left for recount (domain/lists); a new list
+ * item takes the list's first-level indent, and leaving a list drops the list indent.
+ */
+function listItem(p: ParagraphBlock, op: Extract<Op, {op: 'list'}>): ParagraphBlock {
+  if (op.kind === 'none') {
+    return {...p, num: undefined, list: undefined, indent: p.num ? 0 : p.indent};
+  }
+  const id = /^\d+$/.test(op.listId) ? Number(op.listId) : op.listId;
+  return {...p, num: {id, lvl: 0}, list: p.list ?? '', indent: Math.max(p.indent, 720)};
+}
+
 /** The document with `ops` applied, in order. Untouched blocks keep their identity. */
 export function applyOps(blocks: Block[], ops: Op[]): Block[] {
   if (ops.length === 0) {
@@ -241,6 +255,9 @@ export function applyOps(blocks: Block[], ops: Op[]): Block[] {
         if (i > 0 && out[i - 1].type === 'p') {
           join(out, i);
         }
+        break;
+      case 'list':
+        out[i] = listItem(p, op);
         break;
     }
   }
