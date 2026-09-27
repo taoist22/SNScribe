@@ -131,9 +131,12 @@ export function Reader(): React.JSX.Element {
     }
     started.current = true;
     (async () => {
+      // Both up front: reading is needed to list folders for New as well as to open files,
+      // and writing for the log and for saving (CT: listing failed because read was never asked).
+      const canRead = await ensureFileReadPermission();
       const canWrite = await ensureFileWritePermission();
       const name = await Docx?.logName().catch(() => '?');
-      const refused = await log(`DOCX opened: NATIVE_BUILD=${nativeBuild()} write=${canWrite} log=${name}`);
+      const refused = await log(`DOCX opened: NATIVE_BUILD=${nativeBuild()} read=${canRead} write=${canWrite} log=${name}`);
       if (refused) {
         setStatus(`Log not written: ${refused}`);
       }
@@ -452,6 +455,10 @@ export function Reader(): React.JSX.Element {
   const browseTo = async (path: string) => {
     setBrowse({path});
     setMenu('folder');
+    if (!(await ensureFileReadPermission())) {
+      setBrowse({path, error: 'File access was not allowed.'});
+      return;
+    }
     const r = await Docx!.listFolders(path);
     setBrowse({path, folders: r.folders, error: r.error});
   };
@@ -459,12 +466,13 @@ export function Reader(): React.JSX.Element {
   /** Fallback when a folder can't be listed: the folder of any file picked in it. */
   const folderFromFile = async () => {
     try {
+      // The same call Open makes. No starting folder: needSelectFolder opens a different,
+      // non-Ratta view that refuses paths outside its whitelist (CT; SNFolio saw the same).
       const picked = (await RattaFileSelector.selectFile({
         selectType: 0,
         maxNum: 1,
         title: 'Choose any file in the folder you want',
         rightButtonText: 'Choose',
-        needSelectFolder: browse?.path ?? newFolder,
       })) as string[] | null | undefined;
       const path = picked?.find(p => typeof p === 'string' && p.includes('/'));
       if (path) {
