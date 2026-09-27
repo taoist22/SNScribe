@@ -33,7 +33,7 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
 
     companion object {
         /** Bumped with each native change; first log line, to spot stale installs. */
-        const val NATIVE_BUILD = 6
+        const val NATIVE_BUILD = 7
         private val EXPORT_DIR = File("/storage/emulated/0/EXPORT")
         private const val LOG_MAX_BYTES = 2L * 1024 * 1024
         private const val LOG_LINE_MAX = 4000
@@ -202,10 +202,11 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
      * Resolves {path, source}.
      */
     @ReactMethod
-    fun create(name: String, promise: Promise) {
+    fun create(name: String, folder: String, promise: Promise) {
         worker.execute {
             try {
-                val dir = File("/storage/emulated/0/Document").also { if (!it.isDirectory) it.mkdirs() }
+                val dir = File(folder.ifEmpty { "/storage/emulated/0/Document" }).also { if (!it.isDirectory) it.mkdirs() }
+                check(dir.isDirectory) { "No such folder: ${dir.path}" }
                 val dest = DocxBlank.freeName(dir, name)
                 val source = File(File(reactContext.filesDir, "sn-docx-new").also { it.mkdirs() }, "blank-${System.currentTimeMillis()}.docx")
                 DocxBlank.write(source)
@@ -219,6 +220,28 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
                 appendLog("create FAILED: $t")
                 promise.reject("DOCX_CREATE_FAILED", t.message ?: t.toString(), t)
             }
+        }
+    }
+
+    /**
+     * The folders directly inside [path], for choosing where a new document goes. There is no
+     * folder picker in the plugin SDK, so DOCX lists them itself (as SNFolio does). Resolves
+     * {folders: [names]} or {error} when the folder can't be listed (scoped storage can
+     * refuse it); never rejects.
+     */
+    @ReactMethod
+    fun listFolders(path: String, promise: Promise) {
+        worker.execute {
+            val result = Arguments.createMap()
+            val children = runCatching { File(path).listFiles() }.getOrNull()
+            if (children == null) {
+                result.putString("error", "This folder can't be listed")
+            } else {
+                result.putArray("folders", Arguments.fromList(
+                    children.filter { it.isDirectory && !it.name.startsWith(".") }.map { it.name }.sortedBy { it.lowercase() },
+                ))
+            }
+            promise.resolve(result)
         }
     }
 

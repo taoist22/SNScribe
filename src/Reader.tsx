@@ -15,6 +15,7 @@ import {
 } from 'react-native';
 import {PluginManager, RattaFileSelector} from 'sn-plugin-lib';
 import {BlockView} from './BlockView';
+import {PageCounter} from './PageCounter';
 import {
   applyOps,
   comparePos,
@@ -34,7 +35,7 @@ import {
   type StyleKind,
 } from './domain/edits';
 import {listKind, recount} from './domain/lists';
-import {anchorAfter, findBreak, windowEnd, type Anchor, type BlockBox, type Break, type LineBox} from './domain/paging';
+import {anchorAfter, findBreak, pageIndexOf, windowEnd, type Anchor, type BlockBox, type Break, type LineBox, type PageStart} from './domain/paging';
 import {fontsUsed, outline, paragraphText, wordCount, type DocxDocument, type ParagraphBlock} from './model/docx';
 import {ensureFileReadPermission, ensureFileWritePermission} from './pluginPermissions';
 import {Docx, DocxKeys, DocxText, errorText, log, nativeBuild, type KeyPress} from './services/native';
@@ -73,7 +74,12 @@ const DOUBLE_TAP_MS = 500;
 type Frame = {x: number; top: number; height: number};
 type Selection = {from: Pos; to: Pos};
 type Typing = {mode: 'insert'; at: Pos} | {mode: 'replace'; range: Range};
-type Menu = 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name';
+type Menu = 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view';
+
+const STORAGE = '/storage/emulated/0';
+const DOCUMENTS = `${STORAGE}/Document`;
+/** Reader text sizes (A− / A+), as factors of the document's own sizes. */
+const SCALES = [0.8, 0.9, 1, 1.15, 1.3, 1.5, 1.75];
 
 /** One line of text: line breaks and other control characters become spaces. */
 const clean = (text: string) => text.replace(/[\r\n\u0000-\u0008\u000b-\u001f\ufffc]/g, ' ');
@@ -95,6 +101,16 @@ export function Reader(): React.JSX.Element {
   const [fonts, setFonts] = useState<Set<string>>(new Set());
   /** Naming a new document: the name being typed, or null. */
   const [naming, setNaming] = useState<string | null>(null);
+  /** Where New puts the document, and the folder being browsed to choose it. */
+  const [newFolder, setNewFolder] = useState(DOCUMENTS);
+  const [browse, setBrowse] = useState<{path: string; folders?: string[]; error?: string} | null>(null);
+  /** Reader text size, as an index into SCALES. */
+  const [scaleAt, setScaleAt] = useState(SCALES.indexOf(1));
+  const textScale = SCALES[scaleAt];
+  const [pageW, setPageW] = useState(0);
+  /** The whole document's page starts, counted in the background for one layout (mapKey). */
+  const [pageMap, setPageMap] = useState<{key: string; pages: PageStart[]; done: boolean} | null>(null);
+  const [showPages, setShowPages] = useState(false);
   const [pageH, setPageH] = useState(0);
   const [measured, setMeasured] = useState<{key: string; brk: Break} | null>(null);
   const [edits, setEdits] = useState<{steps: Op[][]; cursor: number}>({steps: [], cursor: 0});
@@ -150,7 +166,7 @@ export function Reader(): React.JSX.Element {
 
   // Measurements belong to one page (window + offset + page height + edits). A new page
   // starts them afresh, and a break computed for another page is never used.
-  const pageKey = `${doc?.path}:${anchor.block}:${anchor.offset}:${end}:${pageH}:${edits.cursor}`;
+  const pageKey = `${doc?.path}:${anchor.block}:${anchor.offset}:${end}:${pageH}:${edits.cursor}:${textScale}`;
   const measuredFor = useRef('');
   const frames = useRef<Array<Frame | undefined>>([]);
   const lines = useRef<Array<LineBox[] | undefined>>([]);
@@ -230,6 +246,8 @@ export function Reader(): React.JSX.Element {
     setAnchor(START);
     setHistory([]);
     setContents(false);
+    setShowPages(false);
+    setPageMap(null);
     setMenu(null);
     setEdits({steps: [], cursor: 0});
     setSaved({cursor: 0, dest: null});
@@ -305,7 +323,7 @@ export function Reader(): React.JSX.Element {
         setStatus('Making a document needs file write permission.');
         return;
       }
-      const made = await Docx!.create(name);
+      const made = await Docx!.create(name, newFolder);
       await openPath(made.path, {source: made.source, saveTo: made.path});
     } catch (error) {
       setStatus(`Could not make the document: ${errorText(error)}`);
@@ -366,6 +384,98 @@ export function Reader(): React.JSX.Element {
 
   const fontChoices = useMemo(() => [...new Set([...fonts, ...fontsUsed(blocks)])].sort((a, b) => a.localeCompare(b)), [fonts, blocks]);
   const SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48, 72];
+
+  // The page map belongs to one layout: the document with its edits, the text size, and
+  // the page's size. It is recounted a moment after that settles, and not while typing.
+  const mapKey = `${doc?.path}:${edits.cursor}:${textScale}:${pageW}x${pageH}:${fonts.size}`;
+  const [countKey, setCountKey] = useState('');
+  useEffect(() => {
+    if (!doc || typing || pageH <= 0 || pageW <= 0) {
+      return;
+    }
+    const t = setTimeout(() => setCountKey(mapKey), 1500);
+    return () => clearTimeout(t);
+  }, [mapKey, doc, typing, pageH, pageW]);
+  const map = pageMap?.key === mapKey ? pageMap : null;
+  const pageNumber = map ? pageIndexOf(map.pages, anchor) + 1 : null;
+
+  /** Goes to a page start (a jump: ◀ comes back). */
+  const goTo = (at: Anchor) => {
+    flushTyping();
+    setHistory(h => [...h, anchor]);
+    setAnchor(at);
+    setShowPages(false);
+    setContents(false);
+  };
+
+  const goToEnd = () => {
+    if (map?.done) {
+      goTo(map.pages[map.pages.length - 1].anchor);
+    } else if (blocks.length > 0) {
+      goTo({block: blocks.length - 1, offset: 0});
+    }
+  };
+
+  /** A new text size re-flows the pages; the page starts again at the top of its first block. */
+  const setScale = (i: number) => {
+    const next = Math.max(0, Math.min(SCALES.length - 1, i));
+    if (next !== scaleAt) {
+      setScaleAt(next);
+      setAnchor(a => ({block: a.block, offset: 0}));
+      setHistory([]);
+    }
+  };
+
+  /** A page's heading (the last one at or before it) and opening text, for the Pages view. */
+  const pagePreview = (start: PageStart): {heading: string; text: string} => {
+    let heading = '';
+    for (let i = start.anchor.block; i >= 0; i--) {
+      const b = blocks[i];
+      if (b?.type === 'p' && b.kind !== 'body') {
+        heading = paragraphText(b).trim();
+        break;
+      }
+    }
+    let text = '';
+    for (let i = start.anchor.block; i < blocks.length && text.length < 140; i++) {
+      const b = blocks[i];
+      const t = b.type === 'p' ? paragraphText(b) : b.type === 'table' ? '[Table]' : `[${b.what}]`;
+      text += (text ? ' ' : '') + (i === start.anchor.block ? t.slice(start.char) : t);
+    }
+    return {heading, text: text.replace(/\s+/g, ' ').replace(/\ufffc/g, '').trim().slice(0, 140)};
+  };
+
+  // ---------------------------------------------------------------- folder for New
+
+  const shortPath = (path: string) => path.replace(`${STORAGE}/`, '').replace(STORAGE, 'Internal storage');
+
+  const browseTo = async (path: string) => {
+    setBrowse({path});
+    setMenu('folder');
+    const r = await Docx!.listFolders(path);
+    setBrowse({path, folders: r.folders, error: r.error});
+  };
+
+  /** Fallback when a folder can't be listed: the folder of any file picked in it. */
+  const folderFromFile = async () => {
+    try {
+      const picked = (await RattaFileSelector.selectFile({
+        selectType: 0,
+        maxNum: 1,
+        title: 'Choose any file in the folder you want',
+        rightButtonText: 'Choose',
+        needSelectFolder: browse?.path ?? newFolder,
+      })) as string[] | null | undefined;
+      const path = picked?.find(p => typeof p === 'string' && p.includes('/'));
+      if (path) {
+        setNewFolder(path.slice(0, path.lastIndexOf('/')));
+      }
+    } catch (error) {
+      setStatus(`No folder chosen: ${errorText(error)}`);
+    }
+    setBrowse(null);
+    setMenu('name');
+  };
 
   const close = () => PluginManager.closePluginView();
 
@@ -1276,6 +1386,42 @@ export function Reader(): React.JSX.Element {
             {item('Close', close)}
           </>
         );
+      case 'view':
+        return (
+          <>
+            {item('Larger text  A+', () => setScale(scaleAt + 1))}
+            {item('Smaller text  A−', () => setScale(scaleAt - 1))}
+            {item('Document size', () => setScale(SCALES.indexOf(1)))}
+            {item('Pages…', () => setShowPages(true))}
+            {item('Go to start', () => goTo({block: 0, offset: 0}))}
+            {item('Go to end', goToEnd)}
+          </>
+        );
+      case 'folder':
+        return (
+          <View>
+            <Text allowFontScaling={false} style={[styles.menuText, styles.folderPath]} numberOfLines={2}>
+              {shortPath(browse?.path ?? newFolder)}
+            </Text>
+            {browse && browse.path !== STORAGE
+              ? item('↑  Up one level', () => browseTo(browse.path.slice(0, browse.path.lastIndexOf('/')) || STORAGE))
+              : null}
+            {browse?.folders?.map(f => item(`▸  ${f}`, () => browseTo(`${browse.path}/${f}`)))}
+            {browse?.error ? (
+              <Text allowFontScaling={false} style={[styles.menuText, styles.menuMuted, styles.folderPath]}>
+                {'This folder can\'t be listed here.'}
+              </Text>
+            ) : null}
+            {browse?.error ? item('Choose a file in the folder you want…', folderFromFile, styles.menuAction) : null}
+            {item('Use this folder', () => {
+              if (browse) {
+                setNewFolder(browse.path);
+              }
+              setBrowse(null);
+              setMenu('name');
+            }, styles.menuAction)}
+          </View>
+        );
       case 'name':
         return (
           <View style={styles.nameForm}>
@@ -1292,6 +1438,16 @@ export function Reader(): React.JSX.Element {
               returnKeyType="done"
               onSubmitEditing={createNew}
             />
+            <View style={styles.row}>
+              <Text allowFontScaling={false} style={[styles.menuText, styles.flex]} numberOfLines={2}>
+                {`In ${shortPath(newFolder)}`}
+              </Text>
+              <Pressable onPress={once('change-folder', () => browseTo(newFolder))} style={styles.button}>
+                <Text allowFontScaling={false} style={styles.buttonText}>
+                  {'Change…'}
+                </Text>
+              </Pressable>
+            </View>
             <View style={styles.row}>
               {button('Create', createNew)}
               {button('Cancel', () => setNaming(null))}
@@ -1370,11 +1526,14 @@ export function Reader(): React.JSX.Element {
           {doc ? `${dirty || pending.length > 0 ? '• ' : ''}${doc.name.replace(/\.docx$/i, '')}` : 'DOCX'}
         </Text>
         {doc ? button(contents ? 'Back to page' : 'Contents', () => setContents(c => !c), headings.length === 0) : null}
+        {doc ? menuButton('View', 'view') : null}
         {doc ? button('◀', previous, history.length === 0) : null}
         {doc ? (
-          <Text allowFontScaling={false} style={styles.page}>
-            {`${history.length + 1} · ${progress}%`}
-          </Text>
+          <Pressable onPress={once('pages', () => setShowPages(p => !p))} style={styles.pageCount}>
+            <Text allowFontScaling={false} style={styles.page}>
+              {pageNumber !== null && map ? `${pageNumber} of ${map.pages.length}${map.done ? '' : '…'}` : `${progress}%`}
+            </Text>
+          </Pressable>
         ) : null}
         {doc ? button('▶', next, atEnd || brk.kind === 'pending') : null}
       </View>
@@ -1409,13 +1568,61 @@ export function Reader(): React.JSX.Element {
           </ScrollView>
         ) : null}
       </View>
-      <View style={styles.pageArea} onLayout={e => setPageH(Math.floor(e.nativeEvent.layout.height) - PAD * 2)}>
+      <View
+        style={styles.pageArea}
+        onLayout={e => {
+          setPageH(Math.floor(e.nativeEvent.layout.height) - PAD * 2);
+          setPageW(Math.floor(e.nativeEvent.layout.width) - PAD * 2);
+        }}>
+        {doc && countKey === mapKey && !typing ? (
+          <PageCounter
+            key={countKey}
+            blocks={blocks}
+            width={pageW}
+            pageH={pageH}
+            fonts={fonts}
+            scale={textScale}
+            onPages={(pages, isDone) => setPageMap({key: countKey, pages, done: isDone})}
+          />
+        ) : null}
         {!doc ? (
           <View style={styles.empty}>
             <Text allowFontScaling={false} style={styles.emptyText}>
               {'Open a Word document (.docx) or make a new one from the File menu.'}
             </Text>
           </View>
+        ) : showPages ? (
+          <ScrollView style={styles.contents} keyboardShouldPersistTaps="always">
+            <View style={styles.pagesHead}>
+              <Text allowFontScaling={false} style={[styles.panelTitle, styles.flex]}>
+                {map ? `${map.pages.length}${map.done ? '' : '+'} pages${map.done ? '' : ' (still counting)'}` : 'Counting pages…'}
+              </Text>
+              {button('Start', () => goTo({block: 0, offset: 0}))}
+              {button('End', goToEnd)}
+              {button('Back to page', () => setShowPages(false))}
+            </View>
+            <View style={styles.pagesGrid}>
+              {(map?.pages ?? []).map((pg, i) => {
+                const pv = pagePreview(pg);
+                const here = pageNumber === i + 1;
+                return (
+                  <Pressable key={i} onPress={once(`page:${i}`, () => goTo(pg.anchor))} style={[styles.pageCard, here ? styles.pageCardHere : null]}>
+                    <Text allowFontScaling={false} style={styles.pageCardNumber}>
+                      {`${i + 1}${here ? '  ·  you are here' : ''}`}
+                    </Text>
+                    {pv.heading ? (
+                      <Text allowFontScaling={false} style={styles.pageCardHeading} numberOfLines={1}>
+                        {pv.heading}
+                      </Text>
+                    ) : null}
+                    <Text allowFontScaling={false} style={styles.pageCardText} numberOfLines={4}>
+                      {pv.text}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          </ScrollView>
         ) : contents ? (
           <ScrollView style={styles.contents} keyboardShouldPersistTaps="always">
             {headings.map(h => (
@@ -1435,6 +1642,7 @@ export function Reader(): React.JSX.Element {
                   block={b}
                   selection={selectedIn(b)}
                   fonts={fonts}
+                  scale={textScale}
                   onFrame={onFrame(i)}
                   onLines={onLines(i)}
                   onTextFrame={onTextFrame(i)}
@@ -1522,7 +1730,17 @@ const styles = StyleSheet.create({
   small: {paddingVertical: 4, paddingHorizontal: 10},
   buttonOpen: {backgroundColor: '#000'},
   buttonOpenText: {color: '#fff'},
-  row: {flexDirection: 'row', marginTop: 10},
+  row: {flexDirection: 'row', alignItems: 'center', marginTop: 10},
+  flex: {flex: 1},
+  folderPath: {paddingHorizontal: 16, paddingVertical: 10, fontWeight: '700'},
+  pageCount: {paddingHorizontal: 4},
+  pagesHead: {flexDirection: 'row', alignItems: 'center', paddingVertical: 8, borderBottomWidth: 1, borderColor: '#000'},
+  pagesGrid: {flexDirection: 'row', flexWrap: 'wrap', paddingTop: 8},
+  pageCard: {width: 220, height: 170, borderWidth: 1, borderColor: '#000', padding: 10, marginRight: 12, marginBottom: 12},
+  pageCardHere: {borderWidth: 3},
+  pageCardNumber: {color: '#000', fontSize: 18, fontWeight: '700'},
+  pageCardHeading: {color: '#000', fontSize: 15, fontWeight: '700', marginTop: 4},
+  pageCardText: {color: '#333', fontSize: 14, marginTop: 4},
   menu: {position: 'absolute', top: 0, width: 340, backgroundColor: '#fff', borderWidth: 2, borderColor: '#000'},
   menuItem: {paddingVertical: 14, paddingHorizontal: 16, borderBottomWidth: 1, borderColor: '#bbb'},
   menuText: {color: '#000', fontSize: 19},

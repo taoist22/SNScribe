@@ -27,6 +27,8 @@ type Props = {
   onTextFrame?: (e: LayoutChangeEvent) => void;
   /** Font families loaded on this device; other fonts show in the default font. */
   fonts?: Set<string>;
+  /** Text size factor chosen by the reader (A− / A+); 1 = the document's sizes. */
+  scale?: number;
 };
 
 const SYMBOL: Record<string, string> = {image: '▣', note: '*', object: '◇'};
@@ -52,16 +54,17 @@ function sizeFor(p: ParagraphBlock): number {
 /** Word sizes (half-points) on screen: 11 pt body text ≈ 20 dp, as before sizes were read. */
 const dpFor = (halfPoints: number) => Math.max(10, Math.min(64, Math.round(halfPoints * 0.91)));
 
-function ParagraphView({p, selection, onFrame, onLines, textRef, onTextFrame, fonts}: Omit<Props, 'block'> & {p: ParagraphBlock}) {
-  // The document's own sizes when it has them; the line height follows the largest.
-  const base = sizeFor(p);
-  const runSize = (r: Run) => (r.sz ? dpFor(r.sz) : base);
+function ParagraphView({p, selection, onFrame, onLines, textRef, onTextFrame, fonts, scale = 1}: Omit<Props, 'block'> & {p: ParagraphBlock}) {
+  // The document's own sizes when it has them, times the reader's text size; the line
+  // height follows the largest.
+  const base = Math.round(sizeFor(p) * scale);
+  const runSize = (r: Run) => (r.sz ? Math.round(dpFor(r.sz) * scale) : base);
   const size = p.runs.length ? Math.max(...p.runs.map(runSize)) : base;
   const lineHeight = Math.round(size * 1.45);
   const heading = p.kind !== 'body';
   // Word allows negative indents (text pulled into the page margin); the screen has no
   // margin to pull into, so they start at the left edge instead of off it.
-  const indent = Math.max(0, Math.min(160, Math.round(p.indent / 20)));
+  const indent = Math.max(0, Math.min(160, Math.round((p.indent / 20) * scale)));
   const text = (
     <Text
       ref={textRef}
@@ -76,7 +79,7 @@ function ParagraphView({p, selection, onFrame, onLines, textRef, onTextFrame, fo
         p.runs.length === 0 ? {minHeight: lineHeight} : null,
       ]}
       onTextLayout={(e: NativeSyntheticEvent<TextLayoutEventData>) =>
-        onLines?.(e.nativeEvent.lines.map(l => ({y: l.y, height: l.height})))
+        onLines?.(e.nativeEvent.lines.map(l => ({y: l.y, height: l.height, len: l.text.length})))
       }>
       {markSelection(p.runs, selection ?? null).map((r, i) => (
         <Text
@@ -97,7 +100,7 @@ function ParagraphView({p, selection, onFrame, onLines, textRef, onTextFrame, fo
   );
   const spacing = {
     marginTop: heading ? Math.round(size * 0.6) : 0,
-    marginBottom: heading ? Math.round(size * 0.3) : 12,
+    marginBottom: heading ? Math.round(size * 0.3) : Math.round(12 * scale),
   };
   if (p.list === undefined) {
     return (

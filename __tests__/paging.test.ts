@@ -51,3 +51,43 @@ describe('windowEnd', () => {
     expect(windowEnd([1, 1, 1], 1, 100, 1)).toBe(2);
   });
 });
+
+import {breaksInWindow, pageIndexOf} from '../src/domain/paging';
+
+describe('breaksInWindow', () => {
+  const lines = (n: number, h = 30, len = 40) => Array.from({length: n}, (_, i) => ({y: i * h, height: h, len}));
+
+  it('finds every page start in a window, with the character each begins at', () => {
+    // 10 lines of 30 = 300 tall; pages of 100 hold 3 lines each.
+    const boxes = [{top: 0, height: 300, lines: lines(10)}];
+    const r = breaksInWindow(boxes, {block: 4, offset: 0}, 100, true)!;
+    expect(r.pages.map(p => p.anchor)).toEqual([
+      {block: 4, offset: 90},
+      {block: 4, offset: 180},
+      {block: 4, offset: 270},
+    ]);
+    expect(r.pages.map(p => p.char)).toEqual([120, 240, 360]);
+    expect(r.next).toBeNull();
+  });
+
+  it('asks for a new window at the page that runs past the end', () => {
+    const boxes = [{top: 0, height: 60}, {top: 70, height: 60}];
+    const r = breaksInWindow(boxes, {block: 0, offset: 0}, 100, false)!;
+    expect(r.pages).toEqual([{anchor: {block: 1, offset: 0}, char: 0}]);
+    expect(r.next).toEqual({block: 1, offset: 0});
+  });
+
+  it('waits until everything is measured', () => {
+    expect(breaksInWindow([undefined], {block: 0, offset: 0}, 100, true)).toBeNull();
+  });
+});
+
+describe('pageIndexOf', () => {
+  const pages = [0, 5, 9].map(block => ({anchor: {block, offset: 0}, char: 0}));
+  it('finds the page a position is on', () => {
+    expect(pageIndexOf(pages, {block: 0, offset: 0})).toBe(0);
+    expect(pageIndexOf(pages, {block: 7, offset: 40})).toBe(1);
+    expect(pageIndexOf(pages, {block: 9, offset: 0})).toBe(2);
+    expect(pageIndexOf(pages, {block: 20, offset: 0})).toBe(2);
+  });
+});

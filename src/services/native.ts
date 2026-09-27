@@ -12,7 +12,9 @@ type DocxModule = {
   delay(ms: number): Promise<void>;
   open(path: string): Promise<DocxDocument>;
   /** A blank document named `name` in the Document folder: its path, and the pristine copy edits apply to. */
-  create(name: string): Promise<{path: string; source: string}>;
+  create(name: string, folder: string): Promise<{path: string; source: string}>;
+  /** Folders directly inside `path`, or {error} when it can't be listed. */
+  listFolders(path: string): Promise<{folders?: string[]; error?: string}>;
   /** Loads what it can find of these families (plus fonts added before); resolves the families available. */
   fonts(families: string[]): Promise<string[]>;
   /** A font file the user picked: its family, loaded and remembered. */
