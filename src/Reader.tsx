@@ -57,6 +57,8 @@ import {PAPER_FORMATS, presetOps} from './domain/presets';
 import {docKey, parseRecovery, recoveryFor, touchRecent, type RecentDoc, type RecoveryRecord} from './domain/recovery';
 import {DocxInk, InkSurfaceView, activateInk, deactivateInk, isInkAvailable} from './services/ink';
 import {shownFont, withStandIns} from './domain/fonts';
+import {CITE_STYLES, htmlToPieces, inText, piecesText, referenceOps, type CiteStyle, type Source} from './domain/citations';
+import {searchZotero, testZotero, type ZoteroAccount} from './services/zotero';
 import {anchorAfter, findBreak, pageIndexOf, windowEnd, type Anchor, type BlockBox, type Break, type LineBox, type PageStart} from './domain/paging';
 import {countWords, fontsUsed, outline, paragraphText, wordCount, type DocxDocument, type ParagraphBlock, type Run} from './model/docx';
 import {ensureFileReadPermission, ensureFileWritePermission} from './pluginPermissions';
@@ -118,7 +120,7 @@ type Typing = {mode: 'insert'; at: Pos} | {mode: 'replace'; range: Range};
 type HfLine = {text: string; align: 'left' | 'center' | 'right'; page: boolean};
 
 type Menu =
-  | 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count' | 'page' | 'preset' | 'header' | 'link' | 'thread' | 'comment' | 'note' | 'hl' | 'find'
+  | 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count' | 'page' | 'preset' | 'header' | 'link' | 'thread' | 'comment' | 'note' | 'hl' | 'find' | 'cite'
   | 'recent' | 'versions' | 'recover';
 
 /** Drop-down menu width; menus are kept inside the screen. */
@@ -166,6 +168,20 @@ export function Reader(): React.JSX.Element {
   const [inkOk, setInkOk] = useState(false);
   /** The name comments are signed with (remembered). */
   const [author, setAuthor] = useState('');
+  /** Zotero: the account (stored privately), the citation style, and the Cite panel's state. */
+  const [zotero, setZotero] = useState<ZoteroAccount | null>(null);
+  const [citeStyle, setCiteStyle] = useState<CiteStyle>('apa');
+  const [cite, setCite] = useState<{
+    setup: boolean;
+    userId: string;
+    apiKey: string;
+    query: string;
+    results: Source[] | null;
+    chosen: Source | null;
+    narrative: boolean;
+    page: string;
+    busy: boolean;
+  }>({setup: false, userId: '', apiKey: '', query: '', results: null, chosen: null, narrative: false, page: '', busy: false});
   /** Where New puts the document, and the folder being browsed to choose it. */
   const [newFolder, setNewFolder] = useState(DOCUMENTS);
   const [browse, setBrowse] = useState<{path: string; folders?: string[]; error?: string} | null>(null);
@@ -225,9 +241,20 @@ export function Reader(): React.JSX.Element {
       const refused = await log(`DOCX opened: NATIVE_BUILD=${nativeBuild()} read=${canRead} write=${canWrite} log=${name}`);
       // Remembered between sessions: text size, New's folder, recent documents.
       try {
-        const saved = JSON.parse((await Docx?.load('settings')) ?? '{}') as {scaleAt?: number; newFolder?: string; lastName?: string; author?: string; marginOpen?: boolean; inkColor?: string};
+        const saved = JSON.parse((await Docx?.load('settings')) ?? '{}') as {scaleAt?: number; newFolder?: string; lastName?: string; author?: string; marginOpen?: boolean; inkColor?: string; citeStyle?: string};
         if (typeof saved.lastName === 'string') {
           setLastName(saved.lastName);
+        }
+        try {
+          const z = JSON.parse((await Docx?.load('zotero')) ?? 'null') as ZoteroAccount | null;
+          if (z?.userId && z.apiKey) {
+            setZotero(z);
+          }
+        } catch {
+          // No account yet.
+        }
+        if (saved.citeStyle === 'apa' || saved.citeStyle === 'mla' || saved.citeStyle === 'chicago') {
+          setCiteStyle(saved.citeStyle);
         }
         if (typeof saved.author === 'string') {
           setAuthor(saved.author);
@@ -1078,6 +1105,84 @@ export function Reader(): React.JSX.Element {
     }
     commit([{op: 'inkDelete', para: b.index, id}], 'delete note');
     setStatus('Note deleted. Undo brings it back.');
+  };
+
+  // ---------------------------------------------------------------- citations (Zotero)
+
+  const openCite = () => {
+    // Where the citation goes: the caret stays after anything just typed.
+    const at = caretAt;
+    flushTyping();
+    setCaret(at);
+    setCite(c => ({...c, setup: !zotero, userId: zotero?.userId ?? '', apiKey: '', results: null, chosen: null, page: '', busy: false}));
+    setMenu('cite');
+  };
+
+  const saveZotero = async () => {
+    const account = {userId: cite.userId.trim(), apiKey: cite.apiKey.trim() || zotero?.apiKey || ''};
+    if (!/^\d+$/.test(account.userId) || !account.apiKey) {
+      setStatus('Enter your Zotero user ID (a number) and API key.');
+      return;
+    }
+    setCite(c => ({...c, busy: true}));
+    try {
+      await testZotero(account);
+      await Docx?.store('zotero', JSON.stringify(account));
+      setZotero(account);
+      setCite(c => ({...c, setup: false, apiKey: '', busy: false}));
+      setStatus('Connected to your Zotero library.');
+    } catch (error) {
+      setCite(c => ({...c, busy: false}));
+      setStatus(errorText(error));
+    }
+  };
+
+  const searchCite = async (style = citeStyle) => {
+    if (!zotero || !cite.query.trim()) {
+      return;
+    }
+    setCite(c => ({...c, busy: true, chosen: null}));
+    try {
+      const results = await searchZotero(zotero, cite.query, CITE_STYLES.find(x => x.id === style)!.csl);
+      setCite(c => ({...c, results, busy: false}));
+      setStatus(results.length ? '' : `Nothing in your library matches “${cite.query.trim()}”.`);
+    } catch (error) {
+      setCite(c => ({...c, busy: false}));
+      setStatus(errorText(error));
+    }
+  };
+
+  /** Insert: the in-text citation at the caret, and the entry in the reference list — one undo step. */
+  const insertCitation = () => {
+    const src = cite.chosen;
+    const at = caretAt;
+    if (!src) {
+      return;
+    }
+    if (!at) {
+      setStatus('Tap where the citation goes first.');
+      return;
+    }
+    const p = paragraph(at.para);
+    const problem = p ? textEditProblem(p, at.offset, at.offset) : 'Paragraph not found.';
+    if (problem) {
+      setStatus(problem);
+      return;
+    }
+    const text = textOf(at.para);
+    let cited = inText(src, citeStyle, cite.narrative, cite.page);
+    if (at.offset > 0 && !/[\s(\[]/.test(text[at.offset - 1])) {
+      cited = ` ${cited}`;
+    }
+    if (at.offset < text.length && /[A-Za-z0-9\u00C0-\u024F]/.test(text[at.offset])) {
+      cited = `${cited} `;
+    }
+    const insert: Op = {op: 'text', para: at.para, start: at.offset, end: at.offset, text: cited};
+    const {ops: refOps, added} = referenceOps(applyOps(blocks, [insert]), htmlToPieces(src.bibHtml), citeStyle);
+    commit([insert, ...refOps], 'citation');
+    setCaret({para: at.para, offset: at.offset + cited.length});
+    setMenu(null);
+    setStatus(added ? `Cited, and added to the reference list.` : 'Cited (already in the reference list).');
   };
 
   // ---------------------------------------------------------------- comments
@@ -2197,8 +2302,8 @@ export function Reader(): React.JSX.Element {
 
   // Settings are remembered between sessions.
   useEffect(() => {
-    Docx?.store('settings', JSON.stringify({scaleAt, newFolder, lastName, author, marginOpen: showMargin, inkColor}));
-  }, [scaleAt, newFolder, lastName, author, showMargin, inkColor]);
+    Docx?.store('settings', JSON.stringify({scaleAt, newFolder, lastName, author, marginOpen: showMargin, inkColor, citeStyle}));
+  }, [scaleAt, newFolder, lastName, author, showMargin, inkColor, citeStyle]);
 
   // The page follows the caret when it moves (typing, arrows) — not when the page is turned.
   const followCaret = useRef(false);
@@ -2819,6 +2924,132 @@ export function Reader(): React.JSX.Element {
           </View>
         );
       }
+      case 'cite': {
+        const chip = (label: string, on: boolean, action: () => void) => (
+          <Pressable key={label} onPress={once(`chip:${label}`, action)} style={[styles.chip, on ? styles.chipOn : null]}>
+            <Text allowFontScaling={false} style={[styles.chipText, on ? styles.chipTextOn : null]}>
+              {label}
+            </Text>
+          </Pressable>
+        );
+        if (cite.setup) {
+          return (
+            <View style={styles.nameForm}>
+              <Text allowFontScaling={false} style={styles.paraLabel}>
+                {'Connect your Zotero library'}
+              </Text>
+              <Text allowFontScaling={false} style={styles.presetSummary}>
+                {'On zotero.org: Settings → Security → Create new private key. Tick only “Allow library access” (read-only). The page shows your user ID (a number) above the key.'}
+              </Text>
+              <Text allowFontScaling={false} style={[styles.menuText, styles.findLabel]}>
+                {'User ID'}
+              </Text>
+              <TextInput style={styles.nameInput} value={cite.userId} onChangeText={userId => setCite(c => ({...c, userId}))} keyboardType="number-pad" allowFontScaling={false} />
+              <Text allowFontScaling={false} style={[styles.menuText, styles.findLabel]}>
+                {zotero ? 'API key (leave empty to keep the saved one)' : 'API key'}
+              </Text>
+              <TextInput
+                style={styles.nameInput}
+                value={cite.apiKey}
+                onChangeText={apiKey => setCite(c => ({...c, apiKey}))}
+                autoCapitalize="none"
+                autoCorrect={false}
+                secureTextEntry
+                allowFontScaling={false}
+              />
+              <Text allowFontScaling={false} style={styles.presetSummary}>
+                {'Kept only on this Supernote, in the plugin’s private storage.'}
+              </Text>
+              <View style={styles.row}>
+                {button(cite.busy ? 'Checking…' : 'Save', saveZotero, cite.busy)}
+                {button('Cancel', () => (zotero ? setCite(c => ({...c, setup: false})) : setMenu(null)))}
+              </View>
+            </View>
+          );
+        }
+        const chosen = cite.chosen;
+        return (
+          <View style={styles.nameForm}>
+            <View style={styles.chips}>
+              {CITE_STYLES.map(st =>
+                chip(st.name, citeStyle === st.id, () => {
+                  setCiteStyle(st.id);
+                  setCite(c => ({...c, chosen: null}));
+                  if (cite.results) {
+                    searchCite(st.id);
+                  }
+                }),
+              )}
+            </View>
+            <View style={styles.row}>
+              <TextInput
+                style={styles.nameInput}
+                value={cite.query}
+                onChangeText={query => setCite(c => ({...c, query}))}
+                placeholder="Author, title or year"
+                autoCorrect={false}
+                allowFontScaling={false}
+                returnKeyType="search"
+                onSubmitEditing={() => searchCite()}
+              />
+              {button(cite.busy ? '…' : 'Search', () => searchCite(), cite.busy || !cite.query.trim())}
+            </View>
+            {!chosen
+              ? (cite.results ?? []).map(r => (
+                  <Pressable key={r.key} onPress={once(`src:${r.key}`, () => setCite(c => ({...c, chosen: r})))} style={styles.menuItem}>
+                    <Text allowFontScaling={false} style={styles.cardHead} numberOfLines={1}>
+                      {`${r.authors || 'No author'}${r.year ? ` (${r.year})` : ''}`}
+                    </Text>
+                    <Text allowFontScaling={false} style={styles.presetSummary} numberOfLines={2}>
+                      {r.title}
+                    </Text>
+                  </Pressable>
+                ))
+              : null}
+            {chosen ? (
+              <View>
+                <Text allowFontScaling={false} style={[styles.cardHead, styles.findLabel]} numberOfLines={2}>
+                  {chosen.title}
+                </Text>
+                <View style={[styles.chips, styles.findLabel]}>
+                  {chip('Parenthetical', !cite.narrative, () => setCite(c => ({...c, narrative: false})))}
+                  {chip('Narrative', cite.narrative, () => setCite(c => ({...c, narrative: true})))}
+                </View>
+                <View style={[styles.row, styles.presetName]}>
+                  <Text allowFontScaling={false} style={styles.menuText}>
+                    {'Page (optional)'}
+                  </Text>
+                  <TextInput style={styles.nameInput} value={cite.page} onChangeText={page => setCite(c => ({...c, page}))} allowFontScaling={false} />
+                </View>
+                <Text allowFontScaling={false} style={styles.paraLabel}>
+                  {'In the text'}
+                </Text>
+                <Text allowFontScaling={false} style={styles.menuText}>
+                  {inText(chosen, citeStyle, cite.narrative, cite.page)}
+                </Text>
+                <Text allowFontScaling={false} style={styles.paraLabel}>
+                  {`In ${CITE_STYLES.find(x => x.id === citeStyle)!.heading}`}
+                </Text>
+                <Text allowFontScaling={false} style={styles.presetSummary}>
+                  {htmlToPieces(chosen.bibHtml).map((pc, i) => (
+                    <Text key={i} style={pc.i ? styles.italicText : null}>
+                      {pc.t}
+                    </Text>
+                  ))}
+                </Text>
+                <View style={styles.row}>
+                  {button('Insert', insertCitation)}
+                  {button('Back', () => setCite(c => ({...c, chosen: null})))}
+                </View>
+              </View>
+            ) : null}
+            <View style={styles.row}>
+              {button('Close', () => setMenu(null))}
+              {button('Zotero settings', () => setCite(c => ({...c, setup: true, userId: zotero?.userId ?? ''})))}
+            </View>
+          </View>
+        );
+      }
       case 'comment':
         return commentForm ? (
           <View style={styles.nameForm}>
@@ -3035,6 +3266,7 @@ export function Reader(): React.JSX.Element {
             {item('Delete', deleteFromMenu)}
             {item('Find & replace…', () => setMenu('find'))}
             {item('Link…', startLink)}
+            {item('Cite from Zotero…', openCite)}
             {item('Comment…', startComment)}
             {inkOk ? item('Handwritten note…', startNote) : null}
             {hasChanges ? item('Accept all changes', () => {
@@ -3484,6 +3716,7 @@ const styles = StyleSheet.create({
   menuQuote: {fontStyle: 'italic', paddingLeft: 32},
   menuDivider: {height: 3, backgroundColor: '#000', marginVertical: 4},
   findLabel: {marginTop: 10},
+  italicText: {fontStyle: 'italic'},
   findCase: {alignSelf: 'flex-start', marginTop: 10},
   menuTitle: {fontSize: 26},
   menuMuted: {color: '#555'},
