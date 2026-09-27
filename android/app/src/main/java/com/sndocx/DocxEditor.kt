@@ -513,6 +513,9 @@ object DocxEditor {
                 pPr = document.createElementNS(W, "w:pPr")
                 p.insertBefore(pPr, p.firstChild)
             }
+            // A list item takes its indentation from the list: the paragraph's own (a copied
+            // first-line indent, say) would override the list's and push the text away.
+            if (numId > 0) child(pPr!!, "ind")?.let { pPr!!.removeChild(it) }
             val numPr = document.createElementNS(W, "w:numPr")
             val ilvl = document.createElementNS(W, "w:ilvl")
             ilvl.setAttributeNS(W, "w:val", "0")

@@ -98,5 +98,7 @@ describe('forced page breaks', () => {
     expect(findBreak(boxes, 0, 500)).toEqual({kind: 'at', index: 1, top: 60});
     // …but not when that block is already at the top of the page.
     expect(findBreak(boxes, 60, 500)).toEqual({kind: 'after', top: 100});
+    // Nor when only its own marker is above it (the paragraph opens the page).
+    expect(findBreak([{top: 28, height: 40, forced: true}], 0, 500)).toEqual({kind: 'after', top: 68});
   });
 });

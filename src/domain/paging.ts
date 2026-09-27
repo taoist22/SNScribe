@@ -25,14 +25,20 @@ export type Break =
 export function findBreak(boxes: Array<BlockBox | undefined>, pageTop: number, pageHeight: number): Break {
   const bottom = pageTop + pageHeight;
   let lastBottom = pageTop;
+  let contentAbove = false;
   for (let i = 0; i < boxes.length; i++) {
     const box = boxes[i];
     if (!box) {
       return {kind: 'pending'};
     }
-    // A page break before this block: the page ends here, whatever room is left.
-    if (box.forced && box.top > pageTop) {
+    // A page break before this block ends the page here — but only when something is
+    // already on this page; at the top of a page (below its own marker) it is where the
+    // page begins.
+    if (box.forced && contentAbove && box.top > pageTop) {
       return {kind: 'at', index: i, top: box.top};
+    }
+    if (box.top + box.height > pageTop) {
+      contentAbove = true;
     }
     if (box.top + box.height <= bottom) {
       lastBottom = Math.max(lastBottom, box.top + box.height);

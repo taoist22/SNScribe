@@ -32,7 +32,8 @@ type Props = {
 };
 
 const SYMBOL: Record<string, string> = {image: '▣', note: '*', object: '◇'};
-const LIST_LABEL_W = 40;
+/** The list number's box: the number sits in the list's hanging space, as in Word. */
+const LIST_LABEL_W = 28;
 
 function runText(r: Run): string {
   return r.obj ? SYMBOL[r.obj] ?? '◇' : r.t.split(OBJECT).join('◇');

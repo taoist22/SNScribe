@@ -241,7 +241,8 @@ function listItem(p: ParagraphBlock, op: Extract<Op, {op: 'list'}>): ParagraphBl
     return {...p, num: undefined, list: undefined, indent: p.num ? 0 : p.indent};
   }
   const id = /^\d+$/.test(op.listId) ? Number(op.listId) : op.listId;
-  return {...p, num: {id, lvl: 0}, list: p.list ?? '', indent: Math.max(p.indent, 720)};
+  // The paragraph's own indents go: a list item is indented by its list (as the writer does).
+  return {...p, num: {id, lvl: 0}, list: p.list ?? '', indent: 720, first: undefined};
 }
 
 /**

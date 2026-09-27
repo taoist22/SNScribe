@@ -210,6 +210,15 @@ class DocxEditorTest {
     }
 
     @Test
+    fun aListItemDropsTheParagraphsOwnIndent() {
+        val src = File(fixtures, "probe-fixture.docx")
+        val (dest, _) = save(src, listOf(Op.ParaProps(1, first = 720), Op.ListItem(1, "number", "n1")))
+        val p = paragraphs(dest)[1]
+        assertEquals("1.", p.listLabel)
+        assertEquals(null, p.para.first)
+    }
+
+    @Test
     fun addsListDefinitionsToADocumentWithNone() {
         // The fixture without its numbering part, relationship and content type.
         val bare = File(work, "no-lists.docx")

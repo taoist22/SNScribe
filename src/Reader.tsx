@@ -38,7 +38,7 @@ import {
 import {listKind, recount} from './domain/lists';
 import {PAPER_FORMATS, presetOps} from './domain/presets';
 import {anchorAfter, findBreak, pageIndexOf, windowEnd, type Anchor, type BlockBox, type Break, type LineBox, type PageStart} from './domain/paging';
-import {countWords, fontsUsed, outline, paragraphText, wordCount, type DocxDocument, type ParagraphBlock} from './model/docx';
+import {countWords, fontsUsed, outline, paragraphText, wordCount, type DocxDocument, type ParagraphBlock, type Run} from './model/docx';
 import {ensureFileReadPermission, ensureFileWritePermission} from './pluginPermissions';
 import {Docx, DocxKeys, DocxText, errorText, log, nativeBuild, type KeyPress} from './services/native';
 
@@ -390,20 +390,43 @@ export function Reader(): React.JSX.Element {
     }
   };
 
+  /**
+   * The run the Font and Size menus show as current: the selection's first character, or
+   * the character before the caret (what typed text would take), else the paragraph's first.
+   */
+  const currentRun = (): Run | undefined => {
+    const sel = !typing && selection ? selection : null;
+    const at = sel ? (comparePos(sel.from, sel.to) <= 0 ? sel.from : sel.to) : caretAt;
+    const p = at ? paragraph(at.para) : undefined;
+    if (!p || !at) {
+      return undefined;
+    }
+    let offset = 0;
+    for (const r of p.runs) {
+      const end = offset + r.t.length;
+      if (sel ? at.offset >= offset && at.offset < end : at.offset > offset && at.offset <= end) {
+        return r;
+      }
+      offset = end;
+    }
+    return p.runs[0];
+  };
+
   const fontChoices = useMemo(() => [...new Set([...fonts, ...fontsUsed(blocks)])].sort((a, b) => a.localeCompare(b)), [fonts, blocks]);
   const SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48, 72];
 
   // The page map belongs to one layout: the document with its edits, the text size, and
   // the page's size. It is recounted a moment after that settles, and not while typing.
-  const mapKey = `${doc?.path}:${edits.cursor}:${textScale}:${pageW}x${pageH}:${fonts.size}`;
+  // Includes what is being typed: the count follows typing once it pauses.
+  const mapKey = `${doc?.path}:${edits.cursor}:${input.length}:${textScale}:${pageW}x${pageH}:${fonts.size}`;
   const [countKey, setCountKey] = useState('');
   useEffect(() => {
-    if (!doc || typing || pageH <= 0 || pageW <= 0) {
+    if (!doc || pageH <= 0 || pageW <= 0) {
       return;
     }
     const t = setTimeout(() => setCountKey(mapKey), 1500);
     return () => clearTimeout(t);
-  }, [mapKey, doc, typing, pageH, pageW]);
+  }, [mapKey, doc, pageH, pageW]);
   const map = pageMap?.key === mapKey ? pageMap : null;
   const pageNumber = map ? pageIndexOf(map.pages, anchor) + 1 : null;
 
@@ -1661,6 +1684,7 @@ export function Reader(): React.JSX.Element {
             </Text>
             <View style={styles.chips}>
               {[
+                ['0.5″', 720],
                 ['0.75″', 1080],
                 ['1″', 1440],
                 ['1.25″', 1800],
@@ -1836,12 +1860,16 @@ export function Reader(): React.JSX.Element {
             {item('Not a list', () => listTool('none'))}
           </>
         );
-      case 'font':
+      case 'font': {
+        const cur = currentRun()?.f;
         return (
           <>
+            <Text allowFontScaling={false} style={[styles.menuText, styles.folderPath]}>
+              {`Now: ${cur ?? 'the document’s default font'}`}
+            </Text>
             {fontChoices.map(f =>
               item(
-                fonts.has(f) ? f : `${f} (not on this Supernote)`,
+                `${f === cur ? '✓ ' : ''}${f}${fonts.has(f) ? '' : ' (not on this Supernote)'}`,
                 () => applyRunStyle({font: f}, `font ${f}`),
                 fonts.has(f) ? {fontFamily: f} : styles.menuMuted,
               ),
@@ -1849,8 +1877,18 @@ export function Reader(): React.JSX.Element {
             {item('Add font files…', addFont, styles.menuAction)}
           </>
         );
-      case 'size':
-        return <>{SIZES.map(pt => item(`${pt}`, () => applyRunStyle({size: pt * 2}, `size ${pt}`)))}</>;
+      }
+      case 'size': {
+        const sz = currentRun()?.sz;
+        return (
+          <>
+            <Text allowFontScaling={false} style={[styles.menuText, styles.folderPath]}>
+              {`Now: ${sz ? `${sz / 2} pt` : 'the document’s default size'}`}
+            </Text>
+            {SIZES.map(pt => item(`${sz === pt * 2 ? '✓ ' : ''}${pt}`, () => applyRunStyle({size: pt * 2}, `size ${pt}`)))}
+          </>
+        );
+      }
       default:
         return null;
     }
@@ -1930,7 +1968,7 @@ export function Reader(): React.JSX.Element {
           setPageH(Math.floor(e.nativeEvent.layout.height) - PAD * 2);
           setPageW(Math.floor(e.nativeEvent.layout.width) - PAD * 2);
         }}>
-        {doc && countKey === mapKey && !typing ? (
+        {doc && countKey === mapKey ? (
           <PageCounter
             key={countKey}
             blocks={blocks}
