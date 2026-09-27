@@ -43,6 +43,8 @@ type DocxModule = {
     /** Every paragraph's text as the screen shows it after the edits; the save is refused on any mismatch. */
     expected: string[],
   ): Promise<{dest: string; name: string; ms: number; changed: string[]}>;
+  /** An EPUB's own title, creators, date and publisher. */
+  epubInfo(path: string): Promise<{title: string; creators: string[]; date: string; publisher: string}>;
   /** A small text file's contents (at most 16 KB). */
   readText(path: string): Promise<string>;
   /** Paragraphs `paras` (empty = all) as they will be once `ops` are applied to `src`; nothing is written. */

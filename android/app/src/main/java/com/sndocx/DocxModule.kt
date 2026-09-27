@@ -446,6 +446,24 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
         }
     }
 
+    /** An EPUB's title, creators, date and publisher, for citing it. */
+    @ReactMethod
+    fun epubInfo(path: String, promise: Promise) {
+        worker.execute {
+            try {
+                val info = DocxReader.epubInfo(File(path))
+                promise.resolve(Arguments.createMap().apply {
+                    putString("title", info.title)
+                    putArray("creators", Arguments.fromList(info.creators))
+                    putString("date", info.date)
+                    putString("publisher", info.publisher)
+                })
+            } catch (t: Throwable) {
+                promise.reject("DOCX_EPUB", t.message ?: t.toString(), t)
+            }
+        }
+    }
+
     /** A small text file's contents (at most 16 KB): a key or setting the user keeps in a .txt. */
     @ReactMethod
     fun readText(path: String, promise: Promise) {

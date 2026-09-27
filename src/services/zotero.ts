@@ -86,6 +86,22 @@ export async function testZotero(account: ZoteroAccount): Promise<void> {
   await get(account, '/items/top?limit=1&format=json');
 }
 
+/** One item of the library by its key, formatted in `csl`. */
+export async function zoteroItem(account: ZoteroAccount, key: string, csl: string): Promise<Source> {
+  const it = (await get(account, `/items/${encodeURIComponent(key)}?format=json&include=data,bib,citation&style=${encodeURIComponent(csl)}`)) as Item;
+  if (!it?.bib || !it.citation) {
+    throw new Error('Zotero sent no citation for that item.');
+  }
+  return {
+    key: it.key,
+    title: it.data?.title ?? '',
+    authors: it.meta?.creatorSummary ?? '',
+    year: (it.meta?.parsedDate ?? it.data?.date ?? '').slice(0, 4),
+    citation: it.citation,
+    bibHtml: it.bib,
+  };
+}
+
 /** Top-level items matching `query` (title, creators, year), formatted in `csl`. */
 export async function searchZotero(account: ZoteroAccount, query: string, csl: string): Promise<Source[]> {
   const q = encodeURIComponent(query.trim());

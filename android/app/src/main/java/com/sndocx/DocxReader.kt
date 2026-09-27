@@ -214,6 +214,32 @@ object DocxReader {
         return out
     }
 
+    data class EpubInfo(val title: String, val creators: List<String>, val date: String, val publisher: String)
+
+    /**
+     * An EPUB's own metadata (its OPF package file, found through META-INF/container.xml):
+     * title, creators, date and publisher — enough to cite it as a book.
+     */
+    fun epubInfo(file: File): EpubInfo {
+        ZipFile(file).use { zip ->
+            val container = zip.getEntry("META-INF/container.xml")?.let { parse(readEntry(zip, it)) } ?: error("not an EPUB (no container.xml)")
+            val rootfiles = container.getElementsByTagNameNS("*", "rootfile")
+            val opfPath = (0 until rootfiles.length).map { rootfiles.item(it) as Element }
+                .firstOrNull { it.getAttribute("media-type").contains("oebps-package") || it.getAttribute("full-path").endsWith(".opf") }
+                ?.getAttribute("full-path") ?: error("no package file in container.xml")
+            checkEntryName(opfPath)
+            val opf = zip.getEntry(opfPath)?.let { parse(readEntry(zip, it)) } ?: error("missing $opfPath")
+            val dc = "http://purl.org/dc/elements/1.1/"
+            fun all(tag: String) = opf.getElementsByTagNameNS(dc, tag).let { l -> (0 until l.length).map { l.item(it).textContent.trim() }.filter { it.isNotEmpty() } }
+            return EpubInfo(
+                title = all("title").firstOrNull().orEmpty(),
+                creators = all("creator"),
+                date = all("date").firstOrNull().orEmpty(),
+                publisher = all("publisher").firstOrNull().orEmpty(),
+            )
+        }
+    }
+
     /** Copies each handwritten note's picture out of [file] into [dir]; note id → file path. */
     fun extractInk(file: File, dir: File): Map<String, String> {
         ZipFile(file).use { zip ->

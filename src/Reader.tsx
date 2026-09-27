@@ -58,7 +58,10 @@ import {docKey, parseRecovery, recoveryFor, touchRecent, type RecentDoc, type Re
 import {DocxInk, InkSurfaceView, activateInk, deactivateInk, isInkAvailable} from './services/ink';
 import {shownFont, withStandIns} from './domain/fonts';
 import {CITE_STYLES, htmlToPieces, inText, piecesText, referenceOps, type CiteStyle, type Source} from './domain/citations';
-import {credentialsIn, searchZotero, setZoteroLog, testZotero, type ZoteroAccount} from './services/zotero';
+import {credentialsIn, searchZotero, setZoteroLog, testZotero, zoteroItem, type ZoteroAccount} from './services/zotero';
+import {lookUpDoi} from './services/doi';
+import {QUOTES_KEY, SOURCES_KEY, fileName, isEpub, parseList, parseMap, quoteWithReference, type SavedQuote, type SourceRef} from './domain/quotes';
+import {detailsFromEpub, formatSource, type Details} from './domain/reference';
 import {anchorAfter, findBreak, pageIndexOf, windowEnd, type Anchor, type BlockBox, type Break, type LineBox, type PageStart} from './domain/paging';
 import {countWords, fontsUsed, outline, paragraphText, wordCount, type DocxDocument, type ParagraphBlock, type Run} from './model/docx';
 import {ensureFileReadPermission, ensureFileWritePermission, ensureInternetPermission} from './pluginPermissions';
@@ -120,7 +123,7 @@ type Typing = {mode: 'insert'; at: Pos} | {mode: 'replace'; range: Range};
 type HfLine = {text: string; align: 'left' | 'center' | 'right'; page: boolean};
 
 type Menu =
-  | 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count' | 'page' | 'preset' | 'header' | 'link' | 'thread' | 'comment' | 'note' | 'hl' | 'find' | 'cite'
+  | 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count' | 'page' | 'preset' | 'header' | 'link' | 'thread' | 'comment' | 'note' | 'hl' | 'find' | 'cite' | 'quotes'
   | 'recent' | 'versions' | 'recover';
 
 /** Drop-down menu width; menus are kept inside the screen. */
@@ -185,6 +188,34 @@ export function Reader(): React.JSX.Element {
     message: string;
   }>({setup: false, userId: '', apiKey: '', query: '', results: null, chosen: null, narrative: false, page: '', busy: false, message: ''});
   useEffect(() => setZoteroLog(line => log(line)), []);
+  /** Insert quote…: the saved quotes, where each source file's details come from, and the flow's state. */
+  const [qp, setQp] = useState<{
+    mode: 'list' | 'source' | 'zotero' | 'form' | 'preview';
+    quotes: SavedQuote[];
+    sources: Record<string, SourceRef>;
+    chosen: SavedQuote | null;
+    source: Source | null;
+    page: string;
+    doi: string;
+    query: string;
+    results: Source[];
+    form: {type: Details['type']; authors: string; year: string; title: string; container: string; volume: string; issue: string; pages: string; publisher: string; link: string};
+    message: string;
+    busy: boolean;
+  }>({
+    mode: 'list',
+    quotes: [],
+    sources: {},
+    chosen: null,
+    source: null,
+    page: '',
+    doi: '',
+    query: '',
+    results: [],
+    form: {type: 'article', authors: '', year: '', title: '', container: '', volume: '', issue: '', pages: '', publisher: '', link: ''},
+    message: '',
+    busy: false,
+  });
   /** Where New puts the document, and the folder being browsed to choose it. */
   const [newFolder, setNewFolder] = useState(DOCUMENTS);
   const [browse, setBrowse] = useState<{path: string; folders?: string[]; error?: string} | null>(null);
@@ -1239,6 +1270,189 @@ export function Reader(): React.JSX.Element {
     setCaret({para: at.para, offset: at.offset + cited.length});
     setMenu(null);
     setStatus(added ? `Cited, and added to the reference list.` : 'Cited (already in the reference list).');
+  };
+
+  // ---------------------------------------------------------------- quotes from PDFs / EPUBs
+
+  const openQuotes = async () => {
+    const at = caretAt;
+    flushTyping();
+    setCaret(at);
+    const quotes = parseList<SavedQuote>(await Docx?.load(QUOTES_KEY));
+    const sources = parseMap<SourceRef>(await Docx?.load(SOURCES_KEY));
+    setQp(q => ({...q, mode: 'list', quotes, sources, chosen: null, source: null, results: [], message: quotes.length ? '' : 'No quotes yet. In a PDF or EPUB, select text and tap Quote → DOCX.'}));
+    setMenu('quotes');
+  };
+
+  const saveQuotes = (quotes: SavedQuote[]) => {
+    Docx?.store(QUOTES_KEY, JSON.stringify(quotes));
+    setQp(q => ({...q, quotes}));
+  };
+
+  /** A source's citation in the current style: from Zotero, or formatted from its details. */
+  const resolveSource = async (ref: SourceRef): Promise<Source> => {
+    if (ref.kind === 'details') {
+      return formatSource(ref.details, citeStyle);
+    }
+    if (!zotero) {
+      throw new Error('Connect Zotero first (Edit → Cite from Zotero…).');
+    }
+    if (!(await ensureInternetPermission())) {
+      throw new Error('DOCX needs permission to use the internet to reach Zotero.');
+    }
+    return zoteroItem(zotero, ref.key, CITE_STYLES.find(x => x.id === citeStyle)!.csl);
+  };
+
+  const chooseQuote = async (quote: SavedQuote) => {
+    const ref = qp.sources[quote.path];
+    setQp(q => ({...q, chosen: quote, page: String(quote.page), doi: quote.doi ?? '', query: fileName(quote.path).replace(/\.(pdf|epub)$/i, '').replace(/[_]+/g, ' '), results: [], message: ''}));
+    if (!ref) {
+      setQp(q => ({...q, mode: 'source'}));
+      return;
+    }
+    setQp(q => ({...q, busy: true, message: 'Getting the citation…'}));
+    try {
+      const source = await resolveSource(ref);
+      setQp(q => ({...q, mode: 'preview', source, busy: false, message: ''}));
+    } catch (error) {
+      setQp(q => ({...q, mode: 'source', busy: false, message: errorText(error)}));
+    }
+  };
+
+  /** Remember where this file's details come from, and go on to the preview. */
+  const takeSource = async (ref: SourceRef) => {
+    const quote = qp.chosen;
+    if (!quote) {
+      return;
+    }
+    const sources = {...qp.sources, [quote.path]: ref};
+    Docx?.store(SOURCES_KEY, JSON.stringify(sources));
+    setQp(q => ({...q, sources, busy: true, message: 'Getting the citation…'}));
+    try {
+      const source = await resolveSource(ref);
+      setQp(q => ({...q, mode: 'preview', source, busy: false, message: ''}));
+    } catch (error) {
+      setQp(q => ({...q, busy: false, message: errorText(error)}));
+    }
+  };
+
+  const sourceFromDoi = async () => {
+    const doi = qp.doi.trim();
+    if (!doi) {
+      return;
+    }
+    if (!(await ensureInternetPermission())) {
+      setQp(q => ({...q, message: 'DOCX needs permission to use the internet to look up the DOI.'}));
+      return;
+    }
+    setQp(q => ({...q, busy: true, message: `Looking up ${doi}…`}));
+    try {
+      const details = await lookUpDoi(doi, line => log(line));
+      await takeSource({kind: 'details', details});
+    } catch (error) {
+      setQp(q => ({...q, busy: false, message: errorText(error)}));
+    }
+  };
+
+  const sourceFromEpub = async () => {
+    const quote = qp.chosen;
+    if (!quote || !Docx) {
+      return;
+    }
+    try {
+      const details = detailsFromEpub(await Docx.epubInfo(quote.path));
+      if (!details.title) {
+        setQp(q => ({...q, message: 'This EPUB has no title in its details. Type them instead.'}));
+        return;
+      }
+      // Shown in the form first: EPUB details are sometimes thin (no year, "Unknown" author).
+      setQp(q => ({
+        ...q,
+        mode: 'form',
+        form: {
+          ...q.form,
+          type: 'book',
+          authors: details.authors.map(a => (a.given ? `${a.family}, ${a.given}` : a.family)).join('\n'),
+          year: details.year ?? '',
+          title: details.title,
+          publisher: details.publisher ?? '',
+        },
+        message: 'From the EPUB — check and complete, then Use these details.',
+      }));
+    } catch (error) {
+      setQp(q => ({...q, message: `Could not read the EPUB: ${errorText(error)}`}));
+    }
+  };
+
+  const searchQuoteZotero = async () => {
+    if (!zotero) {
+      setQp(q => ({...q, message: 'Connect Zotero first (Edit → Cite from Zotero…).'}));
+      return;
+    }
+    if (!(await ensureInternetPermission())) {
+      setQp(q => ({...q, message: 'DOCX needs permission to use the internet to reach Zotero.'}));
+      return;
+    }
+    setQp(q => ({...q, busy: true, message: 'Searching…'}));
+    try {
+      const results = await searchZotero(zotero, qp.query, CITE_STYLES.find(x => x.id === citeStyle)!.csl);
+      setQp(q => ({...q, results, busy: false, message: results.length ? `${results.length} found — tap the right one.` : 'Nothing matches. Try the author or a title word.'}));
+    } catch (error) {
+      setQp(q => ({...q, busy: false, message: errorText(error)}));
+    }
+  };
+
+  const formDetails = (): Details | null => {
+    const f = qp.form;
+    if (!f.title.trim()) {
+      setQp(q => ({...q, message: 'A title is needed.'}));
+      return null;
+    }
+    const link = f.link.trim();
+    return {
+      type: f.type,
+      authors: f.authors
+        .split('\n')
+        .map(l => l.trim())
+        .filter(Boolean)
+        .map(l => {
+          const [family, given] = l.split(',', 2).map(x => x.trim());
+          return given ? {family, given} : {family};
+        }),
+      year: f.year.trim() || undefined,
+      title: f.title.trim(),
+      container: f.container.trim() || undefined,
+      volume: f.volume.trim() || undefined,
+      issue: f.issue.trim() || undefined,
+      pages: f.pages.trim() || undefined,
+      publisher: f.publisher.trim() || undefined,
+      ...(/^10\./.test(link) || /doi\.org\//i.test(link) ? {doi: link} : link ? {url: link} : {}),
+    };
+  };
+
+  /** Insert: the quote with its citation at the caret (or as a block quote), and the reference. */
+  const insertQuote = () => {
+    const quote = qp.chosen;
+    const source = qp.source;
+    const at = caretAt;
+    if (!quote || !source) {
+      return;
+    }
+    if (!at) {
+      setQp(q => ({...q, message: 'Tap where the quote goes first (close this, tap the page, open Insert quote again).'}));
+      return;
+    }
+    const p = paragraph(at.para);
+    const problem = p ? textEditProblem(p, at.offset, at.offset) : 'Paragraph not found.';
+    if (problem) {
+      setQp(q => ({...q, message: problem}));
+      return;
+    }
+    const r = quoteWithReference(blocks, applyOps, at, quote.text, source, citeStyle, qp.page);
+    commit(r.ops, 'quote');
+    setCaret(r.caret);
+    setMenu(null);
+    setStatus(`${r.block ? 'Block quote' : 'Quote'} inserted${r.added ? ', and the source added to the reference list' : ''}.`);
   };
 
   // ---------------------------------------------------------------- comments
@@ -3134,6 +3348,188 @@ export function Reader(): React.JSX.Element {
           </View>
         );
       }
+      case 'quotes': {
+        const chip = (label: string, on: boolean, action: () => void) => (
+          <Pressable key={label} onPress={once(`chip:${label}`, action)} style={[styles.chip, on ? styles.chipOn : null]}>
+            <Text allowFontScaling={false} style={[styles.chipText, on ? styles.chipTextOn : null]}>
+              {label}
+            </Text>
+          </Pressable>
+        );
+        const msg = qp.message ? (
+          <Text allowFontScaling={false} style={[styles.menuText, styles.citeMessage]}>
+            {qp.message}
+          </Text>
+        ) : null;
+        const q = qp.chosen;
+        const head = q ? (
+          <View>
+            <Text allowFontScaling={false} style={styles.menuText} numberOfLines={3}>
+              {`“${q.text}”`}
+            </Text>
+            <Text allowFontScaling={false} style={styles.presetSummary} numberOfLines={1}>
+              {`${fileName(q.path)} · p. ${q.page}`}
+            </Text>
+          </View>
+        ) : null;
+        if (qp.mode === 'list' || !q) {
+          return (
+            <View style={styles.nameForm}>
+              {msg}
+              {qp.quotes.map(x => (
+                <Pressable key={x.id} onPress={once(`quote:${x.id}`, () => chooseQuote(x))} style={styles.menuItem}>
+                  <Text allowFontScaling={false} style={styles.menuText} numberOfLines={2}>
+                    {`“${x.text}”`}
+                  </Text>
+                  <Text allowFontScaling={false} style={styles.presetSummary} numberOfLines={1}>
+                    {`${fileName(x.path)} · p. ${x.page}${qp.sources[x.path] ? '' : ' · source not set yet'}`}
+                  </Text>
+                </Pressable>
+              ))}
+              <View style={styles.row}>{button('Close', () => setMenu(null))}</View>
+            </View>
+          );
+        }
+        if (qp.mode === 'source') {
+          return (
+            <View style={styles.nameForm}>
+              {head}
+              <Text allowFontScaling={false} style={styles.paraLabel}>
+                {`Where do the details for ${fileName(q.path)} come from? (Asked once per file.)`}
+              </Text>
+              <View style={[styles.row, styles.presetName]}>
+                <Text allowFontScaling={false} style={styles.menuText}>
+                  {'DOI'}
+                </Text>
+                <TextInput style={styles.nameInput} value={qp.doi} onChangeText={doi => setQp(x => ({...x, doi}))} autoCapitalize="none" autoCorrect={false} allowFontScaling={false} placeholder="10.xxxx/…" />
+                {panelButton('Look up', sourceFromDoi, qp.busy || !qp.doi.trim())}
+              </View>
+              <View style={styles.chips}>
+                {isEpub(q.path) ? chip('Use the EPUB’s details', false, sourceFromEpub) : null}
+                {chip('Find in Zotero', false, () => setQp(x => ({...x, mode: 'zotero', results: [], message: ''})))}
+                {chip('Type the details', false, () => setQp(x => ({...x, mode: 'form', message: ''})))}
+              </View>
+              {msg}
+              <View style={styles.row}>{panelButton('Back', () => setQp(x => ({...x, mode: 'list', chosen: null, message: ''})))}</View>
+            </View>
+          );
+        }
+        if (qp.mode === 'zotero') {
+          return (
+            <View style={styles.nameForm}>
+              {head}
+              <View style={styles.row}>
+                <TextInput style={styles.nameInput} value={qp.query} onChangeText={query => setQp(x => ({...x, query}))} autoCorrect={false} allowFontScaling={false} returnKeyType="search" onSubmitEditing={searchQuoteZotero} />
+                {panelButton(qp.busy ? '…' : 'Search', searchQuoteZotero, qp.busy || !qp.query.trim())}
+              </View>
+              {msg}
+              {qp.results.map(r => (
+                <Pressable key={r.key} onPress={once(`qz:${r.key}`, () => takeSource({kind: 'zotero', key: r.key}))} style={styles.menuItem}>
+                  <Text allowFontScaling={false} style={styles.cardHead} numberOfLines={1}>
+                    {`${r.authors || 'No author'}${r.year ? ` (${r.year})` : ''}`}
+                  </Text>
+                  <Text allowFontScaling={false} style={styles.presetSummary} numberOfLines={2}>
+                    {r.title}
+                  </Text>
+                </Pressable>
+              ))}
+              <View style={styles.row}>{panelButton('Back', () => setQp(x => ({...x, mode: 'source', message: ''})))}</View>
+            </View>
+          );
+        }
+        if (qp.mode === 'form') {
+          const f = qp.form;
+          const set = (k: keyof typeof f) => (v: string) => setQp(x => ({...x, form: {...x.form, [k]: v}}));
+          const field = (label: string, k: keyof typeof f, multiline = false) => (
+            <View key={k}>
+              <Text allowFontScaling={false} style={[styles.menuText, styles.findLabel]}>
+                {label}
+              </Text>
+              <TextInput
+                style={[styles.nameInput, multiline ? styles.commentInput : null]}
+                value={String(f[k])}
+                onChangeText={set(k)}
+                multiline={multiline}
+                autoCorrect={false}
+                allowFontScaling={false}
+              />
+            </View>
+          );
+          return (
+            <View style={styles.nameForm}>
+              <View style={styles.chips}>
+                {chip('Article', f.type === 'article', () => set('type')('article'))}
+                {chip('Book', f.type === 'book', () => set('type')('book'))}
+                {chip('Other (web, report)', f.type === 'other', () => set('type')('other'))}
+              </View>
+              {field('Authors — one per line: Last, First', 'authors', true)}
+              {field('Year', 'year')}
+              {field('Title', 'title')}
+              {f.type !== 'book' ? field(f.type === 'article' ? 'Journal' : 'Website or larger work', 'container') : null}
+              {f.type === 'article' ? field('Volume', 'volume') : null}
+              {f.type === 'article' ? field('Issue', 'issue') : null}
+              {f.type === 'article' ? field('Pages (e.g. 29-40)', 'pages') : null}
+              {f.type === 'book' ? field('Publisher', 'publisher') : null}
+              {field('DOI or web address (optional)', 'link')}
+              {msg}
+              <View style={styles.row}>
+                {panelButton('Use these details', () => {
+                  const d = formDetails();
+                  if (d) {
+                    takeSource({kind: 'details', details: d});
+                  }
+                })}
+                {panelButton('Back', () => setQp(x => ({...x, mode: 'source', message: ''})))}
+              </View>
+            </View>
+          );
+        }
+        const src = qp.source;
+        const long = q.text.trim().split(/\s+/).length >= 40;
+        return (
+          <View style={styles.nameForm}>
+            {head}
+            <View style={[styles.row, styles.presetName]}>
+              <Text allowFontScaling={false} style={styles.menuText}>
+                {'Page'}
+              </Text>
+              <TextInput style={styles.nameInput} value={qp.page} onChangeText={page => setQp(x => ({...x, page}))} allowFontScaling={false} />
+            </View>
+            {src ? (
+              <>
+                <Text allowFontScaling={false} style={styles.paraLabel}>
+                  {long ? 'As a block quote, cited' : 'In the text'}
+                </Text>
+                <Text allowFontScaling={false} style={styles.menuText}>
+                  {inText(src, citeStyle, false, qp.page)}
+                </Text>
+                <Text allowFontScaling={false} style={styles.paraLabel}>
+                  {`In ${CITE_STYLES.find(x => x.id === citeStyle)!.heading}`}
+                </Text>
+                <Text allowFontScaling={false} style={styles.presetSummary}>
+                  {htmlToPieces(src.bibHtml).map((pc, i) => (
+                    <Text key={i} style={pc.i ? styles.italicText : null}>
+                      {pc.t}
+                    </Text>
+                  ))}
+                </Text>
+              </>
+            ) : null}
+            {msg}
+            <View style={styles.row}>
+              {panelButton('Insert', insertQuote, !src)}
+              {panelButton('Change source', () => setQp(x => ({...x, mode: 'source', message: ''})))}
+            </View>
+            <View style={styles.row}>
+              {panelButton('Delete quote', () => {
+                saveQuotes(qp.quotes.filter(x => x.id !== q.id));
+                setQp(x => ({...x, mode: 'list', chosen: null, message: 'Quote deleted.'}));
+              })}
+              {panelButton('Back', () => setQp(x => ({...x, mode: 'list', chosen: null, message: ''})))}
+            </View>
+          </View>
+        );
+      }
       case 'comment':
         return commentForm ? (
           <View style={styles.nameForm}>
@@ -3351,6 +3747,7 @@ export function Reader(): React.JSX.Element {
             {item('Find & replace…', () => setMenu('find'))}
             {item('Link…', startLink)}
             {item('Cite from Zotero…', openCite)}
+            {item('Insert quote…', openQuotes)}
             {item('Comment…', startComment)}
             {inkOk ? item('Handwritten note…', startNote) : null}
             {hasChanges ? item('Accept all changes', () => {
