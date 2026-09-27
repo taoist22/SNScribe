@@ -50,10 +50,11 @@ class DocxInkModule(private val reactContext: ReactApplicationContext) : ReactCo
         }
 
         /**
-         * Draws strokes (x, y lists, in the engine's pixels) into a PNG cropped to the ink,
-         * black on white. Returns (width, height), or null when there is no ink.
+         * Draws strokes (x, y lists, in the engine's pixels) into a PNG cropped to the ink, in
+         * [color] on a transparent background (so a note never hides text it overlaps in
+         * Word). Returns (width, height), or null when there is no ink.
          */
-        fun renderPng(strokes: List<IntArray>, dest: File, strokeWidth: Float = 5f, maxSide: Int = 1400): Pair<Int, Int>? {
+        fun renderPng(strokes: List<IntArray>, dest: File, color: Int = Color.BLACK, strokeWidth: Float = 5f, maxSide: Int = 1400): Pair<Int, Int>? {
             val points = strokes.filter { it.size >= 2 }
             if (points.isEmpty()) return null
             var minX = Int.MAX_VALUE; var minY = Int.MAX_VALUE; var maxX = Int.MIN_VALUE; var maxY = Int.MIN_VALUE
@@ -69,9 +70,9 @@ class DocxInkModule(private val reactContext: ReactApplicationContext) : ReactCo
             val h = maxOf(1, (h0 * k).toInt())
             val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(bmp)
-            canvas.drawColor(Color.WHITE)
+            val ink = color
             val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.BLACK
+                this.color = ink
                 style = Paint.Style.STROKE
                 this.strokeWidth = maxOf(2f, strokeWidth * k)
                 strokeCap = Paint.Cap.ROUND
@@ -152,11 +153,12 @@ class DocxInkModule(private val reactContext: ReactApplicationContext) : ReactCo
     }
 
     /**
-     * The ink written so far as a PNG at [path], cropped to the writing. Resolves
+     * The ink written so far as a PNG at [path] in [color] ("#RRGGBB"; the pad itself can
+     * only show black), cropped to the writing. Resolves
      * {path, width, height, strokes} or {empty: true}.
      */
     @ReactMethod
-    fun save(path: String, promise: Promise) {
+    fun save(path: String, color: String, promise: Promise) {
         UiThreadUtil.runOnUiThread {
             val e = engine
             if (e == null) { promise.reject("DOCX_INK_INACTIVE", "The pen pad is not active."); return@runOnUiThread }
@@ -178,7 +180,8 @@ class DocxInkModule(private val reactContext: ReactApplicationContext) : ReactCo
                     if (xy.isNotEmpty()) strokes.add(xy.toIntArray())
                 }
                 val dest = File(path)
-                val size = renderPng(strokes, dest)
+                val ink = runCatching { Color.parseColor(color) }.getOrDefault(Color.BLACK)
+                val size = renderPng(strokes, dest, ink)
                 promise.resolve(Arguments.createMap().apply {
                     if (size == null) {
                         putBoolean("empty", true)

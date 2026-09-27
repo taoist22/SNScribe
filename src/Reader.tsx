@@ -89,6 +89,16 @@ const CARD_H = 84;
 const PAD_HEAD = 64;
 /** The pen pad's writing column: margin-shaped. */
 const PAD_W = 420;
+/** The margin column folded away: a strip with a count and a button to open it again. */
+const MARGIN_STRIP = 44;
+/** Ink colours for the note picture in Word (the pad itself can only show black). */
+const INK_COLORS: Array<[string, string]> = [
+  ['Black', '#000000'],
+  ['Blue', '#1F4FD8'],
+  ['Red', '#C62828'],
+  ['Green', '#2E7D32'],
+  ['Purple', '#6A1B9A'],
+];
 const START: Anchor = {block: 0, offset: 0};
 /** Pen travel below this (dp) is a tap: it selects the word under the pen. */
 const TAP_SLOP = 12;
@@ -161,6 +171,8 @@ export function Reader(): React.JSX.Element {
   const [showPages, setShowPages] = useState(false);
   /** The margin column (View ▾); it appears only when the document has changes or comments. */
   const [showMargin, setShowMargin] = useState(true);
+  /** The colour handwritten notes are saved in (remembered). */
+  const [inkColor, setInkColor] = useState('#000000');
   /** Fingerprint of the document file as DOCX last read or wrote it; a different one means changed elsewhere. */
   const [diskStamp, setDiskStamp] = useState<string | null>(null);
   /** Unsaved edits found for the document just opened, offered for restoring. */
@@ -198,12 +210,18 @@ export function Reader(): React.JSX.Element {
       const refused = await log(`DOCX opened: NATIVE_BUILD=${nativeBuild()} read=${canRead} write=${canWrite} log=${name}`);
       // Remembered between sessions: text size, New's folder, recent documents.
       try {
-        const saved = JSON.parse((await Docx?.load('settings')) ?? '{}') as {scaleAt?: number; newFolder?: string; lastName?: string; author?: string};
+        const saved = JSON.parse((await Docx?.load('settings')) ?? '{}') as {scaleAt?: number; newFolder?: string; lastName?: string; author?: string; marginOpen?: boolean; inkColor?: string};
         if (typeof saved.lastName === 'string') {
           setLastName(saved.lastName);
         }
         if (typeof saved.author === 'string') {
           setAuthor(saved.author);
+        }
+        if (typeof saved.marginOpen === 'boolean') {
+          setShowMargin(saved.marginOpen);
+        }
+        if (typeof saved.inkColor === 'string') {
+          setInkColor(saved.inkColor);
         }
         if (typeof saved.scaleAt === 'number') {
           setScaleAt(Math.max(0, Math.min(SCALES.length - 1, saved.scaleAt)));
@@ -563,9 +581,11 @@ export function Reader(): React.JSX.Element {
   const inks = useMemo(() => inksAfter(doc?.inks, applied), [doc, applied]);
   const hasNotes =
     hasChanges || blocks.some(b => b.type === 'p' && (!!b.marks?.length || b.runs.some(r => r.obj === 'ink')));
-  const marginOn = showMargin && hasNotes && !showPages && !contents;
+  // The margin column is there whenever the document has notes, comments or changes: open,
+  // or folded into a narrow strip.
+  const marginOn = hasNotes && !showPages && !contents;
   // The text column: the page less the margin column when it shows.
-  const textW = marginOn ? Math.max(200, pageW - MARGIN_W - MARGIN_GAP) : pageW;
+  const textW = marginOn ? Math.max(200, pageW - (showMargin ? MARGIN_W : MARGIN_STRIP) - MARGIN_GAP) : pageW;
   const mapKey = `${doc?.path}:${edits.cursor}:${input.length}:${textScale}:${textW}x${pageH}:${fonts.size}`;
   const [countKey, setCountKey] = useState('');
   useEffect(() => {
@@ -1011,7 +1031,7 @@ export function Reader(): React.JSX.Element {
     try {
       const dir = await DocxInk.notesDir(docKey(doc.saveTo ?? doc.path));
       const id = Date.now().toString(36);
-      const res = await DocxInk.save(`${dir}/${id}.png`);
+      const res = await DocxInk.save(`${dir}/${id}.png`, inkColor);
       if (res.empty || !res.path) {
         setStatus('Write the note first, or Cancel.');
         return;
@@ -2035,8 +2055,8 @@ export function Reader(): React.JSX.Element {
 
   // Settings are remembered between sessions.
   useEffect(() => {
-    Docx?.store('settings', JSON.stringify({scaleAt, newFolder, lastName, author}));
-  }, [scaleAt, newFolder, lastName, author]);
+    Docx?.store('settings', JSON.stringify({scaleAt, newFolder, lastName, author, marginOpen: showMargin, inkColor}));
+  }, [scaleAt, newFolder, lastName, author, showMargin, inkColor]);
 
   // The page follows the caret when it moves (typing, arrows) — not when the page is turned.
   const followCaret = useRef(false);
@@ -2133,7 +2153,31 @@ export function Reader(): React.JSX.Element {
     return f.top + tf.y + y - anchor.offset;
   };
 
-  /** The margin: a card beside the line of each tracked change on this page. */
+  /** The folded margin: a strip with how many items this page has, and a button to open it. */
+  const marginStrip = () => {
+    let n = 0;
+    window.forEach(b => {
+      if (b.type === 'p') {
+        n += (b.revs?.length ?? 0) + (b.marks ?? []).filter(m => m.kind === 'start').length + b.runs.filter(r => r.obj === 'ink').length;
+      }
+    });
+    return (
+      <Pressable
+        onPress={once('open-margin', () => setShowMargin(true))}
+        style={[styles.strip, {height: pageH, left: PAD + textW + MARGIN_GAP, top: PAD}]}>
+        <Text allowFontScaling={false} style={styles.stripArrow}>
+          {'‹'}
+        </Text>
+        {n > 0 ? (
+          <Text allowFontScaling={false} style={styles.stripCount}>
+            {String(n)}
+          </Text>
+        ) : null}
+      </Pressable>
+    );
+  };
+
+  /** The margin: a card beside the line of each note, comment and tracked change on this page. */
   const marginColumn = () => {
     type Card = {
       key: string;
@@ -2221,7 +2265,7 @@ export function Reader(): React.JSX.Element {
     for (const c of cards) {
       const top = Math.max(c.y, bottom);
       const h = c.h ?? CARD_H;
-      if (top + h > pageH - 30) {
+      if (top + h > pageH - 84) {
         hidden++;
         continue;
       }
@@ -2282,15 +2326,20 @@ export function Reader(): React.JSX.Element {
           ),
         )}
         {hidden > 0 ? (
-          <Text allowFontScaling={false} style={[styles.cardMore, {top: pageH - 26}]}>
+          <Text allowFontScaling={false} style={[styles.cardMore, {top: pageH - 76}]}>
             {`+${hidden} more on this page (turn the page or hide some by reviewing)`}
           </Text>
         ) : null}
         {doc?.otherRevisions ? (
-          <Text allowFontScaling={false} style={[styles.cardMore, {top: placed.length ? pageH - 50 : 0}]} numberOfLines={2}>
+          <Text allowFontScaling={false} style={[styles.cardMore, {top: placed.length ? pageH - 100 : 0}]} numberOfLines={2}>
             {`${doc.otherRevisions} formatting or paragraph change${doc.otherRevisions === 1 ? '' : 's'} can't be reviewed here yet; they stay as they are.`}
           </Text>
         ) : null}
+        <Pressable onPress={once('fold-margin', () => setShowMargin(false))} style={[styles.foldButton, {top: pageH - 44}]}>
+          <Text allowFontScaling={false} style={styles.foldText}>
+            {'›  Fold panel'}
+          </Text>
+        </Pressable>
       </View>
     );
   };
@@ -2772,7 +2821,7 @@ export function Reader(): React.JSX.Element {
             {item('Word count…', () => setMenu('count'))}
             {item('Go to start', () => goTo({block: 0, offset: 0}))}
             {item('Go to end', goToEnd)}
-            {hasNotes ? item(showMargin ? 'Hide margin (notes, comments, changes)' : 'Show margin (notes, comments, changes)', () => setShowMargin(v => !v)) : null}
+            {hasNotes ? item(showMargin ? 'Fold the margin panel' : 'Open the margin panel', () => setShowMargin(v => !v)) : null}
           </>
         );
       case 'folder':
@@ -3098,7 +3147,7 @@ export function Reader(): React.JSX.Element {
             />
           </View>
         ) : null}
-        {doc && marginOn && pageH > 0 ? marginColumn() : null}
+        {doc && marginOn && pageH > 0 ? (showMargin ? marginColumn() : marginStrip()) : null}
         {pad && pageH > 0 ? (
           <View style={[styles.pad, {width: pageW + PAD * 2, height: pageH + PAD * 2}]}>
             <View style={styles.padHead}>
@@ -3115,9 +3164,29 @@ export function Reader(): React.JSX.Element {
               <View style={styles.padSurface}>
                 <InkSurfaceView style={{width: PAD_W, height: pageH + PAD * 2 - PAD_HEAD - 28}} />
               </View>
-              <Text allowFontScaling={false} style={[styles.panelNote, styles.padHint]}>
-                {'Write in the box. The note goes in the right margin of the Word file, beside these words, about 1 inch wide — Word shows and prints it.'}
-              </Text>
+              <View style={styles.padSide}>
+                <Text allowFontScaling={false} style={styles.paraLabel}>
+                  {'Ink color in Word'}
+                </Text>
+                <View style={styles.chips}>
+                  {INK_COLORS.map(([name, hex]) => (
+                    <Pressable
+                      key={hex}
+                      onPress={once(`ink:${hex}`, () => setInkColor(hex))}
+                      style={[styles.chip, inkColor === hex ? styles.chipOn : null]}>
+                      <Text allowFontScaling={false} style={[styles.chipText, inkColor === hex ? styles.chipTextOn : null]}>
+                        {inkColor === hex ? `✓ ${name}` : name}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+                <Text allowFontScaling={false} style={styles.panelNote}>
+                  {'You write in black here (the screen has no color); the note is saved in the color you pick.'}
+                </Text>
+                <Text allowFontScaling={false} style={styles.panelNote}>
+                  {'Write in the box. The note goes in the right margin of the Word file, beside these words, about 1 inch wide — Word shows and prints it.'}
+                </Text>
+              </View>
             </View>
           </View>
         ) : null}
@@ -3241,7 +3310,12 @@ const styles = StyleSheet.create({
   pad: {position: 'absolute', left: 0, top: 0, backgroundColor: '#fff'},
   padBody: {flexDirection: 'row', padding: 12},
   padSurface: {borderWidth: 2, borderColor: '#000'},
-  padHint: {flex: 1, marginLeft: 16, marginTop: 0},
+  padSide: {flex: 1, marginLeft: 16},
+  strip: {position: 'absolute', width: MARGIN_STRIP, borderLeftWidth: 1, borderColor: '#999', alignItems: 'center', paddingTop: 8},
+  stripArrow: {color: '#000', fontSize: 30, fontWeight: '700'},
+  stripCount: {color: '#000', fontSize: 16, marginTop: 8, borderWidth: 1, borderColor: '#000', borderRadius: 12, minWidth: 24, textAlign: 'center', paddingHorizontal: 4},
+  foldButton: {position: 'absolute', left: 8, right: 0, height: 40, borderWidth: 1, borderColor: '#000', borderRadius: 6, justifyContent: 'center', alignItems: 'center', backgroundColor: '#fff'},
+  foldText: {color: '#000', fontSize: 16},
   padHead: {height: PAD_HEAD, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, borderBottomWidth: 1, borderColor: '#000'},
   commentCard: {borderStyle: 'dashed', paddingRight: 8},
   commentInput: {height: 110, textAlignVertical: 'top', paddingTop: 8, marginVertical: 8},

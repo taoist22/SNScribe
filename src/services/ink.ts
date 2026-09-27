@@ -8,7 +8,8 @@ type DocxInkNative = {
   activate(): Promise<string>;
   clear(): Promise<string>;
   deactivate(): Promise<string>;
-  save(path: string): Promise<{path?: string; width?: number; height?: number; strokes?: number; empty?: boolean}>;
+  /** color: "#RRGGBB" — the colour the note is saved in (the pad shows black). */
+  save(path: string, color: string): Promise<{path?: string; width?: number; height?: number; strokes?: number; empty?: boolean}>;
   notesDir(key: string): Promise<string>;
   remove(path: string): Promise<boolean>;
 };
