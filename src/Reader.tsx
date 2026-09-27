@@ -1382,6 +1382,9 @@ export function Reader(): React.JSX.Element {
         {doc && !readOnly ? (
           <ScrollView
             horizontal
+            // The hidden keyboard field is usually focused; without this, a tap here first
+            // only dismisses the keyboard and never reaches the button (CT: B needed two taps).
+            keyboardShouldPersistTaps="always"
             showsHorizontalScrollIndicator={false}
             onScroll={e => {
               toolScroll.current = e.nativeEvent.contentOffset.x;
@@ -1414,7 +1417,7 @@ export function Reader(): React.JSX.Element {
             </Text>
           </View>
         ) : contents ? (
-          <ScrollView style={styles.contents}>
+          <ScrollView style={styles.contents} keyboardShouldPersistTaps="always">
             {headings.map(h => (
               <Pressable key={h.block} onPress={() => jump(h.block)} style={styles.contentsRow}>
                 <Text allowFontScaling={false} style={[styles.contentsText, {marginLeft: Math.max(0, h.level - 1) * 24}]} numberOfLines={2}>
@@ -1472,7 +1475,7 @@ export function Reader(): React.JSX.Element {
         ) : null}
         {menu ? (
           <View style={[styles.menu, {left: Math.max(0, Math.min(menuX, 9999)), maxHeight: Math.max(240, pageH)}]}>
-            <ScrollView>{menuBody()}</ScrollView>
+            <ScrollView keyboardShouldPersistTaps="always">{menuBody()}</ScrollView>
           </View>
         ) : null}
       </View>
