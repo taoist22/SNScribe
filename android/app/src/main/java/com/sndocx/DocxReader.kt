@@ -259,6 +259,9 @@ object DocxReader {
         val highlight: Boolean = false,
         val link: Boolean = false,
         val superscript: Boolean = false,
+        val subscript: Boolean = false,
+        /** Word's highlight colour name ("yellow", "green", …) when [highlight]. */
+        val highlightColor: String? = null,
         /** For a U+FFFC run: "image", "note" or "object". */
         val obj: String? = null,
         /** Inside a field or content control: shown and formattable, but its text is not editable. */
@@ -332,6 +335,8 @@ object DocxReader {
         val baseSize: Int? = null,
         /** Tracked insertions and deletions in its text, in reading order. */
         val revisions: List<Revision> = emptyList(),
+        /** In a quotation style (Quote / Intense Quote): body text, shown as a block quote. */
+        val quote: Boolean = false,
         /** Where comments start, end and are referenced in its text. */
         val marks: List<Mark> = emptyList(),
     ) : Block() {
@@ -552,6 +557,7 @@ object DocxReader {
                 baseSize = style.run.size,
                 revisions = revisions,
                 marks = marks,
+                quote = kind == "body" && (name == "quote" || name == "intense quote"),
             )
         }
 
@@ -627,9 +633,11 @@ object DocxReader {
                         italic = fmt.italic == true,
                         underline = fmt.underline == true || isLink,
                         strike = fmt.strike == true,
-                        highlight = fmt.highlight == true,
+                        highlight = fmt.highlight != null && fmt.highlight != "none",
+                        highlightColor = fmt.highlight?.takeIf { it != "none" },
                         link = isLink,
-                        superscript = fmt.superscript == true || obj == "note",
+                        superscript = fmt.vertAlign == "superscript" || obj == "note",
+                        subscript = fmt.vertAlign == "subscript" && obj != "note",
                         obj = obj,
                         locked = locked,
                         font = when (fmt.font) {
@@ -791,8 +799,10 @@ object DocxReader {
         val italic: Boolean? = null,
         val underline: Boolean? = null,
         val strike: Boolean? = null,
-        val highlight: Boolean? = null,
-        val superscript: Boolean? = null,
+        /** Highlight colour name, "none" to switch an inherited one off; null = inherit. */
+        val highlight: String? = null,
+        /** "superscript", "subscript" or "baseline"; null = inherit. */
+        val vertAlign: String? = null,
         /** A family name, or "+major" / "+minor" for the theme's heading / body font. */
         val font: String? = null,
         val size: Int? = null,
@@ -803,7 +813,7 @@ object DocxReader {
             over.underline ?: underline,
             over.strike ?: strike,
             over.highlight ?: highlight,
-            over.superscript ?: superscript,
+            over.vertAlign ?: vertAlign,
             over.font ?: font,
             over.size ?: size,
         )
@@ -820,8 +830,8 @@ object DocxReader {
                     italic = on("i"),
                     underline = u?.let { it.isNotEmpty() && it != "none" },
                     strike = on("strike") ?: on("dstrike"),
-                    highlight = hl?.let { it.isNotEmpty() && it != "none" },
-                    superscript = va?.let { it == "superscript" },
+                    highlight = hl?.takeIf { it.isNotEmpty() },
+                    vertAlign = va?.takeIf { it.isNotEmpty() },
                     font = child(rPr, "rFonts")?.let { fontOf(it) },
                     size = child(rPr, "sz")?.getAttributeNS(W, "val")?.toIntOrNull(),
                 )

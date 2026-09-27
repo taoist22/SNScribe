@@ -111,7 +111,8 @@ function ParagraphView({p, selection, onFrame, onLines, textRef, onTextFrame, fo
   const heading = p.kind !== 'body';
   // Word allows negative indents (text pulled into the page margin); the screen has no
   // margin to pull into, so they start at the left edge instead of off it.
-  const indent = Math.max(0, Math.min(160, Math.round((p.indent / 20) * scale)));
+  // A block quote with no indent of its own shows indented anyway, as Word's Quote style does.
+  const indent = Math.max(0, Math.min(160, Math.round(((p.quote && !p.indent ? 720 : p.indent) / 20) * scale)));
   const text = (
     <Text
       ref={textRef}
@@ -121,7 +122,7 @@ function ParagraphView({p, selection, onFrame, onLines, textRef, onTextFrame, fo
         styles.text,
         {fontSize: size, lineHeight, textAlign: p.align},
         heading && p.kind !== 'subtitle' ? styles.bold : null,
-        p.kind === 'subtitle' ? styles.italic : null,
+        p.kind === 'subtitle' || p.quote ? styles.italic : null,
         p.list !== undefined ? styles.flex : null,
         p.runs.length === 0 ? {minHeight: lineHeight} : null,
       ]}
@@ -140,7 +141,7 @@ function ParagraphView({p, selection, onFrame, onLines, textRef, onTextFrame, fo
             r.u || r.s || r.del || r.rv
               ? {textDecorationLine: (r.u || r.rv) && (r.s || r.del) ? 'underline line-through' : r.u || r.rv ? 'underline' : 'line-through'}
               : null,
-            {fontSize: r.sup ? Math.round(runSize(r) * 0.65) : runSize(r)},
+            {fontSize: r.sup || r.sub ? Math.round(runSize(r) * 0.65) : runSize(r)},
             r.f && fonts?.has(r.f) ? {fontFamily: r.f} : null,
             r.sel ? styles.selected : null,
           ]}>

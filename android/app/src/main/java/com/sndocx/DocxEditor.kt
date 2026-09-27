@@ -36,9 +36,9 @@ import javax.xml.transform.stream.StreamResult
 object DocxEditor {
     sealed class Op {
         /** prop: "b", "i", "u" or "h". */
-        data class Format(val para: Int, val start: Int, val end: Int, val prop: String, val on: Boolean) : Op()
+        data class Format(val para: Int, val start: Int, val end: Int, val prop: String, val on: Boolean, val value: String? = null) : Op()
 
-        /** kind: "heading1", "heading2", "title" or "normal". */
+        /** kind: "heading1", "heading2", "heading3", "title", "quote" or "normal". */
         data class Style(val para: Int, val kind: String) : Op()
 
         /**
@@ -523,7 +523,7 @@ object DocxEditor {
         for (seg in DocxReader.segments(p)) {
             val len = seg.length
             if (seg.isRun && len > 0 && offset >= op.start && offset + len <= op.end) {
-                setRunProperty(document, seg.el, op.prop, op.on)
+                setRunProperty(document, seg.el, op.prop, op.on, op.value)
                 touched++
             }
             offset += len
@@ -1567,13 +1567,20 @@ object DocxEditor {
         notes.add("font=${op.font} size=${op.size} p${op.para} [${op.start},${op.end}): $touched run(s)")
     }
 
+    /** Word's highlight colours (ST_HighlightColor) DOCX offers. */
+    private val HIGHLIGHTS = setOf("yellow", "green", "blue", "magenta", "red", "cyan")
+
     /** Sets a run property explicitly on or off, so styles cannot override the user's choice. */
-    private fun setRunProperty(document: Document, r: Element, prop: String, on: Boolean) {
+    private fun setRunProperty(document: Document, r: Element, prop: String, on: Boolean, colour: String? = null) {
         val (name, value) = when (prop) {
             "b" -> "b" to (if (on) null else "0")
             "i" -> "i" to (if (on) null else "0")
             "u" -> "u" to (if (on) "single" else "none")
-            "h" -> "highlight" to (if (on) "yellow" else "none")
+            "s" -> "strike" to (if (on) null else "0")
+            "h" -> "highlight" to (if (on) (colour?.takeIf { it in HIGHLIGHTS } ?: "yellow") else "none")
+            // Superscript and subscript share w:vertAlign: turning one on replaces the other.
+            "sup" -> "vertAlign" to (if (on) "superscript" else "baseline")
+            "sub" -> "vertAlign" to (if (on) "subscript" else "baseline")
             else -> return
         }
         var rPr = child(r, "rPr")
@@ -1660,7 +1667,9 @@ object DocxEditor {
             val (name, fallbackId, outline, size) = when (kind) {
                 "heading1" -> Quad("heading 1", "Heading1", 0, 32)
                 "heading2" -> Quad("heading 2", "Heading2", 1, 28)
+                "heading3" -> Quad("heading 3", "Heading3", 2, 24)
                 "title" -> Quad("title", "Title", null, 56)
+                "quote" -> Quad("quote", "Quote", null, 0)
                 else -> return null
             }
             byName[name]?.let { return it }
@@ -1681,14 +1690,25 @@ object DocxEditor {
             byName["normal"]?.let { add(s, "basedOn", it); add(s, "next", it) }
             add(s, "qFormat")
             val pPr = add(s, "pPr")
-            add(pPr, "keepNext")
-            val spacing = add(pPr, "spacing")
-            spacing.setAttributeNS(W, "w:before", "240")
-            spacing.setAttributeNS(W, "w:after", "120")
-            if (outline != null) add(pPr, "outlineLvl", outline.toString())
-            val rPr = add(s, "rPr")
-            add(rPr, "b")
-            add(rPr, "sz", size.toString())
+            if (kind == "quote") {
+                // A block quotation: indented both sides, italic, the body size.
+                val spacing = add(pPr, "spacing")
+                spacing.setAttributeNS(W, "w:before", "120")
+                spacing.setAttributeNS(W, "w:after", "120")
+                val ind = add(pPr, "ind")
+                ind.setAttributeNS(W, "w:left", "720")
+                ind.setAttributeNS(W, "w:right", "720")
+                add(add(s, "rPr"), "i")
+            } else {
+                add(pPr, "keepNext")
+                val spacing = add(pPr, "spacing")
+                spacing.setAttributeNS(W, "w:before", "240")
+                spacing.setAttributeNS(W, "w:after", "120")
+                if (outline != null) add(pPr, "outlineLvl", outline.toString())
+                val rPr = add(s, "rPr")
+                add(rPr, "b")
+                add(rPr, "sz", size.toString())
+            }
             root.appendChild(s)
             byName[name] = id
             ids.add(id)

@@ -17,6 +17,9 @@ export type Run = {
   /** Inside a hyperlink. */
   l?: boolean;
   sup?: boolean;
+  sub?: boolean;
+  /** Highlight colour (Word's name: yellow, green, blue, magenta, red, cyan) when h. */
+  hc?: string;
   /** 'ink': a handwritten note DOCX put in the right margin (its anchor character). */
   obj?: 'image' | 'note' | 'object' | 'ink';
   /** For obj 'ink': the note's id. */
@@ -66,6 +69,8 @@ export type ParagraphBlock = {
   marks?: Mark[];
   /** Tracked insertions and deletions in its text, in reading order. */
   revs?: Revision[];
+  /** In a quotation style: body text shown as a block quote. */
+  quote?: boolean;
   /** Ordinal among the body's top-level paragraphs: the address edits use. */
   index: number;
   style: string;

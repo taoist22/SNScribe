@@ -23,8 +23,11 @@ import {
   deletionRange,
   expectedTexts,
   commentsAfter,
+  findMatches,
   formatOps,
   fromShown,
+  HIGHLIGHTS,
+  highlightOps,
   headerFooterAfter,
   inksAfter,
   joinProblem,
@@ -33,6 +36,7 @@ import {
   linkUrl,
   nextCommentId,
   pageAfter,
+  replaceAllOps,
   rangesBetween,
   splitProblem,
   styleOps,
@@ -111,7 +115,7 @@ type Typing = {mode: 'insert'; at: Pos} | {mode: 'replace'; range: Range};
 type HfLine = {text: string; align: 'left' | 'center' | 'right'; page: boolean};
 
 type Menu =
-  | 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count' | 'page' | 'preset' | 'header' | 'link' | 'thread' | 'comment' | 'note'
+  | 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count' | 'page' | 'preset' | 'header' | 'link' | 'thread' | 'comment' | 'note' | 'hl' | 'find'
   | 'recent' | 'versions' | 'recover';
 
 /** Drop-down menu width; menus are kept inside the screen. */
@@ -171,6 +175,8 @@ export function Reader(): React.JSX.Element {
   const [showPages, setShowPages] = useState(false);
   /** The margin column (View ▾); it appears only when the document has changes or comments. */
   const [showMargin, setShowMargin] = useState(true);
+  /** Find & replace: what to find, what to put instead, and the match shown last. */
+  const [find, setFind] = useState<{query: string; replace: string; matchCase: boolean; at: number}>({query: '', replace: '', matchCase: false, at: -1});
   /** The colour handwritten notes are saved in (remembered). */
   const [inkColor, setInkColor] = useState('#000000');
   /** Fingerprint of the document file as DOCX last read or wrote it; a different one means changed elsewhere. */
@@ -547,7 +553,7 @@ export function Reader(): React.JSX.Element {
    * the character before the caret (what typed text takes); text without its own takes the
    * paragraph's base (its style and the document's defaults).
    */
-  const current = (): {font?: string; size?: number} => {
+  const current = (): {font?: string; size?: number; hc?: string; s?: boolean; sup?: boolean; sub?: boolean} => {
     const sel = !typing && selection ? selection : null;
     const at = sel ? (comparePos(sel.from, sel.to) <= 0 ? sel.from : sel.to) : caretAt;
     const p = at ? paragraph(at.para) : undefined;
@@ -564,7 +570,7 @@ export function Reader(): React.JSX.Element {
       }
       offset = end;
     }
-    return {font: run?.f ?? p.bf, size: run?.sz ?? p.bs};
+    return {font: run?.f ?? p.bf, size: run?.sz ?? p.bs, hc: run?.h ? run.hc ?? 'yellow' : undefined, s: run?.s, sup: run?.sup, sub: run?.sub};
   };
 
   const fontChoices = useMemo(() => {
@@ -1333,6 +1339,77 @@ export function Reader(): React.JSX.Element {
       return;
     }
     commit(formatOps(blocks, ranges, prop), label);
+  };
+
+  /** HL ▾: highlight the selection (or the word at the caret) in a colour, or remove highlighting. */
+  const highlight = (colour: string | null, label: string) => {
+    const ranges = targets();
+    setMenu(null);
+    if (ranges.length === 0) {
+      nothingSelected();
+      return;
+    }
+    commit(highlightOps(ranges, colour), label);
+  };
+
+  // ---------------------------------------------------------------- find & replace
+
+  const findAll = () => findMatches(blocks, find.query, find.matchCase);
+
+  /** Shows and selects match `i` (the page turns to it when it is elsewhere). */
+  const showMatch = (i: number) => {
+    const matches = findAll();
+    if (matches.length === 0) {
+      setFind(f => ({...f, at: -1}));
+      setStatus(find.query ? `“${find.query}” was not found.` : 'Type what to find.');
+      return;
+    }
+    const k = ((i % matches.length) + matches.length) % matches.length;
+    const m = matches[k];
+    flushTyping();
+    const block = blocks.findIndex(b => b.type === 'p' && b.index === m.para);
+    if (block >= 0 && (block < anchor.block || block >= end)) {
+      goTo({block, offset: 0});
+    }
+    setCaret(null);
+    setSelection({from: {para: m.para, offset: m.start}, to: {para: m.para, offset: m.end}});
+    setFind(f => ({...f, at: k}));
+    setStatus(`${k + 1} of ${matches.length}`);
+  };
+
+  /** Replace: the shown match (if it is still selected), then on to the next. */
+  const replaceOne = () => {
+    const matches = findAll();
+    const m = find.at >= 0 ? matches[find.at] : undefined;
+    const sel = selection;
+    if (!m || !sel || sel.from.para !== m.para || Math.min(sel.from.offset, sel.to.offset) !== m.start) {
+      showMatch(find.at + 1);
+      return;
+    }
+    const p = paragraph(m.para);
+    const problem = p ? textEditProblem(p, m.start, m.end) : 'Paragraph not found.';
+    if (problem) {
+      setStatus(problem);
+      showMatch(find.at + 1);
+      return;
+    }
+    commit([{op: 'text', para: m.para, start: m.start, end: m.end, text: find.replace}], 'replace');
+    setSelection(null);
+    setStatus(`Replaced 1. ${matches.length - 1} left — Next to go on.`);
+    setFind(f => ({...f, at: f.at - 1}));
+  };
+
+  const replaceAll = () => {
+    const matches = findAll();
+    if (matches.length === 0) {
+      setStatus(`“${find.query}” was not found.`);
+      return;
+    }
+    const {ops, skipped} = replaceAllOps(blocks, matches, find.replace);
+    setSelection(null);
+    commit(ops, `replace all “${find.query}”`);
+    setFind(f => ({...f, at: -1}));
+    setStatus(`Replaced ${ops.length}${skipped ? `; ${skipped} inside fields left alone` : ''}. Undo puts them all back.`);
   };
 
   const style = (kind: StyleKind, label: string) => {
@@ -2891,6 +2968,7 @@ export function Reader(): React.JSX.Element {
             {item('Copy', () => copy(false))}
             {item('Paste', pasteFromMenu)}
             {item('Delete', deleteFromMenu)}
+            {item('Find & replace…', () => setMenu('find'))}
             {item('Link…', startLink)}
             {item('Comment…', startComment)}
             {inkOk ? item('Handwritten note…', startNote) : null}
@@ -2912,9 +2990,70 @@ export function Reader(): React.JSX.Element {
             {item('Body text', () => style('normal', 'body text'))}
             {item('Heading 1', () => style('heading1', 'heading 1'), styles.menuH1)}
             {item('Heading 2', () => style('heading2', 'heading 2'), styles.menuH2)}
+            {item('Heading 3', () => style('heading3', 'heading 3'), styles.menuH3)}
+            {item('Quote', () => style('quote', 'quote'), styles.menuQuote)}
             {item('Title', () => style('title', 'title'), styles.menuTitle)}
           </>
         );
+      case 'hl': {
+        const hc = current().hc;
+        return (
+          <>
+            {HIGHLIGHTS.map(([value, name]) => item(`${hc === value ? '✓ ' : ''}${name}`, () => highlight(value, `highlight ${name.toLowerCase()}`)))}
+            {item('None (remove highlight)', () => highlight(null, 'no highlight'))}
+            <Text allowFontScaling={false} style={[styles.presetSummary, styles.folderPath]}>
+              {'The color shows in Word; on the Supernote highlights are gray.'}
+            </Text>
+          </>
+        );
+      }
+      case 'find': {
+        const n = find.query ? findAll().length : 0;
+        return (
+          <View style={styles.nameForm}>
+            <Text allowFontScaling={false} style={styles.menuText}>
+              {'Find'}
+            </Text>
+            <TextInput
+              style={styles.nameInput}
+              value={find.query}
+              onChangeText={query => setFind(f => ({...f, query, at: -1}))}
+              autoFocus
+              autoCorrect={false}
+              allowFontScaling={false}
+              returnKeyType="search"
+              onSubmitEditing={() => showMatch(find.at + 1)}
+            />
+            <Text allowFontScaling={false} style={[styles.menuText, styles.findLabel]}>
+              {'Replace with'}
+            </Text>
+            <TextInput
+              style={styles.nameInput}
+              value={find.replace}
+              onChangeText={replace => setFind(f => ({...f, replace}))}
+              autoCorrect={false}
+              allowFontScaling={false}
+            />
+            <Pressable onPress={once('match-case', () => setFind(f => ({...f, matchCase: !f.matchCase, at: -1})))} style={[styles.chip, styles.findCase, find.matchCase ? styles.chipOn : null]}>
+              <Text allowFontScaling={false} style={[styles.chipText, find.matchCase ? styles.chipTextOn : null]}>
+                {find.matchCase ? '✓ Match case' : 'Match case'}
+              </Text>
+            </Pressable>
+            <Text allowFontScaling={false} style={styles.presetSummary}>
+              {find.query ? (n === 0 ? 'Not found' : find.at >= 0 ? `${find.at + 1} of ${n}` : `${n} found`) : ' '}
+            </Text>
+            <View style={styles.row}>
+              {button('‹ Prev', () => showMatch(find.at - 1), !find.query)}
+              {button('Next ›', () => showMatch(find.at + 1), !find.query)}
+            </View>
+            <View style={styles.row}>
+              {button('Replace', replaceOne, !find.query)}
+              {button('Replace all', replaceAll, !find.query || n === 0)}
+              {button('Close', () => setMenu(null))}
+            </View>
+          </View>
+        );
+      }
       case 'list':
         return (
           <>
@@ -2924,9 +3063,22 @@ export function Reader(): React.JSX.Element {
           </>
         );
       case 'font': {
-        const cur = current().font;
+        const now = current();
+        const cur = now.font;
         return (
           <>
+            {item(`${now.s ? '✓ ' : ''}Strikethrough`, () => {
+              setMenu(null);
+              format('s', 'strikethrough');
+            })}
+            {item(`${now.sup ? '✓ ' : ''}Superscript  x²`, () => {
+              setMenu(null);
+              format('sup', 'superscript');
+            })}
+            {item(`${now.sub ? '✓ ' : ''}Subscript  x₂`, () => {
+              setMenu(null);
+              format('sub', 'subscript');
+            })}
             {fontChoices.map(f =>
               item(
                 `${f === cur ? '✓ ' : ''}${f}${fonts.has(f) ? '' : ' (not on this Supernote)'}`,
@@ -3006,7 +3158,7 @@ export function Reader(): React.JSX.Element {
             {button('B', () => format('b', 'bold'), false, styles.square)}
             {button('I', () => format('i', 'italic'), false, styles.square)}
             {button('U', () => format('u', 'underline'), false, styles.square)}
-            {button('Mark', () => format('h', 'highlight'))}
+            {menuButton('HL', 'hl')}
             <View style={styles.divider} />
             {menuButton('Edit', 'edit')}
             {menuButton('Style', 'style')}
@@ -3268,6 +3420,10 @@ const styles = StyleSheet.create({
   menuText: {color: '#000', fontSize: 19},
   menuH1: {fontSize: 24, fontWeight: '700'},
   menuH2: {fontSize: 21, fontWeight: '700'},
+  menuH3: {fontSize: 19, fontWeight: '700'},
+  menuQuote: {fontStyle: 'italic', paddingLeft: 32},
+  findLabel: {marginTop: 10},
+  findCase: {alignSelf: 'flex-start', marginTop: 10},
   menuTitle: {fontSize: 26},
   menuMuted: {color: '#555'},
   menuAction: {fontWeight: '700'},

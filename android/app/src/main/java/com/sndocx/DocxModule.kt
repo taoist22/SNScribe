@@ -214,6 +214,7 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
             "format" -> DocxEditor.Op.Format(
                 m.getInt("para"), m.getInt("start"), m.getInt("end"),
                 m.getString("prop") ?: "", m.getBoolean("on"),
+                if (m.hasKey("value") && !m.isNull("value")) m.getString("value") else null,
             )
             "style" -> DocxEditor.Op.Style(m.getInt("para"), m.getString("kind") ?: "normal")
             "text" -> DocxEditor.Op.Text(
@@ -614,6 +615,8 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
             if (r.highlight) putBoolean("h", true)
             if (r.link) putBoolean("l", true)
             if (r.superscript) putBoolean("sup", true)
+            if (r.subscript) putBoolean("sub", true)
+            r.highlightColor?.let { putString("hc", it) }
             r.obj?.let { putString("obj", it) }
             if (r.locked) putBoolean("k", true)
             r.font?.let { putString("f", it) }
@@ -635,6 +638,7 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
                 putInt("indent", b.indentTwips)
                 b.listLabel?.let { putString("list", it) }
                 if (b.sectionBreak) putBoolean("sect", true)
+                if (b.quote) putBoolean("quote", true)
                 b.numId?.let { id -> putMap("num", Arguments.createMap().apply { putInt("id", id); putInt("lvl", b.ilvl) }) }
                 b.para.let { f ->
                     f.before?.let { putInt("before", it) }

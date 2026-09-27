@@ -67,6 +67,11 @@ export function presetOps(blocks: Block[], format: PaperFormat, lastName = ''): 
       );
       continue;
     }
+    // A block quotation: its whole-block indent stays, with no first-line indent.
+    if (p.quote) {
+      ops.push({op: 'para', para: p.index, line: DOUBLE, lineRule: 'auto', before: 0, after: 0, first: 0});
+      continue;
+    }
     // Body text; list items keep their own indentation.
     ops.push({op: 'para', para: p.index, line: DOUBLE, lineRule: 'auto', before: 0, after: 0, ...(p.num ? {} : {first: 720})});
   }

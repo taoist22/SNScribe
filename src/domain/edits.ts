@@ -8,11 +8,22 @@
 
 import {OBJECT, paragraphText, type Block, type Comment, type Mark, type PageSetup, type ParagraphBlock, type Revision, type Run} from '../model/docx';
 
-export type FormatProp = 'b' | 'i' | 'u' | 'h';
-export type StyleKind = 'heading1' | 'heading2' | 'title' | 'normal';
+export type FormatProp = 'b' | 'i' | 'u' | 'h' | 's' | 'sup' | 'sub';
+export type StyleKind = 'heading1' | 'heading2' | 'heading3' | 'title' | 'quote' | 'normal';
+
+/** Highlight colours offered (Word's names), with what the menu calls them. */
+export const HIGHLIGHTS: Array<[string, string]> = [
+  ['yellow', 'Yellow'],
+  ['green', 'Green'],
+  ['blue', 'Blue'],
+  ['magenta', 'Pink'],
+  ['red', 'Red'],
+  ['cyan', 'Turquoise'],
+];
 
 export type Op =
-  | {op: 'format'; para: number; start: number; end: number; prop: FormatProp; on: boolean}
+  /** value: for 'h', the highlight colour (Word's name). */
+  | {op: 'format'; para: number; start: number; end: number; prop: FormatProp; on: boolean; value?: string}
   | {op: 'style'; para: number; kind: StyleKind}
   /** Replace [start, end) with text: delete when text is '', insert when start === end. */
   | {op: 'text'; para: number; start: number; end: number; text: string}
@@ -114,7 +125,17 @@ function formatParagraph(p: ParagraphBlock, op: Extract<Op, {op: 'format'}>): Pa
   const runs = splitRuns(p.runs, [op.start, op.end]).map(r => {
     const start = offset;
     offset += r.t.length;
-    return start >= op.start && offset <= op.end && r.t.length > 0 ? {...r, [op.prop]: op.on} : r;
+    if (!(start >= op.start && offset <= op.end && r.t.length > 0)) {
+      return r;
+    }
+    if (op.prop === 'h') {
+      return {...r, h: op.on, hc: op.on ? op.value ?? 'yellow' : undefined};
+    }
+    // Superscript and subscript share one setting in Word: turning one on turns the other off.
+    if (op.prop === 'sup' || op.prop === 'sub') {
+      return {...r, sup: op.prop === 'sup' && op.on, sub: op.prop === 'sub' && op.on};
+    }
+    return {...r, [op.prop]: op.on};
   });
   return {...p, runs};
 }
@@ -124,11 +145,15 @@ function styleParagraph(p: ParagraphBlock, kind: StyleKind): ParagraphBlock {
     case 'heading1':
       return {...p, kind: 'heading', level: 1};
     case 'heading2':
-      return {...p, kind: 'heading', level: 2};
+      return {...p, kind: 'heading', level: 2, quote: undefined};
+    case 'heading3':
+      return {...p, kind: 'heading', level: 3, quote: undefined};
     case 'title':
-      return {...p, kind: 'title', level: 0};
+      return {...p, kind: 'title', level: 0, quote: undefined};
+    case 'quote':
+      return {...p, kind: 'body', level: 0, quote: true};
     default:
-      return {...p, kind: 'body', level: 0};
+      return {...p, kind: 'body', level: 0, quote: undefined};
   }
 }
 
@@ -837,6 +862,54 @@ export function allHave(blocks: Block[], ranges: Range[], prop: FormatProp): boo
     }
   }
   return any;
+}
+
+/** Highlight in `colour` (null: remove highlighting) for the ranges. */
+export function highlightOps(ranges: Range[], colour: string | null): Op[] {
+  return ranges.map(r => ({op: 'format', para: r.para, start: r.start, end: r.end, prop: 'h', on: colour !== null, ...(colour ? {value: colour} : {})}));
+}
+
+export type Match = {para: number; start: number; end: number};
+
+/** Every place `query` occurs in the paragraphs' text, in reading order (case-insensitive unless `matchCase`). */
+export function findMatches(blocks: Block[], query: string, matchCase: boolean): Match[] {
+  if (!query) {
+    return [];
+  }
+  const q = matchCase ? query : query.toLowerCase();
+  const out: Match[] = [];
+  for (const b of blocks) {
+    if (b.type !== 'p') {
+      continue;
+    }
+    const text = matchCase ? paragraphText(b) : paragraphText(b).toLowerCase();
+    for (let i = text.indexOf(q); i >= 0; i = text.indexOf(q, i + q.length)) {
+      out.push({para: b.index, start: i, end: i + q.length});
+    }
+  }
+  return out;
+}
+
+/**
+ * Replace every match with `replacement`, as one set of edits: later matches in a
+ * paragraph first, so earlier offsets stay right. Matches inside fields, form controls or
+ * over objects are left alone and counted as skipped.
+ */
+export function replaceAllOps(blocks: Block[], matches: Match[], replacement: string): {ops: Op[]; skipped: number} {
+  const byIndex = new Map<number, ParagraphBlock>();
+  blocks.forEach(b => b.type === 'p' && byIndex.set(b.index, b));
+  const ops: Op[] = [];
+  let skipped = 0;
+  const sorted = [...matches].sort((a, b) => a.para - b.para || b.start - a.start);
+  for (const m of sorted) {
+    const p = byIndex.get(m.para);
+    if (!p || textEditProblem(p, m.start, m.end)) {
+      skipped++;
+      continue;
+    }
+    ops.push({op: 'text', para: m.para, start: m.start, end: m.end, text: replacement});
+  }
+  return {ops, skipped};
 }
 
 /** The edits a formatting button makes for a selection: on unless all of it already has it. */
