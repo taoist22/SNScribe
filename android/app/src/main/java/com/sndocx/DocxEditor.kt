@@ -34,6 +34,17 @@ import javax.xml.transform.stream.StreamResult
  * string edits — and, when the screen sent them, the texts the screen expects.
  */
 object DocxEditor {
+    /** kind: "heading1" / "heading2" / "heading3" / "title"; null values leave that property alone. */
+    data class StyleDef(
+        val kind: String,
+        val font: String? = null,
+        val size: Int? = null,
+        val bold: Boolean? = null,
+        val italic: Boolean? = null,
+        val align: String? = null,
+        val line: Int? = null,
+    )
+
     sealed class Op {
         /** prop: "b", "i", "u" or "h". */
         data class Format(val para: Int, val start: Int, val end: Int, val prop: String, val on: Boolean, val value: String? = null) : Op()
@@ -137,6 +148,13 @@ object DocxEditor {
 
         /** Deletes these comments (a thread is its comment and all its replies). */
         data class CommentDelete(val ids: List<Int>) : Op()
+
+        /**
+         * Redefines paragraph styles (a paper format's headings): each [StyleDef] rewrites
+         * that style's font, size, bold, italic, alignment, indent and line spacing, creating
+         * the style if the document has none. Headings added later then come out right.
+         */
+        data class StyleDefs(val defs: List<StyleDef>) : Op()
 
         /** A handwritten note [id]: the PNG [png] ([width]×[height] px) in the right margin, anchored at [at]. */
         data class InkAdd(val para: Int, val at: Int, val id: String, val png: String, val width: Int, val height: Int) : Op()
@@ -402,6 +420,14 @@ object DocxEditor {
                 headerFooter(document, pkg, op, notes)
                 continue
             }
+            if (op is Op.StyleDefs) {
+                if (styles != null) {
+                    for (d in op.defs) styleIds.redefine(d)
+                    stylesTouched = true
+                    notes.add("styles redefined: ${op.defs.map { it.kind }}")
+                }
+                continue
+            }
             if (op is Op.CommentAdd) {
                 addComment(document, paragraphs, pkg, op, notes)
                 continue
@@ -445,7 +471,7 @@ object DocxEditor {
                 is Op.ParaProps -> op.para
                 is Op.Link -> op.para
                 is Op.Unlink -> op.para
-                is Op.PageSetup, is Op.Defaults, is Op.HeaderFooter, is Op.Revision, is Op.CommentAdd, is Op.CommentDelete, is Op.InkAdd, is Op.InkDelete -> error("unreachable")
+                is Op.PageSetup, is Op.Defaults, is Op.HeaderFooter, is Op.Revision, is Op.CommentAdd, is Op.CommentDelete, is Op.InkAdd, is Op.InkDelete, is Op.StyleDefs -> error("unreachable")
             }
             val p = checkNotNull(paragraphs.getOrNull(index)) { "no paragraph $index for $op" }
             when (op) {
@@ -459,7 +485,7 @@ object DocxEditor {
                 is Op.ParaProps -> paraProps(document, p, op, notes)
                 is Op.Link -> link(document, p, op, pkg, styleIds, notes)
                 is Op.Unlink -> unlink(p, op, notes)
-                is Op.PageSetup, is Op.Defaults, is Op.HeaderFooter, is Op.Revision, is Op.CommentAdd, is Op.CommentDelete, is Op.InkAdd, is Op.InkDelete -> {}
+                is Op.PageSetup, is Op.Defaults, is Op.HeaderFooter, is Op.Revision, is Op.CommentAdd, is Op.CommentDelete, is Op.InkAdd, is Op.InkDelete, is Op.StyleDefs -> {}
             }
             // Splits and joins renumber the paragraphs after them.
             if (op is Op.Split || op is Op.Join) paragraphs = bodyParagraphs(document)
@@ -1639,6 +1665,65 @@ object DocxEditor {
                     if (s.getAttributeNS(W, "default").let { it == "1" || it == "true" }) defaultId = id
                 }
             }
+        }
+
+        /**
+         * Rewrites the look of the style for [def].kind (creating it first when missing):
+         * run font/size/bold/italic, and alignment, no indent, and line spacing — the rest of
+         * the style (outline level, keep-with-next) stays. Colour is removed: paper formats
+         * want black headings.
+         */
+        fun redefine(def: StyleDef) {
+            val doc = styles ?: return
+            val id = idFor(def.kind) ?: return
+            val s = raw[id] ?: elementChildren(doc.documentElement).firstOrNull {
+                it.localName == "style" && it.getAttributeNS(W, "styleId") == id
+            }?.also { raw[id] = it } ?: return
+            fun el(parent: Element, tag: String, order: List<String>): Element =
+                child(parent, tag) ?: doc.createElementNS(W, "w:$tag").also { insertInOrder(parent, it, order) }
+            val styleOrder = listOf("name", "aliases", "basedOn", "next", "link", "autoRedefine", "hidden", "uiPriority",
+                "semiHidden", "unhideWhenUsed", "qFormat", "locked", "personal", "personalCompose", "personalReply",
+                "rsid", "pPr", "rPr", "tblPr", "trPr", "tcPr", "tblStylePr")
+            val pPr = el(s, "pPr", styleOrder)
+            val rPr = el(s, "rPr", styleOrder)
+            def.align?.let { a -> el(pPr, "jc", PPR_ORDER).setAttributeNS(W, "w:val", if (a == "justify") "both" else a) }
+            // No indent of its own (a heading based on List Paragraph would inherit one otherwise).
+            el(pPr, "ind", PPR_ORDER).apply {
+                listOf("left", "start", "right", "end", "hanging", "firstLine").forEach { removeAttributeNS(W, it) }
+                setAttributeNS(W, "w:left", "0")
+                setAttributeNS(W, "w:firstLine", "0")
+            }
+            def.line?.let { line ->
+                el(pPr, "spacing", PPR_ORDER).apply {
+                    setAttributeNS(W, "w:before", "0")
+                    setAttributeNS(W, "w:after", "0")
+                    setAttributeNS(W, "w:line", line.toString())
+                    setAttributeNS(W, "w:lineRule", "auto")
+                }
+            }
+            def.font?.let { f ->
+                el(rPr, "rFonts", RPR_ORDER).apply {
+                    listOf("asciiTheme", "hAnsiTheme", "cstheme", "eastAsiaTheme").forEach { removeAttributeNS(W, it) }
+                    setAttributeNS(W, "w:ascii", f)
+                    setAttributeNS(W, "w:hAnsi", f)
+                    setAttributeNS(W, "w:cs", f)
+                }
+            }
+            fun onOff(tag: String, on: Boolean?) {
+                on ?: return
+                el(rPr, tag, RPR_ORDER).apply { if (on) removeAttributeNS(W, "val") else setAttributeNS(W, "w:val", "0") }
+            }
+            onOff("b", def.bold)
+            onOff("bCs", def.bold)
+            onOff("i", def.italic)
+            onOff("iCs", def.italic)
+            def.size?.let { sz ->
+                el(rPr, "sz", RPR_ORDER).setAttributeNS(W, "w:val", sz.toString())
+                el(rPr, "szCs", RPR_ORDER).setAttributeNS(W, "w:val", sz.toString())
+            }
+            child(rPr, "color")?.let { rPr.removeChild(it) }
+            listOf("caps", "smallCaps").forEach { t -> child(rPr, t)?.let { rPr.removeChild(it) } }
+            added = true
         }
 
         /** A character style's id by its built-in name ("hyperlink"), or null. */

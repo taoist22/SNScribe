@@ -269,7 +269,15 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
             )
             "link" -> DocxEditor.Op.Link(m.getInt("para"), m.getInt("start"), m.getInt("end"), m.getString("url") ?: "")
             "unlink" -> DocxEditor.Op.Unlink(m.getInt("para"), m.getInt("start"), m.getInt("end"))
-            "comment" -> DocxEditor.Op.CommentAdd(
+            "styleDefs" -> DocxEditor.Op.StyleDefs(m.getArray("defs")?.let { arr ->
+            (0 until arr.size()).mapNotNull { arr.getMap(it) }.map { d ->
+                fun str(k: String) = if (d.hasKey(k) && !d.isNull(k)) d.getString(k) else null
+                fun int(k: String) = if (d.hasKey(k) && !d.isNull(k)) d.getInt(k) else null
+                fun bool(k: String) = if (d.hasKey(k) && !d.isNull(k)) d.getBoolean(k) else null
+                DocxEditor.StyleDef(str("kind") ?: "", str("font"), int("size"), bool("bold"), bool("italic"), str("align"), int("line"))
+            }
+        }.orEmpty())
+        "comment" -> DocxEditor.Op.CommentAdd(
             id = m.getInt("id"),
             fromPara = m.getInt("fromPara"), from = m.getInt("from"),
             toPara = m.getInt("toPara"), to = m.getInt("to"),

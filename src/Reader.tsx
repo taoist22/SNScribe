@@ -34,6 +34,7 @@ import {
   linkProblem,
   linkSpan,
   linkUrl,
+  looksAfter,
   nextCommentId,
   penSelection,
   pageAfter,
@@ -1481,7 +1482,7 @@ export function Reader(): React.JSX.Element {
       nothingSelected();
       return;
     }
-    commit(styleOps(paras.map(para => ({para, start: 0, end: 0})), kind, doc?.looks?.[kind]), label);
+    commit(styleOps(paras.map(para => ({para, start: 0, end: 0})), kind, looksAfter(doc?.looks, applied)[kind]), label);
   };
 
   /** Numbered / bulleted / not a list, for the paragraphs targeted. A list just above is continued. */

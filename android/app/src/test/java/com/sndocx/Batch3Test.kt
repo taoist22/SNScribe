@@ -84,6 +84,27 @@ class Batch3Test {
     }
 
     @Test
+    fun apaRedefinesHeadingStyles() {
+        val apa = listOf(
+            DocxEditor.StyleDef("heading1", "Times New Roman", 24, bold = true, italic = false, align = "center", line = 480),
+            DocxEditor.StyleDef("heading2", "Times New Roman", 24, bold = true, italic = false, align = "left", line = 480),
+            DocxEditor.StyleDef("heading3", "Times New Roman", 24, bold = true, italic = true, align = "left", line = 480),
+        )
+        val dir = System.getProperty("docx.samples").orEmpty()
+        val ids = File(dir, "IDS 105 Project Template.docx")
+        val sources = listOfNotNull(File(work, "blank-apa.docx").also { DocxBlank.write(it) }, ids.takeIf { dir.isNotEmpty() && it.isFile })
+        for ((n, src) in sources.withIndex()) {
+            val dest = File(work, "apa-$n.docx")
+            DocxEditor.save(src, listOf(Op.StyleDefs(apa)), dest, File(work, "tmp"), paragraphs(src).map { it.text })
+            dest.copyTo(File(keep, "b3-apa-styles-$n.docx"), overwrite = true)
+            val l = DocxReader.read(dest).looks
+            assertEquals(DocxReader.StyleLook("Times New Roman", 24, true, false, "center", 0), l.getValue("heading1"))
+            assertEquals(DocxReader.StyleLook("Times New Roman", 24, true, false, "left", 0), l.getValue("heading2"))
+            assertEquals(DocxReader.StyleLook("Times New Roman", 24, true, true, "left", 0), l.getValue("heading3"))
+        }
+    }
+
+    @Test
     fun headingThreeAndQuote() {
         val out = save(listOf(Op.Style(2, "heading3"), Op.Style(3, "quote")), "b3-styles")
         val ps = paragraphs(out)

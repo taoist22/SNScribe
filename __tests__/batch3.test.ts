@@ -110,3 +110,29 @@ describe('a style shows as the document defines it', () => {
     expect(q).toMatchObject({align: 'right', indent: 100});
   });
 });
+
+import {looksAfter} from '../src/domain/edits';
+
+describe('paper formats set the heading styles', () => {
+  const paper: Block[] = [
+    {...p(0, [{t: 'Method'}]), kind: 'heading', level: 1},
+    {...p(1, [{t: 'Participants'}]), kind: 'heading', level: 2},
+    p(2, [{t: 'Body.'}]),
+  ];
+
+  it('APA: a heading added afterwards follows APA', () => {
+    const ops = presetOps(paper, 'apa');
+    const looks = looksAfter({heading3: {bs: 22, sb: true, align: 'center', indent: 360}}, ops);
+    expect(looks.heading3).toMatchObject({bf: 'Times New Roman', bs: 24, sb: true, si: true, align: 'left', indent: 0});
+    const [, , after] = applyOps(paper, [...ops, {op: 'style', para: 2, kind: 'heading3', look: looks.heading3}]) as ParagraphBlock[];
+    expect(after).toMatchObject({kind: 'heading', level: 3, align: 'left', si: true});
+  });
+
+  it('existing headings follow their level', () => {
+    const out = applyOps(paper, presetOps(paper, 'apa')) as ParagraphBlock[];
+    expect(out[0]).toMatchObject({align: 'center', sb: true});
+    expect(out[1]).toMatchObject({align: 'left', sb: true});
+    const mla = applyOps(paper, presetOps(paper, 'mla')) as ParagraphBlock[];
+    expect(mla[1]).toMatchObject({align: 'left', si: true, sb: false});
+  });
+});

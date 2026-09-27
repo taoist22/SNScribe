@@ -93,7 +93,34 @@ export type Op =
    */
   | {op: 'ink'; para: number; at: number; id: string; png: string; width: number; height: number}
   /** Remove handwritten note `id` from the document (its anchor and picture). */
-  | {op: 'inkDelete'; para: number; id: string};
+  | {op: 'inkDelete'; para: number; id: string}
+  /** Redefine paragraph styles (a paper format's headings); para is -1. */
+  | {op: 'styleDefs'; para: -1; defs: StyleDef[]};
+
+/** A style's new look (DocxEditor.StyleDef); missing = unchanged. */
+export type StyleDef = {kind: StyleKind; font?: string; size?: number; bold?: boolean; italic?: boolean; align?: 'left' | 'center' | 'right' | 'justify'; line?: number};
+
+/** Each style's look after the edits: the document's, with redefinitions applied. */
+export function looksAfter(looks: Record<string, StyleLook> | undefined, ops: Op[]): Record<string, StyleLook> {
+  const out: Record<string, StyleLook> = {...(looks ?? {})};
+  for (const op of ops) {
+    if (op.op === 'styleDefs') {
+      for (const d of op.defs) {
+        const was = out[d.kind] ?? {align: 'left', indent: 0};
+        out[d.kind] = {
+          ...was,
+          ...(d.font !== undefined ? {bf: d.font} : {}),
+          ...(d.size !== undefined ? {bs: d.size} : {}),
+          ...(d.bold !== undefined ? {sb: d.bold} : {}),
+          ...(d.italic !== undefined ? {si: d.italic} : {}),
+          ...(d.align ? {align: d.align} : {}),
+          indent: 0,
+        };
+      }
+    }
+  }
+  return out;
+}
 
 /** A position between characters of paragraph `para` (Paragraph.index). */
 export type Pos = {para: number; offset: number};
@@ -410,6 +437,28 @@ export function applyOps(blocks: Block[], ops: Op[]): Block[] {
       continue;
     }
     if (op.op === 'headerFooter' || op.op === 'page') {
+      continue;
+    }
+    if (op.op === 'styleDefs') {
+      // Paragraphs already in a redefined style take its new look (what they set themselves stays).
+      for (const d of op.defs) {
+        const level = d.kind === 'heading1' ? 1 : d.kind === 'heading2' ? 2 : d.kind === 'heading3' ? 3 : 0;
+        for (let j = 0; j < out.length; j++) {
+          const b = out[j];
+          if (b.type !== 'p' || !((level && b.kind === 'heading' && b.level === level) || (d.kind === 'title' && b.kind === 'title'))) {
+            continue;
+          }
+          out[j] = {
+            ...b,
+            ...(d.font !== undefined ? {bf: d.font} : {}),
+            ...(d.size !== undefined ? {bs: d.size} : {}),
+            ...(d.bold !== undefined ? {sb: d.bold} : {}),
+            ...(d.italic !== undefined ? {si: d.italic} : {}),
+            ...(d.align && !b.ja ? {align: d.align} : {}),
+            ...(!b.ji && !b.num ? {indent: 0} : {}),
+          };
+        }
+      }
       continue;
     }
     if (op.op === 'comment' || op.op === 'uncomment') {

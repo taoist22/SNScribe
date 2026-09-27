@@ -2,7 +2,7 @@
 // form, as ordinary edits (one undo step): fonts, spacing, margins, headings, reference
 // lists, and the page number top right (after the last name, in MLA).
 
-import type {Op} from './edits';
+import type {Op, StyleKind} from './edits';
 import {paragraphText, type Block, type ParagraphBlock} from '../model/docx';
 
 export type PaperFormat = 'apa' | 'mla' | 'chicago';
@@ -18,6 +18,31 @@ const SIZE = 24; // 12 pt
 const INCH = 1440;
 const DOUBLE = 480;
 
+type Level = {align: 'left' | 'center'; bold: boolean; italic: boolean};
+
+/**
+ * Heading levels 1–3 in each format, all at body size. APA 7: centred bold / left bold /
+ * left bold italic. MLA 9 (its handbook's suggested scheme): left bold / left italic /
+ * centred bold. Chicago (Turabian): centred bold / centred plain / left bold.
+ */
+export const HEADING_LEVELS: Record<PaperFormat, [Level, Level, Level]> = {
+  apa: [
+    {align: 'center', bold: true, italic: false},
+    {align: 'left', bold: true, italic: false},
+    {align: 'left', bold: true, italic: true},
+  ],
+  mla: [
+    {align: 'left', bold: true, italic: false},
+    {align: 'left', bold: false, italic: true},
+    {align: 'center', bold: true, italic: false},
+  ],
+  chicago: [
+    {align: 'center', bold: true, italic: false},
+    {align: 'center', bold: false, italic: false},
+    {align: 'left', bold: true, italic: false},
+  ],
+};
+
 /** The heading that starts a reference list in each format. */
 const REFERENCES: Record<PaperFormat, RegExp> = {
   apa: /^references$/i,
@@ -31,6 +56,12 @@ export function presetOps(blocks: Block[], format: PaperFormat, lastName = ''): 
     {op: 'defaults', para: -1, font: FONT, size: SIZE},
     // Page numbers top right on every page; MLA puts the writer's last name before it.
     {op: 'headerFooter', para: -1, kind: 'header', text: format === 'mla' ? lastName.trim() : '', pageNumber: true, align: 'right'},
+    // The heading styles themselves, so headings added later come out right too.
+    {
+      op: 'styleDefs',
+      para: -1,
+      defs: HEADING_LEVELS[format].map((l, i) => ({kind: `heading${i + 1}` as StyleKind, font: FONT, size: SIZE, bold: l.bold, italic: l.italic, align: l.align, line: DOUBLE})),
+    },
   ];
   let inReferences = false;
   for (const b of blocks) {
@@ -47,14 +78,16 @@ export function presetOps(blocks: Block[], format: PaperFormat, lastName = ''): 
     }
     if (heading) {
       inReferences = isRefHeading;
-      const centered = p.kind === 'title' || isRefHeading || (p.kind === 'heading' && p.level <= 1 && format !== 'mla');
-      ops.push({op: 'para', para: p.index, align: centered ? 'center' : 'left', line: DOUBLE, lineRule: 'auto', before: 0, after: 0, first: 0});
-      // APA and Chicago headings are bold; MLA titles are plain.
-      if (len > 0 && format !== 'mla') {
-        ops.push({op: 'format', para: p.index, start: 0, end: len, prop: 'b', on: true});
-      }
-      if (len > 0 && format === 'mla') {
-        ops.push({op: 'format', para: p.index, start: 0, end: len, prop: 'b', on: false});
+      // Titles and the reference-list heading are centred (bold except in MLA); headings
+      // follow their level in the format.
+      const level = p.kind === 'heading' && !isRefHeading ? HEADING_LEVELS[format][Math.min(3, Math.max(1, p.level)) - 1] : null;
+      const align = level ? level.align : 'center';
+      const bold = level ? level.bold : format !== 'mla';
+      const italic = level ? level.italic : false;
+      ops.push({op: 'para', para: p.index, align, line: DOUBLE, lineRule: 'auto', before: 0, after: 0, first: 0});
+      if (len > 0) {
+        ops.push({op: 'format', para: p.index, start: 0, end: len, prop: 'b', on: bold});
+        ops.push({op: 'format', para: p.index, start: 0, end: len, prop: 'i', on: italic});
       }
       continue;
     }
