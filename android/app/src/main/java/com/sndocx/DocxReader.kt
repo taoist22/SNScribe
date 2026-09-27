@@ -103,6 +103,8 @@ object DocxReader {
         /** The list it belongs to (w:numId, direct or from its style) and its level; null = none. */
         val numId: Int? = null,
         val ilvl: Int = 0,
+        /** Spacing, first-line indent and page break, resolved through styles and defaults. */
+        val para: ParaFmt = ParaFmt(),
     ) : Block() {
         val text: String get() = runs.joinToString("") { it.text }
     }
@@ -258,6 +260,7 @@ object DocxReader {
                 sectionBreak = pPr?.let { child(it, "sectPr") } != null,
                 numId = numId?.takeIf { it > 0 && label != null },
                 ilvl = ilvl.coerceIn(0, 8),
+                para = style.para.merge(ParaFmt.of(pPr)),
             )
         }
 
@@ -495,6 +498,48 @@ object DocxReader {
         }
     }
 
+    /**
+     * Paragraph spacing and first-line indent at one level (null = inherit): space before
+     * and after and line spacing in twips (line in 240ths of a line when [lineRule] is
+     * "auto"), first-line indent in twips (negative = hanging), and a page break before.
+     */
+    data class ParaFmt(
+        val before: Int? = null,
+        val after: Int? = null,
+        val line: Int? = null,
+        val lineRule: String? = null,
+        val first: Int? = null,
+        val pageBreakBefore: Boolean? = null,
+    ) {
+        fun merge(over: ParaFmt) = ParaFmt(
+            over.before ?: before,
+            over.after ?: after,
+            over.line ?: line,
+            over.lineRule ?: lineRule,
+            over.first ?: first,
+            over.pageBreakBefore ?: pageBreakBefore,
+        )
+
+        companion object {
+            fun of(pPr: Element?): ParaFmt {
+                if (pPr == null) return ParaFmt()
+                val sp = child(pPr, "spacing")
+                val ind = child(pPr, "ind")
+                fun attr(e: Element?, n: String) = e?.getAttributeNS(W, n)?.takeIf { it.isNotEmpty() }
+                val hanging = attr(ind, "hanging")?.toIntOrNull()
+                val firstLine = attr(ind, "firstLine")?.toIntOrNull()
+                return ParaFmt(
+                    before = attr(sp, "before")?.toIntOrNull(),
+                    after = attr(sp, "after")?.toIntOrNull(),
+                    line = attr(sp, "line")?.toIntOrNull(),
+                    lineRule = attr(sp, "lineRule") ?: attr(sp, "line")?.let { "auto" },
+                    first = hanging?.let { -it } ?: firstLine,
+                    pageBreakBefore = child(pPr, "pageBreakBefore")?.let { isOn(it) },
+                )
+            }
+        }
+    }
+
     private class StyleInfo(
         val name: String = "",
         val outline: Int? = null,
@@ -503,6 +548,7 @@ object DocxReader {
         val ilvl: Int = 0,
         val indent: Int = 0,
         val run: Fmt = Fmt(),
+        val para: ParaFmt = ParaFmt(),
     )
 
     /** styles.xml, resolved through basedOn chains (cycle-safe). */
@@ -510,6 +556,7 @@ object DocxReader {
         private val raw = HashMap<String, Element>()
         private var defaultParagraph: String? = null
         private val docDefaults: Fmt
+        private val paraDefaults: ParaFmt
         private val paragraphCache = HashMap<String, StyleInfo>()
         private val characterCache = HashMap<String, Fmt>()
 
@@ -525,6 +572,8 @@ object DocxReader {
             }
             docDefaults = root?.let { child(it, "docDefaults") }?.let { child(it, "rPrDefault") }
                 ?.let { child(it, "rPr") }.let { Fmt.of(it) }
+            paraDefaults = root?.let { child(it, "docDefaults") }?.let { child(it, "pPrDefault") }
+                ?.let { child(it, "pPr") }.let { ParaFmt.of(it) }
         }
 
         fun paragraph(id: String): StyleInfo {
@@ -534,9 +583,9 @@ object DocxReader {
 
         private fun resolveParagraph(id: String, seen: MutableSet<String>): StyleInfo {
             val s = raw[id]
-            if (s == null || !seen.add(id)) return StyleInfo(run = docDefaults)
+            if (s == null || !seen.add(id)) return StyleInfo(run = docDefaults, para = paraDefaults)
             val parent = s.getAttributeNS(W, "basedOn").takeIf { it.isNotEmpty() }
-                ?.let { resolveParagraph(it, seen) } ?: StyleInfo(run = docDefaults)
+                ?.let { resolveParagraph(it, seen) } ?: StyleInfo(run = docDefaults, para = paraDefaults)
             val pPr = child(s, "pPr")
             val numPr = pPr?.let { child(it, "numPr") }
             return StyleInfo(
@@ -549,6 +598,7 @@ object DocxReader {
                 ilvl = numPr?.let { child(it, "ilvl") }?.getAttributeNS(W, "val")?.toIntOrNull() ?: parent.ilvl,
                 indent = pPr?.let { child(it, "ind") }?.let { twips(it) } ?: parent.indent,
                 run = parent.run.merge(Fmt.of(child(s, "rPr"))),
+                para = parent.para.merge(ParaFmt.of(pPr)),
             )
         }
 

@@ -67,6 +67,23 @@ object DocxEditor {
 
         /** Sets the font family and/or the size (half-points) of characters [start, end). */
         data class RunStyle(val para: Int, val start: Int, val end: Int, val font: String?, val size: Int?) : Op()
+
+        /**
+         * Paragraph formatting; null = leave as is. [align] left/center/right/justify;
+         * [line] in 240ths of a line ([lineRule] "auto") or twips; [before]/[after] in twips;
+         * [first] first-line indent in twips, negative = hanging, 0 = none;
+         * [pageBreakBefore] starts the paragraph on a new page.
+         */
+        data class ParaProps(
+            val para: Int,
+            val align: String? = null,
+            val line: Int? = null,
+            val lineRule: String? = null,
+            val before: Int? = null,
+            val after: Int? = null,
+            val first: Int? = null,
+            val pageBreakBefore: Boolean? = null,
+        ) : Op()
     }
 
     data class Saved(val dest: File, val changedParts: List<String>, val notes: List<String>)
@@ -213,6 +230,7 @@ object DocxEditor {
                 is Op.Join -> op.para
                 is Op.ListItem -> op.para
                 is Op.RunStyle -> op.para
+                is Op.ParaProps -> op.para
             }
             val p = checkNotNull(paragraphs.getOrNull(index)) { "no paragraph $index for $op" }
             when (op) {
@@ -223,6 +241,7 @@ object DocxEditor {
                 is Op.Join -> joinParagraph(checkNotNull(paragraphs.getOrNull(index - 1)) { "nothing before paragraph $index to join onto" }, p, op, notes)
                 is Op.ListItem -> setListItem(document, p, op, lists, styleIds, notes)
                 is Op.RunStyle -> runStyle(document, p, op, notes)
+                is Op.ParaProps -> paraProps(document, p, op, notes)
             }
             // Splits and joins renumber the paragraphs after them.
             if (op is Op.Split || op is Op.Join) paragraphs = bodyParagraphs(document)
@@ -651,6 +670,57 @@ object DocxEditor {
             }
             offset += len
         }
+    }
+
+    private fun ensurePPr(document: Document, p: Element): Element =
+        child(p, "pPr") ?: document.createElementNS(W, "w:pPr").also { p.insertBefore(it, p.firstChild) }
+
+    /** The paragraph's own element [name] in its pPr, created in schema order if missing. */
+    private fun pPrChild(document: Document, pPr: Element, name: String): Element =
+        child(pPr, name) ?: document.createElementNS(W, "w:$name").also { insertInOrder(pPr, it, PPR_ORDER) }
+
+    private fun paraProps(document: Document, p: Element, op: Op.ParaProps, notes: MutableList<String>) {
+        val pPr = ensurePPr(document, p)
+        op.align?.let { a ->
+            pPrChild(document, pPr, "jc").setAttributeNS(W, "w:val", if (a == "justify") "both" else a)
+        }
+        if (op.line != null || op.before != null || op.after != null) {
+            val sp = pPrChild(document, pPr, "spacing")
+            op.before?.let {
+                sp.setAttributeNS(W, "w:before", it.toString())
+                sp.removeAttributeNS(W, "beforeAutospacing") // would override the number
+            }
+            op.after?.let {
+                sp.setAttributeNS(W, "w:after", it.toString())
+                sp.removeAttributeNS(W, "afterAutospacing")
+            }
+            op.line?.let {
+                sp.setAttributeNS(W, "w:line", it.toString())
+                sp.setAttributeNS(W, "w:lineRule", op.lineRule ?: "auto")
+            }
+        }
+        op.first?.let { f ->
+            val ind = pPrChild(document, pPr, "ind")
+            val oldHanging = ind.getAttributeNS(W, "hanging").toIntOrNull()
+            for (a in listOf("firstLine", "hanging", "firstLineChars", "hangingChars")) ind.removeAttributeNS(W, a)
+            val leftAttr = if (ind.hasAttributeNS(W, "start") && !ind.hasAttributeNS(W, "left")) "start" else "left"
+            val left = ind.getAttributeNS(W, leftAttr).toIntOrNull() ?: 0
+            when {
+                f > 0 -> ind.setAttributeNS(W, "w:firstLine", f.toString())
+                f < 0 -> {
+                    ind.setAttributeNS(W, "w:hanging", (-f).toString())
+                    // A hanging indent hangs from the left indent: at least as deep as it hangs.
+                    if (left < -f) ind.setAttributeNS(W, "w:$leftAttr", (-f).toString())
+                }
+                // Taking a hanging indent away also takes back the left indent it needed.
+                oldHanging != null && left == oldHanging -> ind.removeAttributeNS(W, leftAttr)
+            }
+        }
+        op.pageBreakBefore?.let { on ->
+            child(pPr, "pageBreakBefore")?.let { pPr.removeChild(it) }
+            if (on) insertInOrder(pPr, document.createElementNS(W, "w:pageBreakBefore"), PPR_ORDER)
+        }
+        notes.add("paragraph p${op.para}: $op")
     }
 
     private fun runStyle(document: Document, p: Element, op: Op.RunStyle, notes: MutableList<String>) {

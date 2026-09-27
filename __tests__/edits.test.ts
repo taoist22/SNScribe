@@ -233,3 +233,23 @@ describe('fonts and sizes', () => {
     expect(out.runs[0].f).toBeUndefined();
   });
 });
+
+describe('paragraph formatting', () => {
+  const one = (ops: Op[]) => applyOps(doc, ops)[2] as ParagraphBlock;
+  it('sets alignment, spacing and a first-line indent without touching text', () => {
+    const p = one([{op: 'para', para: 1, align: 'center', line: 480, before: 240, after: 0, first: 720}]);
+    expect(p).toMatchObject({align: 'center', line: 480, lineRule: 'auto', before: 240, after: 0, first: 720});
+    expect(paragraphText(p)).toBe(paragraphText(p1));
+  });
+  it('gives a hanging indent its left indent, and takes both back', () => {
+    const hung = one([{op: 'para', para: 1, first: -720}]);
+    expect(hung).toMatchObject({first: -720, indent: 720});
+    const back = applyOps([doc[0], doc[1], hung], [{op: 'para', para: 1, first: 0}])[2] as ParagraphBlock;
+    expect(back.first).toBeUndefined();
+    expect(back.indent).toBe(0);
+  });
+  it('turns a page break before on and off', () => {
+    expect(one([{op: 'para', para: 1, pb: true}]).pb).toBe(true);
+    expect(one([{op: 'para', para: 1, pb: true}, {op: 'para', para: 1, pb: false}]).pb).toBeUndefined();
+  });
+});

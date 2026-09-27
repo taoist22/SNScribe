@@ -53,6 +53,17 @@ function sizeFor(p: ParagraphBlock): number {
 
 /** Word sizes (half-points) on screen: 11 pt body text ≈ 20 dp, as before sizes were read. */
 const dpFor = (halfPoints: number) => Math.max(10, Math.min(64, Math.round(halfPoints * 0.91)));
+/** Word lengths in twips (1/20 pt) on screen, on the same scale as sizes. */
+const dpForTwips = (twips: number, scale: number) => Math.max(0, Math.min(120, Math.round((twips / 20) * 1.82 * scale)));
+
+/**
+ * Characters the paragraph's TextView holds before its text: a first-line indent is drawn
+ * as an inline spacer, which Android counts as one character. Offsets from the native
+ * layout (hit tests, carets, line moves) are shifted by this.
+ */
+export function leadChars(b: Block): number {
+  return b.type === 'p' && (b.first ?? 0) > 0 && b.runs.length > 0 ? 1 : 0;
+}
 
 function ParagraphView({p, selection, onFrame, onLines, textRef, onTextFrame, fonts, scale = 1}: Omit<Props, 'block'> & {p: ParagraphBlock}) {
   // The document's own sizes when it has them, times the reader's text size; the line
@@ -60,7 +71,15 @@ function ParagraphView({p, selection, onFrame, onLines, textRef, onTextFrame, fo
   const base = Math.round(sizeFor(p) * scale);
   const runSize = (r: Run) => (r.sz ? Math.round(dpFor(r.sz) * scale) : base);
   const size = p.runs.length ? Math.max(...p.runs.map(runSize)) : base;
-  const lineHeight = Math.round(size * 1.45);
+  // The document's line spacing when it has one: 'auto' in 240ths of a line, else twips.
+  const lineHeight =
+    p.line === undefined
+      ? Math.round(size * 1.45)
+      : p.lineRule === 'auto' || p.lineRule === undefined
+      ? Math.max(size, Math.round(size * 1.2 * (p.line / 240)))
+      : p.lineRule === 'atLeast'
+      ? Math.max(Math.round(size * 1.2), dpForTwips(p.line, scale))
+      : Math.max(8, dpForTwips(p.line, scale));
   const heading = p.kind !== 'body';
   // Word allows negative indents (text pulled into the page margin); the screen has no
   // margin to pull into, so they start at the left edge instead of off it.
@@ -81,6 +100,7 @@ function ParagraphView({p, selection, onFrame, onLines, textRef, onTextFrame, fo
       onTextLayout={(e: NativeSyntheticEvent<TextLayoutEventData>) =>
         onLines?.(e.nativeEvent.lines.map(l => ({y: l.y, height: l.height, len: l.text.length})))
       }>
+      {leadChars(p) ? <View key="first-line" style={{width: dpForTwips(p.first!, scale), height: 1}} /> : null}
       {markSelection(p.runs, selection ?? null).map((r, i) => (
         <Text
           key={i}
@@ -98,9 +118,10 @@ function ParagraphView({p, selection, onFrame, onLines, textRef, onTextFrame, fo
       ))}
     </Text>
   );
+  // The document's own space before and after when it has them.
   const spacing = {
-    marginTop: heading ? Math.round(size * 0.6) : 0,
-    marginBottom: heading ? Math.round(size * 0.3) : Math.round(12 * scale),
+    marginTop: p.before !== undefined ? dpForTwips(p.before, scale) : heading ? Math.round(size * 0.6) : 0,
+    marginBottom: p.after !== undefined ? dpForTwips(p.after, scale) : heading ? Math.round(size * 0.3) : Math.round(12 * scale),
   };
   if (p.list === undefined) {
     return (
@@ -121,6 +142,20 @@ function ParagraphView({p, selection, onFrame, onLines, textRef, onTextFrame, fo
 
 export function BlockView({block, ...rest}: Props): React.JSX.Element {
   if (block.type === 'p') {
+    if (block.pb) {
+      // Outside the paragraph's frame (so its frame and lines stay its own): the marker ends
+      // the previous page, and the paragraph starts the next one (paging forces the break).
+      return (
+        <>
+          <View style={styles.pageBreak}>
+            <Text allowFontScaling={false} style={styles.pageBreakText}>
+              {'— page break —'}
+            </Text>
+          </View>
+          <ParagraphView p={block} {...rest} />
+        </>
+      );
+    }
     return <ParagraphView p={block} {...rest} />;
   }
   const {onFrame} = rest;
@@ -151,6 +186,8 @@ const styles = StyleSheet.create({
   italic: {fontStyle: 'italic'},
   highlight: {backgroundColor: '#cfcfcf'},
   selected: {backgroundColor: '#000', color: '#fff'},
+  pageBreak: {height: 28, justifyContent: 'center', alignItems: 'center', borderTopWidth: 1, borderColor: '#000', borderStyle: 'dashed'},
+  pageBreakText: {color: '#000', fontSize: 13},
   locked: {borderWidth: 1, borderColor: '#000', borderStyle: 'dashed', padding: 10, marginBottom: 12},
   lockedTitle: {color: '#000', fontSize: 17, fontWeight: '700'},
   lockedPreview: {color: '#333', fontSize: 16, fontStyle: 'italic', marginTop: 4},

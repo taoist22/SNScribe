@@ -33,7 +33,7 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
 
     companion object {
         /** Bumped with each native change; first log line, to spot stale installs. */
-        const val NATIVE_BUILD = 7
+        const val NATIVE_BUILD = 8
         private val EXPORT_DIR = File("/storage/emulated/0/EXPORT")
         private const val LOG_MAX_BYTES = 2L * 1024 * 1024
         private const val LOG_LINE_MAX = 4000
@@ -170,6 +170,20 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
                             if (m.hasKey("font") && !m.isNull("font")) m.getString("font") else null,
                             if (m.hasKey("size") && !m.isNull("size")) m.getInt("size") else null,
                         )
+                        "para" -> {
+                            fun int(k: String) = if (m.hasKey(k) && !m.isNull(k)) m.getInt(k) else null
+                            fun str(k: String) = if (m.hasKey(k) && !m.isNull(k)) m.getString(k) else null
+                            DocxEditor.Op.ParaProps(
+                                para = m.getInt("para"),
+                                align = str("align"),
+                                line = int("line"),
+                                lineRule = str("lineRule"),
+                                before = int("before"),
+                                after = int("after"),
+                                first = int("first"),
+                                pageBreakBefore = if (m.hasKey("pb") && !m.isNull("pb")) m.getBoolean("pb") else null,
+                            )
+                        }
                         "list" -> DocxEditor.Op.ListItem(m.getInt("para"), m.getString("kind") ?: "none", m.getString("listId") ?: "")
                         else -> throw IllegalArgumentException("unknown op ${m.getString("op")}")
                     }
@@ -355,6 +369,14 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
                 b.listLabel?.let { putString("list", it) }
                 if (b.sectionBreak) putBoolean("sect", true)
                 b.numId?.let { id -> putMap("num", Arguments.createMap().apply { putInt("id", id); putInt("lvl", b.ilvl) }) }
+                b.para.let { f ->
+                    f.before?.let { putInt("before", it) }
+                    f.after?.let { putInt("after", it) }
+                    f.line?.let { putInt("line", it) }
+                    f.lineRule?.let { putString("lineRule", it) }
+                    f.first?.let { putInt("first", it) }
+                    if (f.pageBreakBefore == true) putBoolean("pb", true)
+                }
                 putArray("runs", Arguments.createArray().apply {
                     for (r in b.runs) pushMap(Arguments.createMap().apply {
                         putString("t", r.text)

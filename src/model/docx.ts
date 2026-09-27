@@ -43,6 +43,15 @@ export type ParagraphBlock = {
   sect?: boolean;
   /** The list it belongs to — a document list id (number) or a list made while editing (string) — and its level. */
   num?: {id: number | string; lvl: number};
+  /** Space before / after (twips) and line spacing: 240ths of a line when lineRule is 'auto', else twips. */
+  before?: number;
+  after?: number;
+  line?: number;
+  lineRule?: string;
+  /** First-line indent in twips; negative = hanging. */
+  first?: number;
+  /** Starts on a new page. */
+  pb?: boolean;
 };
 
 export type TableBlock = {type: 'table'; rows: number; cols: number; preview: string};
@@ -119,4 +128,16 @@ export function outline(blocks: Block[]): Array<{block: number; level: number; t
     }
   });
   return out;
+}
+
+/** Words and characters (objects not counted), for Word count. */
+export function countWords(texts: string[]): {words: number; chars: number} {
+  let words = 0;
+  let chars = 0;
+  for (const t of texts) {
+    const clean = t.replace(/\ufffc/g, '');
+    chars += clean.replace(/\s/g, '').length;
+    words += clean.split(/\s+/).filter(w => /[\p{L}\p{N}]/u.test(w)).length;
+  }
+  return {words, chars};
 }

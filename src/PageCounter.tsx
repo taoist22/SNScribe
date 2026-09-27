@@ -57,7 +57,7 @@ export function PageCounter({blocks, width, pageH, fonts, scale, onPages}: Props
       if (!f || (b.type === 'p' && b.runs.length > 0 && !l)) {
         return undefined;
       }
-      return {top: f.top, height: f.height, lines: l};
+      return {top: f.top, height: f.height, lines: l, forced: b.type === 'p' && !!b.pb};
     });
 
   const measure = () => {

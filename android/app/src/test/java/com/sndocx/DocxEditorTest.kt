@@ -251,6 +251,30 @@ class DocxEditorTest {
         }
     }
 
+    @Test
+    fun setsParagraphFormatting() {
+        val src = File(fixtures, "probe-fixture.docx")
+        val (dest, _) = save(
+            src,
+            listOf(
+                Op.ParaProps(1, align = "justify", line = 480, lineRule = "auto", before = 240, after = 120, first = 720),
+                Op.ParaProps(2, first = -720),
+                Op.ParaProps(3, pageBreakBefore = true, align = "center"),
+            ),
+        )
+        val ps = paragraphs(dest)
+        assertEquals("justify", ps[1].align)
+        assertEquals(DocxReader.ParaFmt(before = 240, after = 120, line = 480, lineRule = "auto", first = 720, pageBreakBefore = null), ps[1].para.copy(pageBreakBefore = null))
+        assertEquals(-720, ps[2].para.first)
+        assertEquals(720, ps[2].indentTwips) // the hanging indent brought its left indent
+        assertEquals(true, ps[3].para.pageBreakBefore)
+        assertEquals("center", ps[3].align)
+        // Undoing the hanging indent takes the left indent it added back out.
+        val (back, _) = DocxEditor.save(dest, listOf(Op.ParaProps(2, first = 0)), File(work, "back.docx"), File(work, "tmp")).let { File(work, "back.docx") to it }
+        assertEquals(0, paragraphs(back)[2].indentTwips)
+        assertEquals(null, paragraphs(back)[2].para.first)
+    }
+
     /**
      * Stress: on every real document in DOCX_SAMPLES, bold the first word, highlight the
      * middle third and italicise the end of every paragraph, and make paragraph 1 a

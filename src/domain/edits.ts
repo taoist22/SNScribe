@@ -23,7 +23,19 @@ export type Op =
   /** In or out of a list. listId: a document list (number as text) or a new list's name ("n1", "b2"). */
   | {op: 'list'; para: number; kind: 'number' | 'bullet' | 'none'; listId: string}
   /** Font family and/or size (half-points) of [start, end). */
-  | {op: 'runStyle'; para: number; start: number; end: number; font?: string; size?: number};
+  | {op: 'runStyle'; para: number; start: number; end: number; font?: string; size?: number}
+  /** Paragraph formatting; missing = unchanged. first: twips, negative = hanging, 0 = none. */
+  | {
+      op: 'para';
+      para: number;
+      align?: ParagraphBlock['align'];
+      line?: number;
+      lineRule?: string;
+      before?: number;
+      after?: number;
+      first?: number;
+      pb?: boolean;
+    };
 
 /** A position between characters of paragraph `para` (Paragraph.index). */
 export type Pos = {para: number; offset: number};
@@ -228,6 +240,44 @@ function listItem(p: ParagraphBlock, op: Extract<Op, {op: 'list'}>): ParagraphBl
   return {...p, num: {id, lvl: 0}, list: p.list ?? '', indent: Math.max(p.indent, 720)};
 }
 
+/**
+ * Mirrors DocxEditor.paraProps: a hanging indent brings a left indent at least as deep,
+ * and taking the hanging indent away takes that left indent back.
+ */
+function paraProps(p: ParagraphBlock, op: Extract<Op, {op: 'para'}>): ParagraphBlock {
+  const out: ParagraphBlock = {...p};
+  if (op.align) {
+    out.align = op.align;
+  }
+  if (op.line !== undefined) {
+    out.line = op.line;
+    out.lineRule = op.lineRule ?? 'auto';
+  }
+  if (op.before !== undefined) {
+    out.before = op.before;
+  }
+  if (op.after !== undefined) {
+    out.after = op.after;
+  }
+  if (op.first !== undefined) {
+    if (op.first < 0) {
+      out.first = op.first;
+      out.indent = Math.max(p.indent, -op.first);
+    } else if (op.first > 0) {
+      out.first = op.first;
+    } else {
+      if (p.first !== undefined && p.first < 0 && p.indent === -p.first) {
+        out.indent = 0;
+      }
+      out.first = undefined;
+    }
+  }
+  if (op.pb !== undefined) {
+    out.pb = op.pb || undefined;
+  }
+  return out;
+}
+
 /** Mirrors DocxEditor.runStyle. */
 function runStyle(p: ParagraphBlock, op: Extract<Op, {op: 'runStyle'}>): ParagraphBlock {
   if (op.end <= op.start) {
@@ -280,6 +330,9 @@ export function applyOps(blocks: Block[], ops: Op[]): Block[] {
         break;
       case 'runStyle':
         out[i] = runStyle(p, op);
+        break;
+      case 'para':
+        out[i] = paraProps(p, op);
         break;
     }
   }

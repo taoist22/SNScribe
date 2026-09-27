@@ -8,7 +8,7 @@
 /** A laid-out line: top and height (relative to its block), and how many characters it holds. */
 export type LineBox = {y: number; height: number; len?: number};
 /** A block's frame in column coordinates; `lines` (relative to the block) for text blocks. */
-export type BlockBox = {top: number; height: number; lines?: LineBox[]};
+export type BlockBox = {top: number; height: number; lines?: LineBox[]; forced?: boolean};
 
 /** Page top: a block index into the document and a y offset inside that block. */
 export type Anchor = {block: number; offset: number};
@@ -29,6 +29,10 @@ export function findBreak(boxes: Array<BlockBox | undefined>, pageTop: number, p
     const box = boxes[i];
     if (!box) {
       return {kind: 'pending'};
+    }
+    // A page break before this block: the page ends here, whatever room is left.
+    if (box.forced && box.top > pageTop) {
+      return {kind: 'at', index: i, top: box.top};
     }
     if (box.top + box.height <= bottom) {
       lastBottom = Math.max(lastBottom, box.top + box.height);

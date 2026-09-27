@@ -91,3 +91,12 @@ describe('pageIndexOf', () => {
     expect(pageIndexOf(pages, {block: 20, offset: 0})).toBe(2);
   });
 });
+
+describe('forced page breaks', () => {
+  it('ends the page before a block that starts on a new page', () => {
+    const boxes = [{top: 0, height: 40}, {top: 60, height: 40, forced: true}];
+    expect(findBreak(boxes, 0, 500)).toEqual({kind: 'at', index: 1, top: 60});
+    // …but not when that block is already at the top of the page.
+    expect(findBreak(boxes, 60, 500)).toEqual({kind: 'after', top: 100});
+  });
+});

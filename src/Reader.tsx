@@ -14,7 +14,7 @@ import {
   type LayoutChangeEvent,
 } from 'react-native';
 import {PluginManager, RattaFileSelector} from 'sn-plugin-lib';
-import {BlockView} from './BlockView';
+import {BlockView, leadChars} from './BlockView';
 import {PageCounter} from './PageCounter';
 import {
   applyOps,
@@ -36,7 +36,7 @@ import {
 } from './domain/edits';
 import {listKind, recount} from './domain/lists';
 import {anchorAfter, findBreak, pageIndexOf, windowEnd, type Anchor, type BlockBox, type Break, type LineBox, type PageStart} from './domain/paging';
-import {fontsUsed, outline, paragraphText, wordCount, type DocxDocument, type ParagraphBlock} from './model/docx';
+import {countWords, fontsUsed, outline, paragraphText, wordCount, type DocxDocument, type ParagraphBlock} from './model/docx';
 import {ensureFileReadPermission, ensureFileWritePermission} from './pluginPermissions';
 import {Docx, DocxKeys, DocxText, errorText, log, nativeBuild, type KeyPress} from './services/native';
 
@@ -74,7 +74,7 @@ const DOUBLE_TAP_MS = 500;
 type Frame = {x: number; top: number; height: number};
 type Selection = {from: Pos; to: Pos};
 type Typing = {mode: 'insert'; at: Pos} | {mode: 'replace'; range: Range};
-type Menu = 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view';
+type Menu = 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count';
 
 const STORAGE = '/storage/emulated/0';
 const DOCUMENTS = `${STORAGE}/Document`;
@@ -193,7 +193,7 @@ export function Reader(): React.JSX.Element {
         if (!f || (b.type === 'p' && b.runs.length > 0 && !l)) {
           return undefined;
         }
-        return {top: f.top, height: f.height, lines: l};
+        return {top: f.top, height: f.height, lines: l, forced: b.type === 'p' && !!b.pb};
       }),
     [window],
   );
@@ -557,7 +557,9 @@ export function Reader(): React.JSX.Element {
     if (res.error !== undefined) {
       return `${res.error} (${res.viewClass})`;
     }
-    return {para: p.index, offset: res.offset!, char: res.char!};
+    // A first-line indent spacer is one character of the TextView, before the text.
+    const lead = leadChars(p);
+    return {para: p.index, offset: Math.max(0, res.offset! - lead), char: Math.max(0, res.char! - lead)};
   };
 
   const textOf = (para: number): string => {
@@ -681,6 +683,52 @@ export function Reader(): React.JSX.Element {
   };
 
   const nothingSelected = () => setStatus('Select some text first, or tap inside a word.');
+
+  /** Paragraph formatting for the targeted paragraphs, as one undo step. The menu stays open. */
+  const paraTool = (props: Omit<Extract<Op, {op: 'para'}>, 'op' | 'para'>, label: string) => {
+    const paras = targetParagraphs();
+    if (paras.length === 0) {
+      setStatus('Tap in a paragraph first.');
+      return;
+    }
+    commit(paras.map(para => ({op: 'para', para, ...props})), label);
+  };
+
+  /** Insert page break: the paragraph splits at the caret and its second half starts a new page. */
+  const insertPageBreak = () => {
+    const at = caretAt;
+    flushTyping();
+    if (!at) {
+      setStatus('Tap where the new page should start.');
+      return;
+    }
+    if (at.offset === 0) {
+      commit([{op: 'para', para: at.para, pb: true}], 'page break');
+      return;
+    }
+    const p = paragraph(at.para);
+    const problem = p ? splitProblem(p, at.offset) : 'Paragraph not found.';
+    if (problem) {
+      setStatus(problem);
+      return;
+    }
+    commit(
+      [
+        {op: 'split', para: at.para, offset: at.offset},
+        {op: 'para', para: at.para + 1, pb: true},
+      ],
+      'page break',
+    );
+    setCaret({para: at.para + 1, offset: 0});
+  };
+
+  /** The paragraph the Paragraph menu shows the settings of. */
+  const paraShown = (): ParagraphBlock | undefined => {
+    const para = !typing && selection ? Math.min(selection.from.para, selection.to.para) : caretAt?.para;
+    return para === undefined ? undefined : paragraph(para);
+  };
+
+
 
   const format = (prop: FormatProp, label: string) => {
     const ranges = targets();
@@ -1061,9 +1109,10 @@ export function Reader(): React.JSX.Element {
         const i = window.findIndex(b => b.type === 'p' && b.index === pos.para);
         const tag = i >= 0 ? findNodeHandle(textRefs.current[i] ?? null) : null;
         if (tag !== null && DocxText) {
-          const r = await DocxText.lineMove(tag, pos.offset, up ? -1 : 1);
+          const lead = leadChars(window[i]);
+          const r = await DocxText.lineMove(tag, pos.offset + lead, up ? -1 : 1);
           if (r.offset !== undefined) {
-            return {para: pos.para, offset: r.offset};
+            return {para: pos.para, offset: Math.max(0, r.offset - lead)};
           }
         }
         return up ? prevEnd : nextStart;
@@ -1301,7 +1350,7 @@ export function Reader(): React.JSX.Element {
     const timer = setTimeout(() => {
       const fr = frames.current[i] ?? f;
       const tf = textFrames.current[i] ?? {x: 0, y: 0};
-      DocxText?.caretRect(tag, at.offset).then(r => {
+      DocxText?.caretRect(tag, at.offset + leadChars(window[i])).then(r => {
         if (r.error !== undefined || measuredFor.current !== key) {
           return;
         }
@@ -1394,6 +1443,90 @@ export function Reader(): React.JSX.Element {
             {item('Close', close)}
           </>
         );
+      case 'para': {
+        const cur = paraShown();
+        const chip = (label: string, on: boolean, action: () => void) => (
+          <Pressable key={label} onPress={once(`chip:${label}`, action)} style={[styles.chip, on ? styles.chipOn : null]}>
+            <Text allowFontScaling={false} style={[styles.chipText, on ? styles.chipTextOn : null]}>
+              {label}
+            </Text>
+          </Pressable>
+        );
+        const line = cur?.line !== undefined && (cur.lineRule ?? 'auto') === 'auto' ? cur.line : undefined;
+        const pt = (tw?: number) => (tw === undefined ? undefined : Math.round(tw / 20));
+        return (
+          <View style={styles.paraMenu}>
+            <Text allowFontScaling={false} style={styles.paraLabel}>
+              {'Alignment'}
+            </Text>
+            <View style={styles.chips}>
+              {(['left', 'center', 'right', 'justify'] as const).map(a =>
+                chip(a[0].toUpperCase() + a.slice(1), cur?.align === a, () => paraTool({align: a}, `align ${a}`)),
+              )}
+            </View>
+            <Text allowFontScaling={false} style={styles.paraLabel}>
+              {'Line spacing'}
+            </Text>
+            <View style={styles.chips}>
+              {[
+                ['1.0', 240],
+                ['1.15', 276],
+                ['1.5', 360],
+                ['2.0', 480],
+              ].map(([label, v]) => chip(String(label), line === v, () => paraTool({line: Number(v), lineRule: 'auto'}, `line ${label}`)))}
+            </View>
+            <Text allowFontScaling={false} style={styles.paraLabel}>
+              {'Space before (pt)'}
+            </Text>
+            <View style={styles.chips}>
+              {[0, 6, 12, 18].map(v => chip(String(v), pt(cur?.before) === v, () => paraTool({before: v * 20}, `before ${v}`)))}
+            </View>
+            <Text allowFontScaling={false} style={styles.paraLabel}>
+              {'Space after (pt)'}
+            </Text>
+            <View style={styles.chips}>
+              {[0, 6, 8, 12].map(v => chip(String(v), pt(cur?.after) === v, () => paraTool({after: v * 20}, `after ${v}`)))}
+            </View>
+            <Text allowFontScaling={false} style={styles.paraLabel}>
+              {'Indent'}
+            </Text>
+            <View style={styles.chips}>
+              {chip('None', !cur?.first, () => paraTool({first: 0}, 'no indent'))}
+              {chip('First line 0.5″', (cur?.first ?? 0) > 0, () => paraTool({first: 720}, 'first-line indent'))}
+              {chip('Hanging 0.5″', (cur?.first ?? 0) < 0, () => paraTool({first: -720}, 'hanging indent'))}
+            </View>
+            <View style={styles.chips}>
+              {chip(cur?.pb ? '✓ Starts on a new page' : 'Start on a new page', !!cur?.pb, () =>
+                paraTool({pb: !cur?.pb}, cur?.pb ? 'no page break' : 'page break before'),
+              )}
+            </View>
+            <View style={styles.chips}>
+              {chip('Insert page break here', false, () => {
+                setMenu(null);
+                insertPageBreak();
+              })}
+              {chip('Done', false, () => setMenu(null))}
+            </View>
+          </View>
+        );
+      }
+      case 'count': {
+        const all = countWords(blocks.filter((b): b is ParagraphBlock => b.type === 'p').map(paragraphText));
+        const sel = !typing && selection ? countWords([selectedText()]) : null;
+        return (
+          <View style={styles.nameForm}>
+            <Text allowFontScaling={false} style={styles.menuText}>
+              {`Document: ${all.words.toLocaleString()} words, ${all.chars.toLocaleString()} characters (no spaces)`}
+            </Text>
+            {sel ? (
+              <Text allowFontScaling={false} style={[styles.menuText, styles.countSel]}>
+                {`Selection: ${sel.words.toLocaleString()} words, ${sel.chars.toLocaleString()} characters`}
+              </Text>
+            ) : null}
+            <View style={styles.row}>{button('Close', () => setMenu(null))}</View>
+          </View>
+        );
+      }
       case 'view':
         return (
           <>
@@ -1401,6 +1534,7 @@ export function Reader(): React.JSX.Element {
             {item('Smaller text  A−', () => setScale(scaleAt - 1))}
             {item('Document size', () => setScale(SCALES.indexOf(1)))}
             {item('Pages…', () => setShowPages(true))}
+            {item('Word count…', () => setMenu('count'))}
             {item('Go to start', () => goTo({block: 0, offset: 0}))}
             {item('Go to end', goToEnd)}
           </>
@@ -1568,6 +1702,7 @@ export function Reader(): React.JSX.Element {
             <View style={styles.divider} />
             {menuButton('Edit', 'edit')}
             {menuButton('Style', 'style')}
+            {menuButton('Para', 'para')}
             {menuButton('List', 'list')}
             {menuButton('Font', 'font')}
             {menuButton('Size', 'size')}
@@ -1742,6 +1877,14 @@ const styles = StyleSheet.create({
   flex: {flex: 1},
   folderPath: {paddingHorizontal: 16, paddingVertical: 10, fontWeight: '700'},
   pageCount: {paddingHorizontal: 4},
+  paraMenu: {padding: 12},
+  paraLabel: {color: '#000', fontSize: 15, fontWeight: '700', marginTop: 8, marginBottom: 4},
+  chips: {flexDirection: 'row', flexWrap: 'wrap'},
+  chip: {borderWidth: 1, borderColor: '#000', borderRadius: 5, paddingVertical: 8, paddingHorizontal: 12, marginRight: 8, marginBottom: 8},
+  chipOn: {backgroundColor: '#000'},
+  chipText: {color: '#000', fontSize: 16},
+  chipTextOn: {color: '#fff'},
+  countSel: {marginTop: 8},
   pagesHead: {flexDirection: 'row', alignItems: 'center', paddingVertical: 8, borderBottomWidth: 1, borderColor: '#000'},
   pagesGrid: {flexDirection: 'row', flexWrap: 'wrap', paddingTop: 8},
   pageCard: {width: 220, height: 170, borderWidth: 1, borderColor: '#000', padding: 10, marginRight: 12, marginBottom: 12},

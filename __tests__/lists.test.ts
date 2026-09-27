@@ -40,3 +40,11 @@ describe('recount', () => {
     expect(newListDef('number').starts[0]).toBe(1);
   });
 });
+
+import {countWords} from '../src/model/docx';
+
+describe('countWords', () => {
+  it('counts words and characters, not objects or stray punctuation', () => {
+    expect(countWords(['Hello, world — again.', '￼ image', ''])).toEqual({words: 4, chars: 23});
+  });
+});
