@@ -93,6 +93,7 @@ export async function searchZotero(account: ZoteroAccount, query: string, csl: s
     account,
     `/items/top?q=${q}&qmode=titleCreatorYear&format=json&include=data,bib,citation&style=${encodeURIComponent(csl)}&limit=25`,
   )) as Item[];
+  report(`zotero: ${Array.isArray(items) ? items.length : 'no list'} item(s) back; with a citation: ${Array.isArray(items) ? items.filter(it => it.bib && it.citation).length : 0}`);
   return items
     .filter(it => it.data && !['note', 'attachment', 'annotation'].includes(it.data.itemType ?? '') && it.bib && it.citation)
     .map(it => ({

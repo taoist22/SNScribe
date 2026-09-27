@@ -1164,11 +1164,15 @@ export function Reader(): React.JSX.Element {
         rightButtonText: 'Use',
         suffixList: ['txt'],
       })) as string[] | null | undefined;
+      log(`zotero key file: picker returned ${JSON.stringify(picked)}`);
       const path = picked?.find(x => typeof x === 'string' && x.length > 0);
       if (!path) {
+        setCite(c => ({...c, message: 'No file was chosen.'}));
         return;
       }
-      const found = credentialsIn(await Docx!.readText(path));
+      const text = await Docx!.readText(path);
+      const found = credentialsIn(text);
+      log(`zotero key file: ${text.length} chars, key ${found.apiKey ? 'found' : 'not found'}, user ID ${found.userId ? 'found' : 'not found'}`);
       if (!found.apiKey) {
         setCite(c => ({...c, message: 'No Zotero key in that file (a key is 24 letters and numbers).'}));
         return;
@@ -1195,9 +1199,11 @@ export function Reader(): React.JSX.Element {
     setCite(c => ({...c, busy: true, chosen: null, message: 'Searching…'}));
     try {
       const results = await searchZotero(zotero, cite.query, CITE_STYLES.find(x => x.id === style)!.csl);
-      const message = results.length ? '' : `Nothing in your library matches “${cite.query.trim()}”.`;
+      log(`zotero search: ${results.length} result(s)${results.length ? `: ${results.slice(0, 3).map(r => `${r.authors} ${r.year}`).join('; ')}` : ''}`);
+      const message = results.length ? `${results.length} found — tap one.` : `Nothing in your library matches “${cite.query.trim()}”.`;
       setCite(c => ({...c, results, busy: false, message}));
     } catch (error) {
+      log(`zotero search failed: ${errorText(error)}`);
       setCite(c => ({...c, busy: false, message: errorText(error)}));
     }
   };
