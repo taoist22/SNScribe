@@ -73,6 +73,7 @@ const DOUBLE_TAP_MS = 500;
 type Frame = {x: number; top: number; height: number};
 type Selection = {from: Pos; to: Pos};
 type Typing = {mode: 'insert'; at: Pos} | {mode: 'replace'; range: Range};
+type Menu = 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name';
 
 /** One line of text: line breaks and other control characters become spaces. */
 const clean = (text: string) => text.replace(/[\r\n\u0000-\u0008\u000b-\u001f\ufffc]/g, ' ');
@@ -87,8 +88,9 @@ export function Reader(): React.JSX.Element {
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
   const [contents, setContents] = useState(false);
-  /** A chooser shown in place of the page: fonts or sizes for the selection. */
-  const [panel, setPanel] = useState<'font' | 'size' | null>(null);
+  /** The open drop-down menu, and the x of the button that opened it. */
+  const [menu, setMenu] = useState<Menu | null>(null);
+  const [menuX, setMenuX] = useState(0);
   /** Font families loaded on this device (from MyStyle/Fonts, or added by hand). */
   const [fonts, setFonts] = useState<Set<string>>(new Set());
   /** Naming a new document: the name being typed, or null. */
@@ -228,7 +230,7 @@ export function Reader(): React.JSX.Element {
     setAnchor(START);
     setHistory([]);
     setContents(false);
-    setPanel(null);
+    setMenu(null);
     setEdits({steps: [], cursor: 0});
     setSaved({cursor: 0, dest: null});
     setSelection(null);
@@ -289,12 +291,14 @@ export function Reader(): React.JSX.Element {
       return;
     }
     setNaming('Untitled');
+    setMenu('name');
   };
 
   /** A blank document in the Document folder, opened for editing; it saves over itself. */
   const createNew = async () => {
     const name = (naming ?? '').trim() || 'Untitled';
     setNaming(null);
+    setMenu(null);
     setBusy(true);
     try {
       if (!(await ensureFileWritePermission())) {
@@ -313,14 +317,13 @@ export function Reader(): React.JSX.Element {
   // ---------------------------------------------------------------- fonts and sizes
 
   const applyRunStyle = (style: {font?: string; size?: number}, label: string) => {
-    if (!selection) {
+    const ranges = targets();
+    setMenu(null);
+    if (ranges.length === 0) {
+      nothingSelected();
       return;
     }
-    commit(
-      rangesBetween(blocks, selection.from, selection.to).map(r => ({op: 'runStyle', para: r.para, start: r.start, end: r.end, ...style})),
-      label,
-    );
-    setPanel(null);
+    commit(ranges.map(r => ({op: 'runStyle', para: r.para, start: r.start, end: r.end, ...style})), label);
   };
 
   /** A font file picked by hand: named from inside the file, loaded, and remembered. */
@@ -330,22 +333,34 @@ export function Reader(): React.JSX.Element {
         setStatus('File access was not allowed.');
         return;
       }
+      // Several files at once: a family's regular, bold, italic … in one go.
       const picked = (await RattaFileSelector.selectFile({
         selectType: 0,
-        maxNum: 1,
-        title: 'Choose a font file (.ttf or .otf)',
+        maxNum: 24,
+        title: 'Choose font files (.ttf or .otf)',
         rightButtonText: 'Add',
         suffixList: ['ttf', 'otf'],
       })) as string[] | null | undefined;
-      const path = picked?.find(p => typeof p === 'string' && /\.(ttf|otf)$/i.test(p));
-      if (!path) {
-        return;
+      const paths = (picked ?? []).filter(p => typeof p === 'string' && /\.(ttf|otf)$/i.test(p));
+      const families = new Set<string>();
+      const failed: string[] = [];
+      for (const path of paths) {
+        try {
+          families.add((await Docx!.addFont(path)).family);
+        } catch {
+          failed.push(path.split('/').pop() ?? path);
+        }
       }
-      const added = await Docx!.addFont(path);
-      setFonts(f => new Set([...f, added.family]));
-      setStatus(`Added the font ${added.family}.`);
+      if (families.size > 0) {
+        setFonts(f => new Set([...f, ...families]));
+      }
+      setStatus(
+        [families.size ? `Added ${[...families].join(', ')}.` : '', failed.length ? `Couldn't read ${failed.join(', ')}.` : '']
+          .filter(Boolean)
+          .join(' ') || 'No font files chosen.',
+      );
     } catch (error) {
-      setStatus(`Font not added: ${errorText(error)}`);
+      setStatus(`Fonts not added: ${errorText(error)}`);
     }
   };
 
@@ -517,18 +532,70 @@ export function Reader(): React.JSX.Element {
     log(`${label}: ${JSON.stringify(ops)}`);
   };
 
+  /**
+   * What a tool acts on: the selection, or else the word at the caret (as in Word). Typing
+   * in progress is committed first; the page already showed it, so positions stay right.
+   */
+  const targets = (): Range[] => {
+    if (!typing && selection) {
+      return rangesBetween(blocks, selection.from, selection.to);
+    }
+    const at = caretAt;
+    flushTyping();
+    if (!at) {
+      return [];
+    }
+    const text = textOf(at.para);
+    const ch = at.offset < text.length && /\S/.test(text[at.offset]) ? at.offset : at.offset - 1;
+    const w = ch >= 0 ? wordAround(text, ch, 'left') : null;
+    return w && w.end > at.offset - 1 && w.start <= at.offset ? [{para: at.para, start: w.start, end: w.end}] : [];
+  };
+
+  /** Paragraph-level tools act on the paragraphs of the selection, or the caret's paragraph. */
+  const targetParagraphs = (): number[] => {
+    if (!typing && selection) {
+      const [s0, e0] = comparePos(selection.from, selection.to) <= 0 ? [selection.from, selection.to] : [selection.to, selection.from];
+      return blocks.filter(b => b.type === 'p' && b.index >= s0.para && b.index <= e0.para).map(b => (b as ParagraphBlock).index);
+    }
+    const at = caretAt;
+    flushTyping();
+    return at ? [at.para] : [];
+  };
+
+  const nothingSelected = () => setStatus('Select some text first, or tap inside a word.');
+
   const format = (prop: FormatProp, label: string) => {
-    if (!selection) {
+    const ranges = targets();
+    if (ranges.length === 0) {
+      nothingSelected();
       return;
     }
-    commit(formatOps(blocks, rangesBetween(blocks, selection.from, selection.to), prop), label);
+    commit(formatOps(blocks, ranges, prop), label);
   };
 
   const style = (kind: StyleKind, label: string) => {
-    if (!selection) {
+    const paras = targetParagraphs();
+    if (paras.length === 0) {
+      nothingSelected();
       return;
     }
-    commit(styleOps(rangesBetween(blocks, selection.from, selection.to), kind), label);
+    commit(styleOps(paras.map(para => ({para, start: 0, end: 0})), kind), label);
+  };
+
+  /** Numbered / bulleted / not a list, for the paragraphs targeted. A list just above is continued. */
+  const listTool = (kind: 'number' | 'bullet' | 'none') => {
+    const paras = targetParagraphs();
+    if (paras.length === 0) {
+      nothingSelected();
+      return;
+    }
+    let listId = '';
+    if (kind !== 'none') {
+      const first = blocks.findIndex(b => b.type === 'p' && b.index === paras[0]);
+      const prev = blocks[first - 1];
+      listId = prev?.type === 'p' && prev.num && listKind(prev.num.id) === kind ? String(prev.num.id) : `${kind[0]}${++listCounter.current}`;
+    }
+    commit(paras.map(para => ({op: 'list', para, kind, listId})), kind === 'none' ? 'not a list' : `${kind} list`);
   };
 
   const paragraph = (para: number) => blocks.find(b => b.type === 'p' && b.index === para) as ParagraphBlock | undefined;
@@ -929,6 +996,7 @@ export function Reader(): React.JSX.Element {
 
   const copy = async (cut: boolean) => {
     if (typing || !selection) {
+      nothingSelected();
       return;
     }
     const ok = await DocxKeys?.copy(selectedText());
@@ -973,6 +1041,24 @@ export function Reader(): React.JSX.Element {
     commit(ops, 'paste');
     setSelection(null);
     setCaret(pos);
+  };
+
+  /** Edit → Paste: reads the clipboard natively (the same read Ctrl+V uses). */
+  const pasteFromMenu = async () => {
+    const text = await DocxKeys?.clipboardText().catch(() => null);
+    if (text == null || text === '') {
+      setStatus('The clipboard is empty.');
+      return;
+    }
+    paste(text);
+  };
+
+  const deleteFromMenu = () => {
+    if (!typing && selection) {
+      remove();
+    } else {
+      nothingSelected();
+    }
   };
 
   /** Keys the native listener caught (DocxKeysModule). Ctrl and Cmd both work. */
@@ -1116,13 +1202,148 @@ export function Reader(): React.JSX.Element {
   const progress = doc && blocks.length > 0 ? Math.round((anchor.block / blocks.length) * 100) : 0;
   const headings = useMemo(() => outline(blocks), [blocks]);
 
-  const button = (label: string, action: () => void, disabled = false) => (
-    <Pressable key={label} disabled={disabled || busy} onPress={action} style={[styles.button, disabled || busy ? styles.disabled : null]}>
+  // A pen tap sometimes arrives as two presses; a second press of the same control this soon is ignored.
+  const lastPress = useRef<{key: string; at: number}>({key: '', at: 0});
+  const once = (key: string, action: () => void) => () => {
+    const now = Date.now();
+    if (lastPress.current.key === key && now - lastPress.current.at < 400) {
+      return;
+    }
+    lastPress.current = {key, at: now};
+    action();
+  };
+
+  /** A plain button: closes any open menu, then acts. */
+  const button = (label: string, action: () => void, disabled = false, extra?: object) => (
+    <Pressable
+      key={label}
+      disabled={disabled || busy}
+      onPress={once(label, () => {
+        setMenu(null);
+        action();
+      })}
+      style={[styles.button, extra, disabled || busy ? styles.disabled : null]}>
       <Text allowFontScaling={false} style={styles.buttonText}>
         {label}
       </Text>
     </Pressable>
   );
+
+  /** A menu button: opens its menu (never toggles it shut — closing is by choosing, or tapping elsewhere). */
+  const menuButton = (label: string, which: Menu) => (
+    <Pressable
+      key={which}
+      disabled={busy}
+      onLayout={e => {
+        menuXs.current[which] = e.nativeEvent.layout.x;
+      }}
+      onPress={once(`menu:${which}`, () => {
+        setMenuX((menuXs.current[which] ?? 0) - (which === 'file' ? 0 : toolScroll.current));
+        setMenu(which);
+      })}
+      style={[styles.button, menu === which ? styles.buttonOpen : null, busy ? styles.disabled : null]}>
+      <Text allowFontScaling={false} style={[styles.buttonText, menu === which ? styles.buttonOpenText : null]}>
+        {`${label} ▾`}
+      </Text>
+    </Pressable>
+  );
+  const menuXs = useRef<Partial<Record<Menu, number>>>({});
+  const toolScroll = useRef(0);
+
+  /** One row of a drop-down menu. */
+  const item = (label: string, action: () => void, style?: object) => (
+    <Pressable
+      key={label}
+      onPress={once(`item:${label}`, () => {
+        setMenu(null);
+        action();
+      })}
+      style={styles.menuItem}>
+      <Text allowFontScaling={false} style={[styles.menuText, style]} numberOfLines={1}>
+        {label}
+      </Text>
+    </Pressable>
+  );
+
+  const menuBody = (): React.JSX.Element | null => {
+    switch (menu) {
+      case 'file':
+        return (
+          <>
+            {item('New…', startNew)}
+            {item('Open…', open)}
+            {doc && !readOnly ? item('Save', save) : null}
+            {item('Close', close)}
+          </>
+        );
+      case 'name':
+        return (
+          <View style={styles.nameForm}>
+            <Text allowFontScaling={false} style={styles.menuText}>
+              {'Name for the new document'}
+            </Text>
+            <TextInput
+              style={styles.nameInput}
+              value={naming ?? ''}
+              onChangeText={setNaming}
+              autoFocus
+              selectTextOnFocus
+              allowFontScaling={false}
+              returnKeyType="done"
+              onSubmitEditing={createNew}
+            />
+            <View style={styles.row}>
+              {button('Create', createNew)}
+              {button('Cancel', () => setNaming(null))}
+            </View>
+          </View>
+        );
+      case 'edit':
+        return (
+          <>
+            {item('Cut', () => copy(true))}
+            {item('Copy', () => copy(false))}
+            {item('Paste', pasteFromMenu)}
+            {item('Delete', deleteFromMenu)}
+            {item('Hide keyboard', done)}
+          </>
+        );
+      case 'style':
+        return (
+          <>
+            {item('Body text', () => style('normal', 'body text'))}
+            {item('Heading 1', () => style('heading1', 'heading 1'), styles.menuH1)}
+            {item('Heading 2', () => style('heading2', 'heading 2'), styles.menuH2)}
+            {item('Title', () => style('title', 'title'), styles.menuTitle)}
+          </>
+        );
+      case 'list':
+        return (
+          <>
+            {item('1.  Numbered', () => listTool('number'))}
+            {item('•  Bulleted', () => listTool('bullet'))}
+            {item('Not a list', () => listTool('none'))}
+          </>
+        );
+      case 'font':
+        return (
+          <>
+            {fontChoices.map(f =>
+              item(
+                fonts.has(f) ? f : `${f} (not on this Supernote)`,
+                () => applyRunStyle({font: f}, `font ${f}`),
+                fonts.has(f) ? {fontFamily: f} : styles.menuMuted,
+              ),
+            )}
+            {item('Add font files…', addFont, styles.menuAction)}
+          </>
+        );
+      case 'size':
+        return <>{SIZES.map(pt => item(`${pt}`, () => applyRunStyle({size: pt * 2}, `size ${pt}`)))}</>;
+      default:
+        return null;
+    }
+  };
 
   return (
     <View style={styles.root}>
@@ -1144,12 +1365,11 @@ export function Reader(): React.JSX.Element {
         />
       ) : null}
       <View style={styles.header}>
-        {button('Open', open)}
-        {button('New', startNew)}
+        {menuButton('File', 'file')}
         <Text allowFontScaling={false} style={styles.title} numberOfLines={1}>
-          {doc ? `${dirty ? '• ' : ''}${doc.name.replace(/\.docx$/i, '')}` : 'DOCX'}
+          {doc ? `${dirty || pending.length > 0 ? '• ' : ''}${doc.name.replace(/\.docx$/i, '')}` : 'DOCX'}
         </Text>
-        {doc ? button('Contents', () => setContents(c => !c), headings.length === 0) : null}
+        {doc ? button(contents ? 'Back to page' : 'Contents', () => setContents(c => !c), headings.length === 0) : null}
         {doc ? button('◀', previous, history.length === 0) : null}
         {doc ? (
           <Text allowFontScaling={false} style={styles.page}>
@@ -1157,107 +1377,42 @@ export function Reader(): React.JSX.Element {
           </Text>
         ) : null}
         {doc ? button('▶', next, atEnd || brk.kind === 'pending') : null}
-        {button('Close', close)}
       </View>
-      <View style={styles.bar}>
-        {naming !== null ? (
-          <View style={styles.typing}>
-            <Text allowFontScaling={false} style={styles.nameLabel}>
-              {'Name:'}
-            </Text>
-            <TextInput
-              style={styles.nameInput}
-              value={naming}
-              onChangeText={setNaming}
-              autoFocus
-              selectTextOnFocus
-              allowFontScaling={false}
-              returnKeyType="done"
-              onSubmitEditing={createNew}
-            />
-            {button('Create', createNew)}
-            {button('Cancel', () => setNaming(null))}
-          </View>
-        ) : doc && typing && !contents ? (
-          <View style={styles.typing}>
-            <Text allowFontScaling={false} style={styles.caretHint} numberOfLines={1}>
-              {typing.mode === 'insert' ? 'Typing — Enter for a new paragraph; tap elsewhere or Done to finish.' : 'Type to replace the selection.'}
-            </Text>
-            {button('Done', done)}
-            {button('Cancel', cancelTyping)}
-          </View>
-        ) : doc && selection && !contents ? (
-          <ScrollView horizontal style={styles.actions} contentContainerStyle={styles.actionsInner}>
-            {button('Highlight', () => format('h', 'highlight'))}
-            {button('Bold', () => format('b', 'bold'))}
-            {button('Italic', () => format('i', 'italic'))}
-            {button('Underline', () => format('u', 'underline'))}
-            {button('H1', () => style('heading1', 'heading 1'))}
-            {button('H2', () => style('heading2', 'heading 2'))}
-            {button('Body', () => style('normal', 'body text'))}
-            {button('Font', () => setPanel(p => (p === 'font' ? null : 'font')))}
-            {button('Size', () => setPanel(p => (p === 'size' ? null : 'size')))}
-            {button('Delete', remove)}
-            {button('Replace', startReplace)}
-            {button('✕', () => setSelection(null))}
-          </ScrollView>
-        ) : doc && caret && !contents ? (
-          <View style={styles.caretRow}>
-            <Text allowFontScaling={false} style={styles.caretHint}>
-              {'Type to insert at the caret.'}
-            </Text>
-            {button('Done', done)}
-          </View>
-        ) : (
-          <Text allowFontScaling={false} style={styles.statusText} numberOfLines={2}>
-            {status || (doc && !readOnly ? 'Tap to type · drag across words to select · double-tap a word.' : '')}
-          </Text>
-        )}
+      <View style={styles.tools}>
         {doc && !readOnly ? (
-          <View style={styles.editButtons}>
-            {button('Undo', undo, edits.cursor === 0)}
-            {button('Redo', redo, edits.cursor === edits.steps.length)}
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            onScroll={e => {
+              toolScroll.current = e.nativeEvent.contentOffset.x;
+            }}
+            scrollEventThrottle={100}
+            contentContainerStyle={styles.toolsInner}>
+            {button('↶', undo, edits.cursor === 0 && pending.length === 0)}
+            {button('↷', redo, edits.cursor === edits.steps.length)}
+            <View style={styles.divider} />
+            {button('B', () => format('b', 'bold'), false, styles.square)}
+            {button('I', () => format('i', 'italic'), false, styles.square)}
+            {button('U', () => format('u', 'underline'), false, styles.square)}
+            {button('Mark', () => format('h', 'highlight'))}
+            <View style={styles.divider} />
+            {menuButton('Edit', 'edit')}
+            {menuButton('Style', 'style')}
+            {menuButton('List', 'list')}
+            {menuButton('Font', 'font')}
+            {menuButton('Size', 'size')}
+            <View style={styles.spacer} />
             {button('Save', save, !dirty && pending.length === 0)}
-          </View>
+          </ScrollView>
         ) : null}
       </View>
       <View style={styles.pageArea} onLayout={e => setPageH(Math.floor(e.nativeEvent.layout.height) - PAD * 2)}>
         {!doc ? (
           <View style={styles.empty}>
             <Text allowFontScaling={false} style={styles.emptyText}>
-              {'Tap Open to choose a Word document (.docx).'}
+              {'Open a Word document (.docx) or make a new one from the File menu.'}
             </Text>
           </View>
-        ) : panel && selection ? (
-          <ScrollView style={styles.contents}>
-            <View style={styles.panelHead}>
-              <Text allowFontScaling={false} style={styles.panelTitle}>
-                {panel === 'font' ? 'Font for the selection' : 'Size for the selection (points)'}
-              </Text>
-              {panel === 'font' ? button('Add font file…', addFont) : null}
-              {button('Close', () => setPanel(null))}
-            </View>
-            {panel === 'font'
-              ? fontChoices.map(f => (
-                  <Pressable key={f} onPress={() => applyRunStyle({font: f}, `font ${f}`)} style={styles.contentsRow}>
-                    <Text allowFontScaling={false} style={[styles.contentsText, fonts.has(f) ? {fontFamily: f} : null]}>
-                      {fonts.has(f) ? f : `${f}  (not on this Supernote — shows in the default font)`}
-                    </Text>
-                  </Pressable>
-                ))
-              : SIZES.map(pt => (
-                  <Pressable key={pt} onPress={() => applyRunStyle({size: pt * 2}, `size ${pt}`)} style={styles.contentsRow}>
-                    <Text allowFontScaling={false} style={styles.contentsText}>
-                      {`${pt}`}
-                    </Text>
-                  </Pressable>
-                ))}
-            {panel === 'font' ? (
-              <Text allowFontScaling={false} style={styles.panelNote}>
-                {'Fonts are .ttf or .otf files in MyStyle/Fonts. Fonts a document uses are found there by name; add any other font with "Add font file…".'}
-              </Text>
-            ) : null}
-          </ScrollView>
         ) : contents ? (
           <ScrollView style={styles.contents}>
             {headings.map(h => (
@@ -1293,7 +1448,14 @@ export function Reader(): React.JSX.Element {
             {/* Owns the pen, so nothing inks and no text handles the touch itself. */}
             <View
               style={StyleSheet.absoluteFill}
-              onStartShouldSetResponder={() => !readOnly}
+              onStartShouldSetResponder={() => {
+                // A tap on the page while a menu is open only closes the menu.
+                if (menu) {
+                  setMenu(null);
+                  return false;
+                }
+                return !readOnly;
+              }}
               onMoveShouldSetResponder={() => !readOnly}
               onResponderTerminationRequest={() => false}
               onResponderGrant={e => {
@@ -1308,6 +1470,27 @@ export function Reader(): React.JSX.Element {
             />
           </View>
         ) : null}
+        {menu ? (
+          <View style={[styles.menu, {left: Math.max(0, Math.min(menuX, 9999)), maxHeight: Math.max(240, pageH)}]}>
+            <ScrollView>{menuBody()}</ScrollView>
+          </View>
+        ) : null}
+      </View>
+      <View style={styles.statusLine}>
+        <Text allowFontScaling={false} style={styles.statusText} numberOfLines={1}>
+          {status ||
+            (typing
+              ? typing.mode === 'insert'
+                ? 'Typing. Enter starts a new paragraph.'
+                : 'Type to replace the selection.'
+              : caret
+              ? 'Type to insert at the caret.'
+              : doc && !readOnly
+              ? 'Tap to type · drag to select · double-tap a word.'
+              : '')}
+        </Text>
+        {typing ? button('Cancel', cancelTyping, false, styles.small) : null}
+        {typing || caret ? button('Done', done, false, styles.small) : null}
       </View>
     </View>
   );
@@ -1328,14 +1511,25 @@ const styles = StyleSheet.create({
   button: {borderWidth: 1, borderColor: '#000', borderRadius: 5, paddingVertical: 8, paddingHorizontal: 14, marginLeft: 8},
   buttonText: {color: '#000', fontSize: 16, fontWeight: '700'},
   disabled: {opacity: 0.3},
-  bar: {
-    height: BAR_H,
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: PAD,
-    borderBottomWidth: 1,
-    borderColor: '#000',
-  },
+  tools: {height: BAR_H, borderBottomWidth: 1, borderColor: '#000'},
+  toolsInner: {flexGrow: 1, alignItems: 'center', paddingHorizontal: PAD - 8, paddingRight: PAD},
+  divider: {width: 1, height: 30, backgroundColor: '#000', marginLeft: 12, marginRight: 4},
+  spacer: {flex: 1, minWidth: 16},
+  square: {minWidth: 44, alignItems: 'center', paddingHorizontal: 10},
+  small: {paddingVertical: 4, paddingHorizontal: 10},
+  buttonOpen: {backgroundColor: '#000'},
+  buttonOpenText: {color: '#fff'},
+  row: {flexDirection: 'row', marginTop: 10},
+  menu: {position: 'absolute', top: 0, width: 340, backgroundColor: '#fff', borderWidth: 2, borderColor: '#000'},
+  menuItem: {paddingVertical: 14, paddingHorizontal: 16, borderBottomWidth: 1, borderColor: '#bbb'},
+  menuText: {color: '#000', fontSize: 19},
+  menuH1: {fontSize: 24, fontWeight: '700'},
+  menuH2: {fontSize: 21, fontWeight: '700'},
+  menuTitle: {fontSize: 26},
+  menuMuted: {color: '#555'},
+  menuAction: {fontWeight: '700'},
+  nameForm: {padding: 16},
+  statusLine: {height: 40, flexDirection: 'row', alignItems: 'center', paddingHorizontal: PAD, borderTopWidth: 1, borderColor: '#000'},
   actions: {flex: 1},
   actionsInner: {alignItems: 'center'},
   editButtons: {flexDirection: 'row', marginLeft: 8},

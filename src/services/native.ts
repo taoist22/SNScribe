@@ -52,6 +52,8 @@ export type KeyPress = {key: string; shift: boolean; text?: string};
 type DocxKeysModule = {
   attach(tag: number): Promise<string>;
   copy(text: string): Promise<boolean>;
+  /** The clipboard's text, or null when it is empty or can't be read. */
+  clipboardText(): Promise<string | null>;
 };
 
 export const DocxKeys = NativeModules.DocxKeys as DocxKeysModule | undefined;

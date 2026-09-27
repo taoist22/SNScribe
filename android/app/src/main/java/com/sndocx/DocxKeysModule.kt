@@ -101,6 +101,11 @@ class DocxKeysModule(private val reactContext: ReactApplicationContext) : ReactC
         }
     }
 
+    @ReactMethod
+    fun clipboardText(promise: Promise) {
+        UiThreadUtil.runOnUiThread { promise.resolve(clipboardText()) }
+    }
+
     private fun clipboard() = reactContext.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
 
     private fun clipboardText(): String? = runCatching {
