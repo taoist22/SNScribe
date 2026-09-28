@@ -21,8 +21,17 @@ export function pictureEmu(pxW: number, pxH: number, maxW: number, maxH: number)
 }
 
 /** A figure label paragraph in `style`, and its number: "Figure 3" (APA), "Fig. 3." (MLA), "Figure 3." (Chicago). */
-function labelNumber(text: string, style: CiteStyle): {n: number; at: number; len: number} | null {
-  const re = style === 'apa' ? /^(Figure )(\d+)\s*$/ : style === 'mla' ? /^(Fig\. )(\d+)\./ : /^(Figure )(\d+)\./;
+function labelNumber(text: string, style: CiteStyle, kind: 'figure' | 'table' = 'figure'): {n: number; at: number; len: number} | null {
+  const re =
+    kind === 'table'
+      ? style === 'apa' || style === 'mla'
+        ? /^(Table )(\d+)\s*$/
+        : /^(Table )(\d+)\./
+      : style === 'apa'
+      ? /^(Figure )(\d+)\s*$/
+      : style === 'mla'
+      ? /^(Fig\. )(\d+)\./
+      : /^(Figure )(\d+)\./;
   const m = re.exec(text.trim());
   if (!m) {
     return null;
@@ -32,11 +41,11 @@ function labelNumber(text: string, style: CiteStyle): {n: number; at: number; le
 }
 
 /** Figure labels in reading order: paragraph and the place of its number. */
-export function figureLabels(blocks: Block[], style: CiteStyle): Array<{para: number; at: number; len: number}> {
+export function figureLabels(blocks: Block[], style: CiteStyle, kind: 'figure' | 'table' = 'figure'): Array<{para: number; at: number; len: number}> {
   const out: Array<{para: number; at: number; len: number}> = [];
   for (const b of blocks) {
     if (b.type === 'p') {
-      const l = labelNumber(paragraphText(b), style);
+      const l = labelNumber(paragraphText(b), style, kind);
       if (l) {
         out.push({para: b.index, at: l.at, len: l.len});
       }
@@ -105,4 +114,48 @@ export function figureOps(
   p += 1;
   ops.push({op: 'text', para: p, start: 0, end: 0, text: caption}, {op: 'format', para: p, start: 0, end: caption.length, prop: 'b', on: false}, {op: 'format', para: p, start: 0, end: caption.length, prop: 'i', on: false});
   return {ops, n};
+}
+
+/**
+ * The edits that add a table after paragraph `after`: rows × cols empty cells (a header row
+ * when `header`), with a label and title above it when `title` is given — APA: "Table N" in
+ * bold and the title in italics; MLA: "Table N" and the title; Chicago: "Table N. Title".
+ * Numbered among the tables around it; later tables renumbered. A plain paragraph follows
+ * the table (where the text goes on).
+ */
+export function tableOps(blocks: Block[], after: ParagraphBlock, size: {rows: number; cols: number; header: boolean}, title: string | null, style: CiteStyle): {ops: Op[]; n: number} {
+  const labels = title !== null ? figureLabels(blocks, style, 'table') : [];
+  const n = labels.filter(l => l.para <= after.index).length + 1;
+  const ops: Op[] = labels
+    .filter(l => l.para > after.index)
+    .map((l, i) => ({op: 'text', para: l.para, start: l.at, end: l.at + l.len, text: String(n + 1 + i)}));
+  const plain = (para: number, text: string, bold: boolean, italic: boolean): Op[] => [
+    {op: 'style', para, kind: 'normal'},
+    {op: 'para', para, align: 'left', line: DOUBLE, lineRule: 'auto', before: 0, after: 0, first: 0, pb: false},
+    ...(text
+      ? ([
+          {op: 'text', para, start: 0, end: 0, text},
+          {op: 'format', para, start: 0, end: text.length, prop: 'b', on: bold},
+          {op: 'format', para, start: 0, end: text.length, prop: 'i', on: italic},
+        ] as Op[])
+      : []),
+  ];
+  let p = after.index + 1;
+  ops.push({op: 'split', para: after.index, offset: paragraphText(after).length});
+  const t = (title ?? '').trim();
+  if (title !== null) {
+    const lines: Array<{text: string; b: boolean; i: boolean}> =
+      style === 'apa'
+        ? [{text: `Table ${n}`, b: true, i: false}, {text: t, b: false, i: true}]
+        : style === 'mla'
+        ? [{text: `Table ${n}`, b: false, i: false}, {text: t, b: false, i: false}]
+        : [{text: `Table ${n}. ${t}`.trim(), b: false, i: false}];
+    for (const line of lines) {
+      ops.push(...plain(p, line.text, line.b, line.i), {op: 'split', para: p, offset: line.text.length});
+      p += 1;
+    }
+  }
+  // The paragraph after the table: plain, no bold or italic carried over from a title.
+  ops.push({op: 'para', para: p, align: 'left', first: 0, pb: false}, {op: 'tableInsert', para: -1, before: p, rows: size.rows, cols: size.cols, header: size.header});
+  return {ops, n: title !== null ? n : 0};
 }

@@ -156,6 +156,18 @@ object DocxEditor {
          */
         data class StyleDefs(val defs: List<StyleDef>) : Op()
 
+        /** Cell [cell] of row [row] of table [table] (ordinal among the body's tables) gets the text [pieces] ("\n" = new paragraph). */
+        data class TableCell(val table: Int, val row: Int, val cell: Int, val pieces: List<DocxReader.NotePiece>) : Op()
+
+        /** A new empty row like row [row], above or [below] it. */
+        data class TableRowAdd(val table: Int, val row: Int, val below: Boolean) : Op()
+
+        /** Removes row [row] (never the last one). */
+        data class TableRowDelete(val table: Int, val row: Int) : Op()
+
+        /** A new table of [rows]×[cols] empty cells before paragraph [before]; the first row a [header] row. */
+        data class TableInsert(val before: Int, val rows: Int, val cols: Int, val header: Boolean) : Op()
+
         /** A footnote [id] with the text [pieces], its number at character [at] of [para]. */
         data class FootnoteAdd(val para: Int, val at: Int, val id: Int, val pieces: List<DocxReader.NotePiece>) : Op()
 
@@ -448,6 +460,11 @@ object DocxEditor {
                 deleteComments(document, pkg, op, notes)
                 continue
             }
+            if (op is Op.TableCell || op is Op.TableRowAdd || op is Op.TableRowDelete || op is Op.TableInsert) {
+                // Tables hold no body paragraphs: paragraph addresses and texts are unchanged.
+                table(document, paragraphs, op, notes)
+                continue
+            }
             if (op is Op.FootnoteAdd || op is Op.FootnoteSet || op is Op.FootnoteDelete) {
                 // Body text changes (a number added or removed), as plain splices, for verify.
                 val before = paragraphs.map { paragraphText(it) }
@@ -510,7 +527,8 @@ object DocxEditor {
                 is Op.Link -> op.para
                 is Op.Unlink -> op.para
                 is Op.PageSetup, is Op.Defaults, is Op.HeaderFooter, is Op.Revision, is Op.CommentAdd, is Op.CommentDelete, is Op.InkAdd, is Op.InkDelete, is Op.ImageAdd, is Op.StyleDefs,
-                is Op.FootnoteAdd, is Op.FootnoteSet, is Op.FootnoteDelete -> error("unreachable")
+                is Op.FootnoteAdd, is Op.FootnoteSet, is Op.FootnoteDelete,
+                is Op.TableCell, is Op.TableRowAdd, is Op.TableRowDelete, is Op.TableInsert -> error("unreachable")
             }
             val p = checkNotNull(paragraphs.getOrNull(index)) { "no paragraph $index for $op" }
             when (op) {
@@ -525,7 +543,8 @@ object DocxEditor {
                 is Op.Link -> link(document, p, op, pkg, styleIds, notes)
                 is Op.Unlink -> unlink(p, op, notes)
                 is Op.PageSetup, is Op.Defaults, is Op.HeaderFooter, is Op.Revision, is Op.CommentAdd, is Op.CommentDelete, is Op.InkAdd, is Op.InkDelete, is Op.ImageAdd, is Op.StyleDefs,
-                is Op.FootnoteAdd, is Op.FootnoteSet, is Op.FootnoteDelete -> {}
+                is Op.FootnoteAdd, is Op.FootnoteSet, is Op.FootnoteDelete,
+                is Op.TableCell, is Op.TableRowAdd, is Op.TableRowDelete, is Op.TableInsert -> {}
             }
             // Splits and joins renumber the paragraphs after them.
             if (op is Op.Split || op is Op.Join) paragraphs = bodyParagraphs(document)
@@ -1059,6 +1078,131 @@ object DocxEditor {
         for (prefix in listOf("w", "wp", "a", "pic", "r")) run.removeAttributeNS("http://www.w3.org/2000/xmlns/", prefix)
         placeAt(p, op.at, run, before = true)
         notes.add("ink note ${op.id} at p${op.para}:${op.at} → $part (${"%.2f".format(inches)}″)")
+    }
+
+    // ---------------------------------------------------------------- tables
+
+    private fun bodyTables(document: Document): List<Element> {
+        val body = child(document.documentElement, "body") ?: return emptyList()
+        return elementChildren(body).filter { it.localName == "tbl" && it.namespaceURI == W }
+    }
+
+    private fun table(document: Document, paragraphs: List<Element>, op: Op, notes: MutableList<String>) {
+        if (op is Op.TableInsert) {
+            insertTable(document, paragraphs, op, notes)
+            return
+        }
+        val index = when (op) {
+            is Op.TableCell -> op.table
+            is Op.TableRowAdd -> op.table
+            is Op.TableRowDelete -> op.table
+            else -> error("not a table edit: $op")
+        }
+        val tbl = checkNotNull(bodyTables(document).getOrNull(index)) { "no table $index" }
+        val rows = elementChildren(tbl).filter { it.localName == "tr" }
+        when (op) {
+            is Op.TableCell -> {
+                val tr = checkNotNull(rows.getOrNull(op.row)) { "table $index has no row ${op.row}" }
+                val tc = checkNotNull(elementChildren(tr).filter { it.localName == "tc" }.getOrNull(op.cell)) { "row ${op.row} has no cell ${op.cell}" }
+                check(elementChildren(tc).none { it.localName == "tbl" }) { "that cell holds a table of its own" }
+                setCell(document, tc, op.pieces)
+                notes.add("table $index cell ${op.row},${op.cell}")
+            }
+            is Op.TableRowAdd -> {
+                val tr = checkNotNull(rows.getOrNull(op.row)) { "table $index has no row ${op.row}" }
+                val copy = tr.cloneNode(true) as Element
+                // A new row is an ordinary row: not a repeated header, merges from above undone.
+                child(copy, "trPr")?.let { trPr -> child(trPr, "tblHeader")?.let { trPr.removeChild(it) } }
+                for (tc in elementChildren(copy).filter { it.localName == "tc" }) {
+                    child(tc, "tcPr")?.let { tcPr -> child(tcPr, "vMerge")?.let { tcPr.removeChild(it) } }
+                    elementChildren(tc).filter { it.localName == "tbl" }.forEach { tc.removeChild(it) }
+                    setCell(document, tc, emptyList())
+                }
+                tbl.insertBefore(copy, if (op.below) tr.nextSibling else tr)
+                notes.add("table $index row added ${if (op.below) "below" else "above"} ${op.row}")
+            }
+            is Op.TableRowDelete -> {
+                check(rows.size > 1) { "a table keeps at least one row" }
+                val tr = checkNotNull(rows.getOrNull(op.row)) { "table $index has no row ${op.row}" }
+                tbl.removeChild(tr)
+                notes.add("table $index row ${op.row} deleted")
+            }
+            else -> {}
+        }
+    }
+
+    /**
+     * A cell's text: its paragraphs replaced by one per line of [pieces], keeping the first
+     * paragraph's settings and the first run's look (font, size) — bold and italic as given.
+     */
+    private fun setCell(document: Document, tc: Element, pieces: List<DocxReader.NotePiece>) {
+        val paras = elementChildren(tc).filter { it.localName == "p" }
+        val first = paras.firstOrNull()
+        val pPr = first?.let { child(it, "pPr") }?.cloneNode(true) as Element?
+        val base = first?.let { p -> elementChildren(p).firstOrNull { it.localName == "r" }?.let { child(it, "rPr") } }?.cloneNode(true) as Element?
+        base?.let { r -> elementChildren(r).filter { it.localName in setOf("b", "bCs", "i", "iCs", "rPrChange") }.forEach { r.removeChild(it) } }
+        paras.forEach { tc.removeChild(it) }
+        val lines = ArrayList<MutableList<DocxReader.NotePiece>>().apply { add(ArrayList()) }
+        for (piece in pieces) {
+            val parts = piece.text.split('\n')
+            parts.forEachIndexed { i, part ->
+                if (i > 0) lines.add(ArrayList())
+                if (part.isNotEmpty()) lines.last().add(piece.copy(text = part))
+            }
+        }
+        for (line in lines) {
+            val p = document.createElementNS(W, "w:p")
+            pPr?.let { p.appendChild(it.cloneNode(true)) }
+            for (piece in line) {
+                val r = document.createElementNS(W, "w:r")
+                val rPr = (base?.cloneNode(true) as Element?) ?: document.createElementNS(W, "w:rPr")
+                if (piece.bold) insertInOrder(rPr, document.createElementNS(W, "w:b"), RPR_ORDER)
+                if (piece.italic) insertInOrder(rPr, document.createElementNS(W, "w:i"), RPR_ORDER)
+                if (rPr.hasChildNodes()) r.appendChild(rPr)
+                val t = document.createElementNS(W, "w:t")
+                t.setAttributeNS(XMLConstants.XML_NS_URI, "xml:space", "preserve")
+                t.textContent = piece.text
+                r.appendChild(t)
+                p.appendChild(r)
+            }
+            tc.appendChild(p)
+        }
+    }
+
+    /**
+     * A plain table before body paragraph [Op.TableInsert.before], as wide as the text, equal
+     * columns — ruled as APA tables are: a line above and below the table and under the
+     * header row, no vertical lines.
+     */
+    private fun insertTable(document: Document, paragraphs: List<Element>, op: Op.TableInsert, notes: MutableList<String>) {
+        val at = checkNotNull(paragraphs.getOrNull(op.before)) { "no paragraph ${op.before} to put a table before" }
+        check(op.rows in 1..50 && op.cols in 1..12) { "table size out of range" }
+        val body = checkNotNull(child(document.documentElement, "body"))
+        val sect = child(body, "sectPr")
+        val pgSz = sect?.let { child(it, "pgSz") }
+        val pgMar = sect?.let { child(it, "pgMar") }
+        fun twips(e: Element?, a: String, dflt: Int) = e?.getAttributeNS(W, a)?.toIntOrNull() ?: dflt
+        val textW = (twips(pgSz, "w", 12240) - twips(pgMar, "left", 1440) - twips(pgMar, "right", 1440)).coerceAtLeast(1440)
+        val colW = textW / op.cols
+        val line = "w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"auto\""
+        val grid = (1..op.cols).joinToString("") { "<w:gridCol w:w=\"$colW\"/>" }
+        fun row(header: Boolean) = buildString {
+            append("<w:tr>")
+            if (header) append("<w:trPr><w:tblHeader/></w:trPr>")
+            repeat(op.cols) {
+                append("<w:tc><w:tcPr><w:tcW w:w=\"$colW\" w:type=\"dxa\"/>")
+                if (header) append("<w:tcBorders><w:bottom $line/></w:tcBorders>")
+                append("</w:tcPr><w:p><w:pPr><w:spacing w:before=\"0\" w:after=\"0\"/><w:ind w:left=\"0\" w:firstLine=\"0\"/></w:pPr></w:p></w:tc>")
+            }
+            append("</w:tr>")
+        }
+        val xml = "<w:tbl xmlns:w=\"$W\"><w:tblPr><w:tblW w:w=\"$textW\" w:type=\"dxa\"/><w:tblBorders><w:top $line/><w:bottom $line/></w:tblBorders>" +
+            "<w:tblLayout w:type=\"fixed\"/><w:tblLook w:val=\"04A0\" w:firstRow=\"1\" w:lastRow=\"0\" w:firstColumn=\"1\" w:lastColumn=\"0\" w:noHBand=\"0\" w:noVBand=\"1\"/></w:tblPr>" +
+            "<w:tblGrid>$grid</w:tblGrid>" + (0 until op.rows).joinToString("") { row(op.header && it == 0) } + "</w:tbl>"
+        val tbl = document.importNode(DocxReader.parse(xml.toByteArray()).documentElement, true) as Element
+        tbl.removeAttributeNS("http://www.w3.org/2000/xmlns/", "w")
+        at.parentNode.insertBefore(tbl, at)
+        notes.add("table ${op.rows}×${op.cols} before p${op.before}")
     }
 
     // ---------------------------------------------------------------- footnotes

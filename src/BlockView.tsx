@@ -2,7 +2,7 @@ import React from 'react';
 import {Image, StyleSheet, Text, View, type LayoutChangeEvent, type TextLayoutEventData, type NativeSyntheticEvent} from 'react-native';
 import {markSelection, splitRuns} from './domain/edits';
 import {shownFont} from './domain/fonts';
-import {OBJECT, type Block, type ParagraphBlock, type Run} from './model/docx';
+import {OBJECT, type Block, type ParagraphBlock, type Run, type TableBlock} from './model/docx';
 import type {LineBox} from './domain/paging';
 
 /**
@@ -34,8 +34,10 @@ type Props = {
   fonts?: Set<string>;
   /** Text size factor chosen by the reader (A− / A+); 1 = the document's sizes. */
   scale?: number;
-  /** The text column's width: pictures wider than it are shown smaller. */
+  /** The text column's width: pictures wider than it are shown smaller; tables fill it. */
   width?: number;
+  /** For a table: where each row is (y, height in the block), for finding the cell under the pen. */
+  onRow?: (row: number, y: number, height: number) => void;
 };
 
 const SYMBOL: Record<string, string> = {image: '▣', note: '*', object: '◇', ink: '✎'};
@@ -261,6 +263,70 @@ function ParagraphView({p, selection, spell, onFrame, onLines, textRef, onTextFr
   );
 }
 
+/**
+ * Where each cell of each row sits across the table: x and width in dp, from the table's
+ * grid columns (Word's widths, scaled to `width`), spans counted. Shared with the reader,
+ * which finds the cell under the pen with it.
+ */
+export function cellColumns(table: TableBlock, width: number): Array<Array<{x: number; w: number}>> {
+  const cols = Math.max(1, table.cols);
+  const ws = table.widths && table.widths.length === cols && table.widths.every(w => w > 0) ? table.widths : Array(cols).fill(1);
+  const total = ws.reduce((a, b) => a + b, 0);
+  const edges = [0];
+  for (const w of ws) {
+    edges.push(edges[edges.length - 1] + (w / total) * width);
+  }
+  return (table.grid ?? []).map(row => {
+    let g = 0;
+    return row.map(c => {
+      const span = Math.max(1, c.s ?? 1);
+      const x = edges[Math.min(g, cols)];
+      const end = edges[Math.min(g + span, cols)];
+      g += span;
+      return {x, w: Math.max(0, end - x)};
+    });
+  });
+}
+
+/** A table drawn as a grid: its text per cell (italics and bold kept); a tap opens a cell. */
+function TableView({table, width, scale, onFrame, onRow}: {table: TableBlock; width: number; scale: number; onFrame: (e: LayoutChangeEvent) => void; onRow?: (row: number, y: number, h: number) => void}) {
+  const cols = cellColumns(table, width);
+  const size = Math.round(17 * scale);
+  return (
+    <View style={styles.table} onLayout={onFrame}>
+      {(table.grid ?? []).map((row, r) => (
+        <View key={r} style={styles.tableRow} onLayout={e => onRow?.(r, e.nativeEvent.layout.y, e.nativeEvent.layout.height)}>
+          {row.map((c, k) => (
+            <View key={k} style={[styles.tableCell, {left: cols[r][k].x, width: cols[r][k].w}, c.m ? styles.tableMerged : null]}>
+              {c.m ? null : c.n ? (
+                <Text allowFontScaling={false} style={[styles.tableText, {fontSize: size}]}>
+                  {'▦ table'}
+                </Text>
+              ) : (
+                <Text allowFontScaling={false} style={[styles.tableText, {fontSize: size, lineHeight: Math.round(size * 1.3)}]}>
+                  {c.p.map((x, i) => (
+                    <Text key={i} style={[x.b ? styles.bold : null, x.i ? styles.italic : null]}>
+                      {x.t}
+                    </Text>
+                  ))}
+                </Text>
+              )}
+            </View>
+          ))}
+          {/* The row is as tall as its tallest cell: cells are placed side by side absolutely, so one invisible copy sets the height. */}
+          <View style={styles.tableSizer} pointerEvents="none">
+            {row.map((c, k) => (
+              <Text key={k} allowFontScaling={false} style={[styles.tableText, styles.tableGhost, {fontSize: size, lineHeight: Math.round(size * 1.3), width: cols[r][k].w}]}>
+                {c.m || c.n ? ' ' : c.p.map(x => x.t).join('') || ' '}
+              </Text>
+            ))}
+          </View>
+        </View>
+      ))}
+    </View>
+  );
+}
+
 const sameRange = (a?: {start: number; end: number} | null, b?: {start: number; end: number} | null) =>
   a === b || (!!a && !!b && a.start === b.start && a.end === b.end) || (!a && !b);
 
@@ -302,6 +368,9 @@ function BlockViewInner({block, ...rest}: Props): React.JSX.Element {
     return <ParagraphView p={block} {...rest} />;
   }
   const {onFrame} = rest;
+  if (block.type === 'table' && block.grid && block.grid.length > 0) {
+    return <TableView table={block} width={rest.width ?? 700} scale={rest.scale ?? 1} onFrame={onFrame} onRow={rest.onRow} />;
+  }
   const title =
     block.type === 'table'
       ? `▦ Table · ${block.rows} × ${block.cols} — shown as a summary`
@@ -342,6 +411,13 @@ const styles = StyleSheet.create({
   deleted: {color: '#777'},
   pageBreak: {height: 28, justifyContent: 'center', alignItems: 'center', borderTopWidth: 1, borderColor: '#000', borderStyle: 'dashed'},
   pageBreakText: {color: '#000', fontSize: 13},
+  table: {borderTopWidth: 1, borderBottomWidth: 1, borderColor: '#000', marginVertical: 10},
+  tableRow: {borderTopWidth: StyleSheet.hairlineWidth, borderColor: '#999'},
+  tableCell: {position: 'absolute', top: 0, bottom: 0, paddingHorizontal: 6, paddingVertical: 4, borderLeftWidth: StyleSheet.hairlineWidth, borderColor: '#bbb'},
+  tableMerged: {backgroundColor: '#f2f2f2'},
+  tableText: {color: '#000'},
+  tableSizer: {flexDirection: 'row'},
+  tableGhost: {opacity: 0, paddingHorizontal: 6, paddingVertical: 4},
   locked: {borderWidth: 1, borderColor: '#000', borderStyle: 'dashed', padding: 10, marginBottom: 12},
   lockedTitle: {color: '#000', fontSize: 17, fontWeight: '700'},
   lockedPreview: {color: '#333', fontSize: 16, fontStyle: 'italic', marginTop: 4},

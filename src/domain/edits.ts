@@ -6,7 +6,7 @@
 // Offsets are into a paragraph's text (runs' `t` joined; objects are one U+FFFC), the
 // same text the native reader and writer use.
 
-import {OBJECT, paragraphText, type Block, type Comment, type Footnote, type Mark, type NotePiece, type PageSetup, type ParagraphBlock, type Revision, type Run, type StyleLook} from '../model/docx';
+import {OBJECT, paragraphText, type Block, type Comment, type Footnote, type Mark, type NotePiece, type TableCell, type PageSetup, type ParagraphBlock, type Revision, type Run, type StyleLook} from '../model/docx';
 
 export type FormatProp = 'b' | 'i' | 'u' | 'h' | 's' | 'sup' | 'sub';
 export type StyleKind = 'heading1' | 'heading2' | 'heading3' | 'title' | 'quote' | 'normal';
@@ -92,6 +92,12 @@ export type Op =
    * picture `png` (width×height px). Its anchor is one object character in the text.
    */
   | {op: 'ink'; para: number; at: number; id: string; png: string; width: number; height: number}
+  /** Table edits (DocxEditor.table): `table` is the table's ordinal among the body's tables. */
+  | {op: 'tableCell'; para: -1; table: number; row: number; cell: number; pieces: NotePiece[]}
+  | {op: 'tableRowAdd'; para: -1; table: number; row: number; below: boolean}
+  | {op: 'tableRowDelete'; para: -1; table: number; row: number}
+  /** A new rows × cols table before paragraph `before` (the first row a header row when `header`). */
+  | {op: 'tableInsert'; para: -1; before: number; rows: number; cols: number; header: boolean}
   /** Footnote `id` with the text `pieces`, its number at `at` (DocxEditor.addFootnote). */
   | {op: 'footnote'; para: number; at: number; id: number; pieces: NotePiece[]}
   /** Footnote `id`'s text becomes `pieces`. */
@@ -449,6 +455,10 @@ export function applyOps(blocks: Block[], ops: Op[]): Block[] {
     if (op.op === 'headerFooter' || op.op === 'page' || op.op === 'footnoteSet') {
       continue;
     }
+    if (op.op === 'tableCell' || op.op === 'tableRowAdd' || op.op === 'tableRowDelete' || op.op === 'tableInsert') {
+      tableEdit(out, op);
+      continue;
+    }
     if (op.op === 'footnoteDelete') {
       const id = String(op.id);
       for (let j = 0; j < out.length; j++) {
@@ -726,6 +736,46 @@ export function threadIds(comments: Comment[], id: string): number[] {
     out.push(...comments.filter(c => c.parent === out[i]).map(c => c.id));
   }
   return out.map(Number);
+}
+
+/** Mirrors DocxEditor.table: a cell's text, a row added or removed, a table inserted. */
+function tableEdit(out: Block[], op: Extract<Op, {op: 'tableCell' | 'tableRowAdd' | 'tableRowDelete' | 'tableInsert'}>): void {
+  if (op.op === 'tableInsert') {
+    const at = out.findIndex(b => b.type === 'p' && b.index === op.before);
+    if (at < 0) {
+      return;
+    }
+    const ordinal = out.slice(0, at).filter(b => b.type === 'table').length;
+    for (let j = at; j < out.length; j++) {
+      const b = out[j];
+      if (b.type === 'table') {
+        out[j] = {...b, t: (b.t ?? 0) + 1};
+      }
+    }
+    const grid = Array.from({length: op.rows}, () => Array.from({length: op.cols}, () => ({p: []}) as TableCell));
+    out.splice(at, 0, {type: 'table', rows: op.rows, cols: op.cols, preview: '', t: ordinal, widths: Array(op.cols).fill(1), grid});
+    return;
+  }
+  const j = out.findIndex(b => b.type === 'table' && b.t === op.table);
+  const b = out[j];
+  if (j < 0 || b.type !== 'table' || !b.grid) {
+    return;
+  }
+  const grid = b.grid.map(r => [...r]);
+  if (op.op === 'tableCell') {
+    if (grid[op.row]?.[op.cell]) {
+      grid[op.row][op.cell] = {...grid[op.row][op.cell], p: op.pieces.filter(x => x.t)};
+    }
+  } else if (op.op === 'tableRowAdd') {
+    const like = grid[op.row];
+    if (like) {
+      grid.splice(op.below ? op.row + 1 : op.row, 0, like.map(c => ({...(c.s ? {s: c.s} : {}), p: []})));
+    }
+  } else if (grid.length > 1) {
+    grid.splice(op.row, 1);
+  }
+  const preview = grid.flat().map(c => c.p.map(x => x.t).join('')).join(' ').replace(/\s+/g, ' ').trim().slice(0, 120);
+  out[j] = {...b, grid, rows: grid.length, preview};
 }
 
 /** The footnotes after `ops`: added, retyped and removed ones. */

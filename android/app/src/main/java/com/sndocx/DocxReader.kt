@@ -158,27 +158,36 @@ object DocxReader {
     /** The footnotes in a footnotes part, in order, leaving out Word's separators. */
     fun footnotes(part: Document): List<Footnote> =
         elementChildren(part.documentElement).filter { it.localName == "footnote" && it.namespaceURI == W && it.getAttributeNS(W, "type").let { t -> t.isEmpty() || t == "normal" } }.map { f ->
-            val pieces = ArrayList<NotePiece>()
-            for ((pi, p) in elementChildren(f).filter { it.localName == "p" }.withIndex()) {
-                if (pi > 0) pieces.add(NotePiece("\n"))
-                for (seg in segments(p)) {
-                    if (!seg.isRun || elementChildren(seg.el).any { it.localName == "footnoteRef" }) continue
-                    val text = runText(seg.el).replace(OBJECT.toString(), "")
-                    if (text.isEmpty()) continue
-                    val rPr = child(seg.el, "rPr")
-                    val piece = NotePiece(text, isOn(rPr?.let { child(it, "i") }), isOn(rPr?.let { child(it, "b") }))
-                    val last = pieces.lastOrNull()
-                    if (last != null && last.italic == piece.italic && last.bold == piece.bold && last.text != "\n") {
-                        pieces[pieces.size - 1] = last.copy(text = last.text + piece.text)
-                    } else {
-                        pieces.add(piece)
-                    }
-                }
-            }
+            val pieces = textPieces(elementChildren(f).filter { it.localName == "p" }).toMutableList()
             // Word puts a space between the number and the text: not part of the text.
             if (pieces.isNotEmpty()) pieces[0] = pieces[0].copy(text = pieces[0].text.trimStart())
             Footnote(f.getAttributeNS(W, "id"), pieces.filter { it.text.isNotEmpty() })
         }
+
+    /**
+     * The text of some paragraphs (a footnote's, a table cell's) as pieces with their own
+     * italics and bold; paragraphs joined by "\n". A footnote's number mark is left out.
+     */
+    fun textPieces(paras: List<Element>): List<NotePiece> {
+        val pieces = ArrayList<NotePiece>()
+        for ((pi, p) in paras.withIndex()) {
+            if (pi > 0) pieces.add(NotePiece("\n"))
+            for (seg in segments(p)) {
+                if (!seg.isRun || elementChildren(seg.el).any { it.localName == "footnoteRef" }) continue
+                val text = runText(seg.el).replace(OBJECT.toString(), "")
+                if (text.isEmpty()) continue
+                val rPr = child(seg.el, "rPr")
+                val piece = NotePiece(text, isOn(rPr?.let { child(it, "i") }), isOn(rPr?.let { child(it, "b") }))
+                val last = pieces.lastOrNull()
+                if (last != null && last.italic == piece.italic && last.bold == piece.bold && last.text != "\n") {
+                    pieces[pieces.size - 1] = last.copy(text = last.text + piece.text)
+                } else {
+                    pieces.add(piece)
+                }
+            }
+        }
+        return pieces
+    }
     const val REL_COMMENTS_EXTENDED = "http://schemas.microsoft.com/office/2011/relationships/commentsExtended"
     const val W14 = "http://schemas.microsoft.com/office/word/2010/wordml"
     const val W15 = "http://schemas.microsoft.com/office/word/2012/wordml"
@@ -467,7 +476,39 @@ object DocxReader {
         val text: String get() = runs.joinToString("") { it.text }
     }
 
-    data class Table(val rows: Int, val cols: Int, val preview: String) : Block()
+    /**
+     * A top-level table: [index] is its ordinal among the body's tables (what edits address),
+     * [widths] its grid columns (twips), [grid] its rows of cells as Word lists them.
+     */
+    data class Table(
+        val rows: Int,
+        val cols: Int,
+        val preview: String,
+        val index: Int = 0,
+        val widths: List<Int> = emptyList(),
+        val grid: List<List<Cell>> = emptyList(),
+    ) : Block()
+
+    /** A table cell: how many grid columns it spans, whether it continues a merge from above (shown empty), its text. */
+    data class Cell(val span: Int, val merged: Boolean, val pieces: List<NotePiece>, val nested: Boolean = false)
+
+    /** A table's structure for the screen. */
+    fun tableOf(tbl: Element, index: Int): Table {
+        val rows = elementChildren(tbl).filter { it.localName == "tr" }
+        val grid = rows.map { tr ->
+            elementChildren(tr).filter { it.localName == "tc" }.map { tc ->
+                val tcPr = child(tc, "tcPr")
+                val span = tcPr?.let { child(it, "gridSpan") }?.getAttributeNS(W, "val")?.toIntOrNull() ?: 1
+                val vMerge = tcPr?.let { child(it, "vMerge") }
+                val merged = vMerge != null && vMerge.getAttributeNS(W, "val").let { it.isEmpty() || it == "continue" }
+                val nested = elementChildren(tc).any { it.localName == "tbl" }
+                Cell(maxOf(1, span), merged, textPieces(elementChildren(tc).filter { it.localName == "p" }), nested)
+            }
+        }
+        val widths = child(tbl, "tblGrid")?.let { g -> elementChildren(g).filter { it.localName == "gridCol" }.map { it.getAttributeNS(W, "w").toIntOrNull() ?: 0 } }.orEmpty()
+        val cols = maxOf(widths.size, grid.maxOfOrNull { r -> r.sumOf { it.span } } ?: 0)
+        return Table(rows.size, cols, preview(tbl), index, widths, grid)
+    }
 
     data class Protected(val what: String, val preview: String) : Block()
 
@@ -562,10 +603,7 @@ object DocxReader {
             when (el.localName) {
                 "p" -> blocks.add(ctx.paragraph(el, paraIndex++))
                 "tbl" -> {
-                    ctx.tables++
-                    val rows = elementChildren(el).filter { it.localName == "tr" }
-                    val cols = rows.maxOfOrNull { r -> elementChildren(r).count { it.localName == "tc" } } ?: 0
-                    blocks.add(Table(rows.size, cols, preview(el)))
+                    blocks.add(tableOf(el, ctx.tables++))
                     ctx.scan(el)
                 }
                 "sdt" -> {

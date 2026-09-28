@@ -15,11 +15,11 @@ import {
   type LayoutChangeEvent,
 } from 'react-native';
 import {PluginManager, RattaFileSelector} from 'sn-plugin-lib';
-import {BlockView} from './BlockView';
+import {BlockView, cellColumns} from './BlockView';
 import {PageCounter} from './PageCounter';
 import {pageInfo, pageMarks} from './domain/pageInfo';
 import {targetLabel, wordCounts} from './domain/wordcount';
-import {figureOps, pictureEmu} from './domain/figures';
+import {figureOps, pictureEmu, tableOps} from './domain/figures';
 import {editPieces, noteText} from './domain/footnotes';
 import {TouchLayer} from './services/touch';
 import {
@@ -73,7 +73,7 @@ import {QUOTES_KEY, SOURCES_KEY, fileName, isEpub, parseList, parseMap, quoteWit
 import {detailsFromEpub, formatSource, type Details} from './domain/reference';
 import {misspelledRanges, normal, tokens} from './domain/spelling';
 import {anchorAfter, findBreak, pageIndexOf, pageOfChar, windowEnd, type Anchor, type BlockBox, type Break, type LineBox, type PageStart} from './domain/paging';
-import {countWords, fontsUsed, outline, paragraphText, wordCount, type Block, type DocxDocument, type ParagraphBlock, type Run} from './model/docx';
+import {countWords, fontsUsed, outline, paragraphText, wordCount, type Block, type DocxDocument, type ParagraphBlock, type Run, type TableBlock} from './model/docx';
 import {ensureFileReadPermission, ensureFileWritePermission, ensureInternetPermission} from './pluginPermissions';
 import {Docx, DocxKeys, DocxText, errorText, log, nativeBuild, type KeyPress} from './services/native';
 
@@ -135,7 +135,7 @@ type Typing = {mode: 'insert'; at: Pos} | {mode: 'replace'; range: Range};
 type HfLine = {text: string; align: 'left' | 'center' | 'right'; page: boolean};
 
 type Menu =
-  | 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count' | 'page' | 'preset' | 'header' | 'link' | 'thread' | 'comment' | 'note' | 'hl' | 'find' | 'cite' | 'quotes' | 'spell' | 'goto' | 'picture' | 'footnote'
+  | 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count' | 'page' | 'preset' | 'header' | 'link' | 'thread' | 'comment' | 'note' | 'hl' | 'find' | 'cite' | 'quotes' | 'spell' | 'goto' | 'picture' | 'footnote' | 'cell' | 'table'
   | 'recent' | 'versions' | 'recover';
 
 /** Drop-down menu width; menus are kept inside the screen. */
@@ -168,6 +168,17 @@ export function Reader(): React.JSX.Element {
   /** Pages view: only the pages with comments, handwritten notes or tracked changes. */
   const [notesOnly, setNotesOnly] = useState(false);
   const [goToText, setGoToText] = useState('');
+  /** The cell being edited (table ordinal, row, cell) and its text. */
+  const [cellEdit, setCellEdit] = useState<{table: number; row: number; cell: number; text: string; note: string}>({table: 0, row: 0, cell: 0, text: '', note: ''});
+  /** Insert table…: after which paragraph, its size, header row, label and title. */
+  const [tbl, setTbl] = useState<{para: number; rows: number; cols: number; header: boolean; label: boolean; title: string}>({
+    para: -1,
+    rows: 3,
+    cols: 3,
+    header: true,
+    label: true,
+    title: '',
+  });
   /** The footnote panel: an existing footnote (its id) or a new one at `at`, and the text being edited. */
   const [fnEdit, setFnEdit] = useState<{id: string | null; at: Pos | null; text: string; note: string}>({id: null, at: null, text: '', note: ''});
   /** Insert picture…: the file chosen, its pixels, and the figure label/title to add. */
@@ -459,12 +470,15 @@ export function Reader(): React.JSX.Element {
   const frames = useRef<Array<Frame | undefined>>([]);
   const lines = useRef<Array<LineBox[] | undefined>>([]);
   const textFrames = useRef<Array<{x: number; y: number} | undefined>>([]);
+  /** For a table in slot i: its rows' y and height (in the table), to find the cell under the pen. */
+  const tableRows = useRef<Array<Array<{y: number; h: number}> | undefined>>([]);
   const textRefs = useRef<Array<Text | null>>([]);
   if (measuredFor.current !== pageKey) {
     measuredFor.current = pageKey;
     frames.current = [];
     lines.current = [];
     textFrames.current = [];
+    tableRows.current = [];
   }
   const brk: Break = measured?.key === pageKey ? measured.brk : {kind: 'pending'};
   const atEnd = !doc || (brk.kind === 'after' && end >= blocks.length);
@@ -513,9 +527,10 @@ export function Reader(): React.JSX.Element {
     lines: Array<(l: LineBox[]) => void>;
     text: Array<(e: LayoutChangeEvent) => void>;
     ref: Array<(t: Text | null) => void>;
-  }>({key: '', frame: [], lines: [], text: [], ref: []});
+    row: Array<(r: number, y: number, h: number) => void>;
+  }>({key: '', frame: [], lines: [], text: [], ref: [], row: []});
   if (slotCallbacks.current.key !== pageKey) {
-    slotCallbacks.current = {key: pageKey, frame: [], lines: [], text: [], ref: []};
+    slotCallbacks.current = {key: pageKey, frame: [], lines: [], text: [], ref: [], row: []};
   }
   /** The slot's callback of one kind, made once per page. */
   const slot = <T,>(list: T[], i: number, make: () => T): T => {
@@ -542,6 +557,13 @@ export function Reader(): React.JSX.Element {
     slot(slotCallbacks.current.text, i, () => (e: LayoutChangeEvent) => {
       const {x, y} = e.nativeEvent.layout;
       textFrames.current[i] = {x, y};
+    });
+
+  const onRowFor = (i: number) =>
+    slot(slotCallbacks.current.row, i, () => (r: number, y: number, h: number) => {
+      const rows = tableRows.current[i] ?? [];
+      rows[r] = {y, h};
+      tableRows.current[i] = rows;
     });
 
   const textRefFor = (i: number) =>
@@ -1275,6 +1297,104 @@ export function Reader(): React.JSX.Element {
     setStatus('Footnote deleted; the ones after it are renumbered. Undo puts it back.');
   };
 
+  // ---------------------------------------------------------------- tables
+
+  /** The table cell under a point of the page (as the pen gives it), or null. */
+  const tableCellAt = (x: number, y: number): {table: number; row: number; cell: number} | null => {
+    const colY = y + anchor.offset;
+    for (let i = 0; i < window.length; i++) {
+      const b = window[i];
+      const f = frames.current[i];
+      if (b.type !== 'table' || !b.grid || !f || colY < f.top || colY >= f.top + f.height) {
+        continue;
+      }
+      const ly = colY - f.top;
+      const r = (tableRows.current[i] ?? []).findIndex(row => !!row && ly >= row.y && ly < row.y + row.h);
+      if (r < 0) {
+        return null;
+      }
+      const lx = x - f.x;
+      const c = (cellColumns(b, textW)[r] ?? []).findIndex(col => lx >= col.x && lx < col.x + col.w);
+      return c >= 0 ? {table: b.t ?? 0, row: r, cell: c} : null;
+    }
+    return null;
+  };
+
+  const tableBlock = (t: number) => blocks.find((b): b is TableBlock => b.type === 'table' && b.t === t);
+
+  const openCell = (at: {table: number; row: number; cell: number}) => {
+    const c = tableBlock(at.table)?.grid?.[at.row]?.[at.cell];
+    if (!c) {
+      return;
+    }
+    setCellEdit({
+      ...at,
+      text: c.p.map(x => x.t).join(''),
+      note: c.m ? 'This cell is merged with the one above it: edit that one.' : c.n ? 'This cell holds a table of its own, which SNScribe can’t edit.' : '',
+    });
+    setMenuX(Math.max(0, pageW - MENU_W));
+    setMenu('cell');
+  };
+
+  const saveCell = () => {
+    const c = tableBlock(cellEdit.table)?.grid?.[cellEdit.row]?.[cellEdit.cell];
+    if (!c || c.m || c.n) {
+      return;
+    }
+    setMenu(null);
+    if (c.p.map(x => x.t).join('') === cellEdit.text) {
+      return;
+    }
+    commit([{op: 'tableCell', para: -1, table: cellEdit.table, row: cellEdit.row, cell: cellEdit.cell, pieces: editPieces(c.p, cellEdit.text)}], 'table cell');
+  };
+
+  const rowEdit = (what: 'above' | 'below' | 'delete') => {
+    const t = tableBlock(cellEdit.table);
+    if (!t) {
+      return;
+    }
+    if (what === 'delete' && t.rows <= 1) {
+      setCellEdit(x => ({...x, note: 'A table keeps at least one row.'}));
+      return;
+    }
+    setMenu(null);
+    commit(
+      [what === 'delete' ? {op: 'tableRowDelete', para: -1, table: cellEdit.table, row: cellEdit.row} : {op: 'tableRowAdd', para: -1, table: cellEdit.table, row: cellEdit.row, below: what === 'below'}],
+      what === 'delete' ? 'delete row' : 'add row',
+    );
+    setStatus(what === 'delete' ? 'Row deleted. Undo puts it back.' : `Row added ${what}. Tap a cell to fill it.`);
+  };
+
+  /** Edit ▸ Insert table…: after the paragraph with the caret. */
+  const startTable = () => {
+    const at = !typing && selection ? (comparePos(selection.from, selection.to) <= 0 ? selection.to : selection.from) : caretAt;
+    flushTyping();
+    if (!at) {
+      setStatus('Tap the paragraph the table goes after.');
+      return;
+    }
+    setTbl(x => ({...x, para: at.para, title: ''}));
+    setMenu('table');
+  };
+
+  const insertTable = () => {
+    const para = paragraph(tbl.para);
+    if (!para) {
+      return;
+    }
+    const problem = splitProblem(para, paragraphText(para).length);
+    if (problem) {
+      setStatus(problem);
+      return;
+    }
+    const {ops, n} = tableOps(blocks, para, {rows: tbl.rows, cols: tbl.cols, header: tbl.header}, tbl.label ? tbl.title : null, citeStyle);
+    setMenu(null);
+    commit(ops, 'insert table');
+    setCaret(null);
+    setSelection(null);
+    setStatus(`${n ? `Table ${n}` : 'Table'} inserted. Tap a cell to type in it.`);
+  };
+
   // ---------------------------------------------------------------- pictures and figures
 
   /** Insert picture…: after the paragraph with the caret (or the end of the selection). */
@@ -1492,6 +1612,13 @@ export function Reader(): React.JSX.Element {
         return;
       }
       const tap = Math.hypot(b.x - a.x, b.y - a.y) < TAP_SLOP;
+      // A tap in a table opens that cell.
+      const cellHit = tap ? tableCellAt(a.x, a.y) : null;
+      if (cellHit) {
+        flushTyping();
+        openCell(cellHit);
+        return;
+      }
       const now = Date.now();
       const prev = lastTap.current;
       const doubleTap = tap && !!prev && now - prev.at < DOUBLE_TAP_MS && Math.hypot(a.x - prev.x, a.y - prev.y) < TAP_SLOP * 2;
@@ -4583,6 +4710,7 @@ export function Reader(): React.JSX.Element {
             {inkOk ? item('Handwritten note…', startNote) : null}
             {item('Insert picture…', startPicture)}
             {item('Footnote…', startFootnote)}
+            {item('Insert table…', startTable)}
             {hasChanges ? item('Accept all changes', () => {
               setMenu(null);
               review(-1, '*', true);
@@ -4648,6 +4776,97 @@ export function Reader(): React.JSX.Element {
               {panelButton(fnEdit.id === null ? 'Add' : 'Save', saveFootnote)}
               {fnEdit.id !== null ? panelButton('Delete footnote', deleteFootnote) : null}
               {button('Close', () => setMenu(null))}
+            </View>
+          </View>
+        );
+      }
+      case 'cell': {
+        const t = tableBlock(cellEdit.table);
+        const c = t?.grid?.[cellEdit.row]?.[cellEdit.cell];
+        const locked = !c || !!c.m || !!c.n;
+        return (
+          <View style={styles.nameForm}>
+            <Text allowFontScaling={false} style={styles.menuText}>
+              {`Table · row ${cellEdit.row + 1}, column ${cellEdit.cell + 1}`}
+            </Text>
+            {locked ? null : (
+              <TextInput
+                style={[styles.nameInput, styles.noteInput]}
+                value={cellEdit.text}
+                onChangeText={text => setCellEdit(x => ({...x, text}))}
+                multiline
+                autoFocus
+                allowFontScaling={false}
+              />
+            )}
+            {cellEdit.note ? (
+              <Text allowFontScaling={false} style={styles.presetSummary}>
+                {cellEdit.note}
+              </Text>
+            ) : null}
+            <View style={styles.row}>
+              {locked ? null : panelButton('Save', saveCell)}
+              {button('Close', () => setMenu(null))}
+            </View>
+            <View style={styles.row}>
+              {panelButton('Row above', () => rowEdit('above'))}
+              {panelButton('Row below', () => rowEdit('below'))}
+              {panelButton('Delete row', () => rowEdit('delete'), (t?.rows ?? 0) <= 1)}
+            </View>
+          </View>
+        );
+      }
+      case 'table': {
+        const chipFor = (label: string, on: boolean, action: () => void) => (
+          <Pressable key={label} onPress={once(`tbl:${label}`, action)} style={[styles.chip, on ? styles.chipOn : null]}>
+            <Text allowFontScaling={false} style={[styles.chipText, on ? styles.chipTextOn : null]}>
+              {label}
+            </Text>
+          </Pressable>
+        );
+        const labelHelp =
+          citeStyle === 'apa'
+            ? 'APA 7: “Table N” in bold and the title in italics, above the table.'
+            : citeStyle === 'mla'
+            ? 'MLA 9: “Table N” and the title above the table.'
+            : 'Chicago: “Table N. Title” above the table.';
+        return (
+          <View style={styles.nameForm}>
+            <Text allowFontScaling={false} style={styles.menuText}>
+              {'Insert table'}
+            </Text>
+            <Text allowFontScaling={false} style={styles.paraLabel}>
+              {'Rows'}
+            </Text>
+            <View style={styles.chips}>{[2, 3, 4, 5, 6, 8, 10].map(n => chipFor(String(n), tbl.rows === n, () => setTbl(x => ({...x, rows: n}))))}</View>
+            <Text allowFontScaling={false} style={styles.paraLabel}>
+              {'Columns'}
+            </Text>
+            <View style={styles.chips}>{[2, 3, 4, 5, 6].map(n => chipFor(String(n), tbl.cols === n, () => setTbl(x => ({...x, cols: n}))))}</View>
+            <View style={styles.chips}>
+              {chipFor(tbl.header ? '✓ First row is a header' : 'First row is a header', tbl.header, () => setTbl(x => ({...x, header: !x.header})))}
+              {chipFor(tbl.label ? '✓ Table label and title' : 'Table label and title', tbl.label, () => setTbl(x => ({...x, label: !x.label})))}
+            </View>
+            {tbl.label ? (
+              <>
+                <TextInput
+                  style={styles.nameInput}
+                  value={tbl.title}
+                  onChangeText={title => setTbl(x => ({...x, title}))}
+                  placeholder="Table title"
+                  allowFontScaling={false}
+                />
+                <Text allowFontScaling={false} style={styles.presetSummary}>
+                  {`${labelHelp} Numbered in order. The format follows the style chosen in Cite from Zotero (now ${CITE_STYLES.find(x => x.id === citeStyle)?.name ?? ''}).`}
+                </Text>
+              </>
+            ) : null}
+            <Text allowFontScaling={false} style={styles.presetSummary}>
+              {'Lines above and below the table and under the header row, as APA tables have. Tap a cell afterwards to type in it.'}
+            </Text>
+            <View style={styles.row}>
+              {panelButton('Insert', insertTable)}
+              {button('Cancel', () => setMenu(null))}
             </View>
           </View>
         );
@@ -5003,6 +5222,7 @@ export function Reader(): React.JSX.Element {
                   onFrame={onFrame(i)}
                   onLines={onLines(i)}
                   onTextFrame={onTextFrame(i)}
+                  onRow={onRowFor(i)}
                   textRef={textRefFor(i)}
                 />
               ))}

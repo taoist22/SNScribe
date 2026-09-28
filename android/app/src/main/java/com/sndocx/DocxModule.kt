@@ -33,7 +33,7 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
 
     companion object {
         /** Bumped with each native change; first log line, to spot stale installs. */
-        const val NATIVE_BUILD = 17
+        const val NATIVE_BUILD = 18
         private val EXPORT_DIR = File("/storage/emulated/0/EXPORT")
         private const val LOG_MAX_BYTES = 2L * 1024 * 1024
         private const val LOG_LINE_MAX = 4000
@@ -303,6 +303,10 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
             parent = if (m.hasKey("parent") && !m.isNull("parent")) m.getInt("parent") else null,
         )
         "uncomment" -> DocxEditor.Op.CommentDelete(m.getArray("ids")?.let { a -> (0 until a.size()).map { a.getInt(it) } }.orEmpty())
+        "tableCell" -> DocxEditor.Op.TableCell(m.getInt("table"), m.getInt("row"), m.getInt("cell"), pieces(m.getArray("pieces")))
+        "tableRowAdd" -> DocxEditor.Op.TableRowAdd(m.getInt("table"), m.getInt("row"), m.getBoolean("below"))
+        "tableRowDelete" -> DocxEditor.Op.TableRowDelete(m.getInt("table"), m.getInt("row"))
+        "tableInsert" -> DocxEditor.Op.TableInsert(m.getInt("before"), m.getInt("rows"), m.getInt("cols"), m.hasKey("header") && m.getBoolean("header"))
         "footnote" -> DocxEditor.Op.FootnoteAdd(m.getInt("para"), m.getInt("at"), m.getInt("id"), pieces(m.getArray("pieces")))
         "footnoteSet" -> DocxEditor.Op.FootnoteSet(m.getInt("id"), pieces(m.getArray("pieces")))
         "footnoteDelete" -> DocxEditor.Op.FootnoteDelete(m.getInt("id"))
@@ -833,6 +837,18 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
                 putInt("rows", b.rows)
                 putInt("cols", b.cols)
                 putString("preview", b.preview)
+                putInt("t", b.index)
+                putArray("widths", Arguments.createArray().apply { b.widths.forEach { pushInt(it) } })
+                putArray("grid", Arguments.createArray().apply {
+                    for (row in b.grid) pushArray(Arguments.createArray().apply {
+                        for (c in row) pushMap(Arguments.createMap().apply {
+                            if (c.span > 1) putInt("s", c.span)
+                            if (c.merged) putBoolean("m", true)
+                            if (c.nested) putBoolean("n", true)
+                            putArray("p", notePieces(c.pieces))
+                        })
+                    })
+                })
             }
             is DocxReader.Protected -> {
                 putString("type", "protected")
