@@ -171,7 +171,7 @@ export function Reader(): React.JSX.Element {
   const [notesOnly, setNotesOnly] = useState(false);
   const [goToText, setGoToText] = useState('');
   /** The cell being edited (table ordinal, row, cell) and its text. */
-  const [cellEdit, setCellEdit] = useState<{table: number; row: number; cell: number; text: string; note: string}>({table: 0, row: 0, cell: 0, text: '', note: ''});
+  const [cellEdit, setCellEdit] = useState<{table: number; row: number; cell: number; text: string; note: string; confirmDelete?: boolean}>({table: 0, row: 0, cell: 0, text: '', note: ''});
   /** Insert table…: after which paragraph, its size, header row, label and title. */
   /** The picture being resized: its paragraph and character. */
   const [picSize, setPicSize] = useState<{para: number; at: number}>({para: -1, at: -1});
@@ -1369,6 +1369,17 @@ export function Reader(): React.JSX.Element {
       what === 'delete' ? 'delete row' : 'add row',
     );
     setStatus(what === 'delete' ? 'Row deleted. Undo puts it back.' : `Row added ${what}. Tap a cell to fill it.`);
+  };
+
+  /** Delete table: a second tap confirms (the whole table goes; Undo brings it back). */
+  const deleteTable = () => {
+    if (!cellEdit.confirmDelete) {
+      setCellEdit(x => ({...x, confirmDelete: true, note: 'Tap Delete table again to remove the whole table. Its label and title stay; delete them like any text.'}));
+      return;
+    }
+    setMenu(null);
+    commit([{op: 'tableDelete', para: -1, table: cellEdit.table}], 'delete table');
+    setStatus('Table deleted. Undo puts it back.');
   };
 
   /** Edit ▸ Insert table…: after the paragraph with the caret. */
@@ -4926,6 +4937,7 @@ export function Reader(): React.JSX.Element {
               {panelButton('Row below', () => rowEdit('below'))}
               {panelButton('Delete row', () => rowEdit('delete'), (t?.rows ?? 0) <= 1)}
             </View>
+            <View style={styles.row}>{panelButton(cellEdit.confirmDelete ? 'Tap again: Delete table' : 'Delete table', deleteTable)}</View>
           </View>
         );
       }

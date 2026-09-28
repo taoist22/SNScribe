@@ -123,7 +123,7 @@ instead. The source joins the reference list. The files don't need to be in Zote
   renumbered; mentions like "see Figure 2" in your text are not.
   **Tap a picture** with the pen to change its size or delete it.
 - **Tables** show as grids. **Tap a cell** to type in it, add a row above or below, delete a row,
-  or set the table's width (Full, 90%, 75%, 50%, centered). **Edit → Insert table…** adds one
+  set the table's width (Full, 90%, 75%, 50%, centered), or delete the whole table. **Edit → Insert table…** adds one
   (rows × columns, width, header row, optional *Table N* label and title), ruled as APA tables are.
   Columns, merged cells and borders stay as Word made them. The cell lines on screen are a guide.
 

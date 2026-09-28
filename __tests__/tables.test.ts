@@ -46,3 +46,13 @@ describe('tables', () => {
     expect(plain.map(b => b.type)).toEqual(['p', 'table', 'p']);
   });
 });
+
+describe('deleting a table', () => {
+  it('removes it and re-addresses the tables after it', () => {
+    const t = (n: number): TableBlock => ({type: 'table', rows: 1, cols: 1, preview: '', t: n, widths: [1], grid: [[{p: []}]]});
+    const b: Block[] = [para(0, 'A'), t(0), para(1, 'B'), t(1)];
+    const after = applyOps(b, [{op: 'tableDelete', para: -1, table: 0}]);
+    expect(after.map(x => x.type)).toEqual(['p', 'p', 'table']);
+    expect(tables(after)[0].t).toBe(0);
+  });
+});

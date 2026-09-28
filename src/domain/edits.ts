@@ -98,6 +98,8 @@ export type Op =
   | {op: 'tableRowDelete'; para: -1; table: number; row: number}
   /** A new rows × cols table before paragraph `before` (the first row a header row when `header`). */
   | {op: 'tableInsert'; para: -1; before: number; rows: number; cols: number; header: boolean; pct?: number}
+  /** Removes table `table`. */
+  | {op: 'tableDelete'; para: -1; table: number}
   /** Table `table` becomes `pct`% of the text width, centred. */
   | {op: 'tableWidth'; para: -1; table: number; pct: number}
   /** The picture at `at` becomes cx × cy EMU / is removed. */
@@ -460,7 +462,7 @@ export function applyOps(blocks: Block[], ops: Op[]): Block[] {
     if (op.op === 'headerFooter' || op.op === 'page' || op.op === 'footnoteSet') {
       continue;
     }
-    if (op.op === 'tableCell' || op.op === 'tableRowAdd' || op.op === 'tableRowDelete' || op.op === 'tableInsert' || op.op === 'tableWidth') {
+    if (op.op === 'tableCell' || op.op === 'tableRowAdd' || op.op === 'tableRowDelete' || op.op === 'tableInsert' || op.op === 'tableWidth' || op.op === 'tableDelete') {
       tableEdit(out, op);
       continue;
     }
@@ -765,7 +767,21 @@ export function threadIds(comments: Comment[], id: string): number[] {
 }
 
 /** Mirrors DocxEditor.table: a cell's text, a row added or removed, a table inserted. */
-function tableEdit(out: Block[], op: Extract<Op, {op: 'tableCell' | 'tableRowAdd' | 'tableRowDelete' | 'tableInsert' | 'tableWidth'}>): void {
+function tableEdit(out: Block[], op: Extract<Op, {op: 'tableCell' | 'tableRowAdd' | 'tableRowDelete' | 'tableInsert' | 'tableWidth' | 'tableDelete'}>): void {
+  if (op.op === 'tableDelete') {
+    const k = out.findIndex(x => x.type === 'table' && x.t === op.table);
+    if (k < 0) {
+      return;
+    }
+    out.splice(k, 1);
+    for (let j = k; j < out.length; j++) {
+      const b = out[j];
+      if (b.type === 'table') {
+        out[j] = {...b, t: (b.t ?? 1) - 1};
+      }
+    }
+    return;
+  }
   if (op.op === 'tableInsert') {
     const at = out.findIndex(b => b.type === 'p' && b.index === op.before);
     if (at < 0) {

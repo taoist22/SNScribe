@@ -247,6 +247,41 @@ function ParagraphView({p, selection, spell, onFrame, onLines, textRef, onTextFr
     marginTop: p.before !== undefined ? dpForTwips(p.before, scale) : heading ? Math.round(size * 0.6) : 0,
     marginBottom: p.after !== undefined ? dpForTwips(p.after, scale) : heading ? Math.round(size * 0.3) : Math.round(12 * scale),
   };
+  // A paragraph of pictures only (a figure) is drawn as a block, placed by its alignment:
+  // inside a line of text Android clips a picture taller than the line (CT: "the same
+  // amount is always cut off"). A hidden copy of its characters keeps the positions the pen
+  // and caret use, and it pages as one line as tall as the block.
+  const pictureOnly =
+    p.list === undefined &&
+    p.caret === undefined &&
+    p.runs.some(r => r.obj === 'image' && r.src) &&
+    p.runs.every(r => (r.obj === 'image' && r.src) || (!r.obj && !r.t.trim()));
+  if (pictureOnly) {
+    const n = p.runs.reduce((k, r) => k + r.t.length, 0) + leadChars(p);
+    let off = 0;
+    const pics = p.runs.map((r, i) => {
+      const at = off;
+      off += r.t.length;
+      if (r.obj !== 'image') {
+        return null;
+      }
+      const sel = !!selection && selection.start <= at && at < selection.end;
+      return <Image key={i} source={{uri: `file://${r.src}`}} style={[pictureSize(r, scale, maxPicture, Math.max(80, pageHeight * 0.85)), sel ? styles.pictureSelected : null]} resizeMode="contain" />;
+    });
+    return (
+      <View
+        style={[spacing, {marginLeft: indent, alignItems: p.align === 'center' ? 'center' : p.align === 'right' ? 'flex-end' : 'flex-start'}]}
+        onLayout={e => {
+          onFrame(e);
+          onLines?.([{y: 0, height: e.nativeEvent.layout.height, len: n}]);
+        }}>
+        <Text ref={textRef} onLayout={onTextFrame} allowFontScaling={false} style={styles.pictureText}>
+          {'\u2007'.repeat(n)}
+        </Text>
+        <View style={styles.pictureRow}>{pics}</View>
+      </View>
+    );
+  }
   if (p.list === undefined) {
     return (
       <View style={[spacing, {marginLeft: indent}]} onLayout={onFrame}>
@@ -412,6 +447,8 @@ const styles = StyleSheet.create({
   selected: {backgroundColor: '#000', color: '#fff'},
   caret: {color: '#000', fontWeight: '400', fontStyle: 'normal'},
   pictureSelected: {opacity: 0.4},
+  pictureText: {position: 'absolute', left: 0, top: 0, fontSize: 4, opacity: 0},
+  pictureRow: {flexDirection: 'row', alignItems: 'flex-end'},
   noteBox: {justifyContent: 'flex-start', paddingHorizontal: 1},
   noteSelected: {backgroundColor: '#000'},
   noteNumber: {color: '#000', fontWeight: '700'},

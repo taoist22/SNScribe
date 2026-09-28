@@ -33,7 +33,7 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
 
     companion object {
         /** Bumped with each native change; first log line, to spot stale installs. */
-        const val NATIVE_BUILD = 19
+        const val NATIVE_BUILD = 20
         private val EXPORT_DIR = File("/storage/emulated/0/EXPORT")
         private const val LOG_MAX_BYTES = 2L * 1024 * 1024
         private const val LOG_LINE_MAX = 4000
@@ -308,6 +308,7 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
         "tableRowDelete" -> DocxEditor.Op.TableRowDelete(m.getInt("table"), m.getInt("row"))
         "tableInsert" -> DocxEditor.Op.TableInsert(m.getInt("before"), m.getInt("rows"), m.getInt("cols"), m.hasKey("header") && m.getBoolean("header"), if (m.hasKey("pct")) m.getInt("pct") else 100)
         "tableWidth" -> DocxEditor.Op.TableWidth(m.getInt("table"), m.getInt("pct"))
+        "tableDelete" -> DocxEditor.Op.TableDelete(m.getInt("table"))
         "imageSize" -> DocxEditor.Op.ImageSize(m.getInt("para"), m.getInt("at"), m.getDouble("cx").toLong(), m.getDouble("cy").toLong())
         "imageDelete" -> DocxEditor.Op.ImageDelete(m.getInt("para"), m.getInt("at"))
         "footnote" -> DocxEditor.Op.FootnoteAdd(m.getInt("para"), m.getInt("at"), m.getInt("id"), pieces(m.getArray("pieces")))

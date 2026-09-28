@@ -110,8 +110,9 @@ export function figureOps(
   const image = (para: number): Op => ({op: 'image', para, at: 0, path: picture.path, cx: picture.cx, cy: picture.cy, alt: picture.alt});
   ops.push({op: 'split', para: after.index, offset: len});
   const t = (title ?? '').trim();
+  // Figures are centred on the page.
   if (title === null) {
-    ops.push(...plain(p, '', 'left'), image(p));
+    ops.push(...plain(p, '', 'center'), image(p));
     return {ops, n: 0};
   }
   if (style === 'apa') {
@@ -124,13 +125,14 @@ export function figureOps(
     }
     ops.push({op: 'split', para: p, offset: t.length});
     p += 1;
-    ops.push(image(p));
+    ops.push({op: 'para', para: p, align: 'center', first: 0}, image(p));
     return {ops, n};
   }
   const caption = style === 'mla' ? `Fig. ${n}. ${t}`.trim() : `Figure ${n}. ${t}`.trim();
-  ops.push(...plain(p, '', 'left'), image(p));
+  ops.push(...plain(p, '', 'center'), image(p));
   ops.push({op: 'split', para: p, offset: 1});
   p += 1;
+  ops.push({op: 'para', para: p, align: 'left'});
   ops.push({op: 'text', para: p, start: 0, end: 0, text: caption}, {op: 'format', para: p, start: 0, end: caption.length, prop: 'b', on: false}, {op: 'format', para: p, start: 0, end: caption.length, prop: 'i', on: false});
   return {ops, n};
 }

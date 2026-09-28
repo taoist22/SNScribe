@@ -62,4 +62,48 @@ class PicturesTest {
             assertTrue(xml.contains("descr=\"A Title\""))
         }
     }
+
+    /** A picture put in a paragraph that holds only its settings goes after them (CT's file had it before). */
+    @Test
+    fun pictureInAnEmptyParagraphComesAfterItsProperties() {
+        val blank = File(work, "blank2.docx").also { DocxBlank.write(it) }
+        val png = File(fixtures, "ink-note.png")
+        val dest = File(work, "figure-empty.docx")
+        val ops = listOf(
+            Op.Text(0, 0, 0, "Intro."),
+            Op.Split(0, 6),
+            Op.ParaProps(1, align = "left", line = 480, lineRule = "auto", before = 0, after = 0, first = 0),
+            Op.Split(1, 0),
+            Op.ImageAdd(2, 0, png.path, 914400, 457200, "x"),
+        )
+        DocxEditor.save(blank, ops, dest, File(work, "tmp4"))
+        dest.copyTo(File(keep, "figure-empty.docx"), overwrite = true)
+        val xml = ZipFile(dest).use { z -> String(z.getInputStream(z.getEntry("word/document.xml")).readBytes()) }
+        val last = xml.substringAfterLast("<w:p>").substringBefore("</w:p>")
+        assertTrue(last, last.startsWith("<w:pPr>"))
+    }
+
+    /** Saving repairs a file where a picture came before its paragraph's properties. */
+    @Test
+    fun savingRepairsMisplacedParagraphProperties() {
+        val blank = File(work, "blank3.docx").also { DocxBlank.write(it) }
+        val broken = File(work, "broken.docx")
+        java.util.zip.ZipOutputStream(broken.outputStream()).use { zo ->
+            ZipFile(blank).use { z ->
+                for (e in z.entries()) {
+                    var bytes = z.getInputStream(e).readBytes()
+                    if (e.name == "word/document.xml") {
+                        bytes = String(bytes).replace("<w:body><w:p/>", "<w:body><w:p><w:r><w:t>One</w:t></w:r></w:p><w:p><w:r><w:t>x</w:t></w:r><w:pPr><w:jc w:val=\"center\"/></w:pPr></w:p>").toByteArray()
+                    }
+                    zo.putNextEntry(java.util.zip.ZipEntry(e.name))
+                    zo.write(bytes)
+                    zo.closeEntry()
+                }
+            }
+        }
+        val fixed = File(work, "fixed.docx")
+        DocxEditor.save(broken, listOf(Op.Text(0, 3, 3, "!")), fixed, File(work, "tmp5"))
+        val xml = ZipFile(fixed).use { z -> String(z.getInputStream(z.getEntry("word/document.xml")).readBytes()) }
+        assertTrue(xml, xml.contains("<w:p><w:pPr><w:jc w:val=\"center\"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"))
+    }
 }

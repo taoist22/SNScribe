@@ -168,6 +168,9 @@ object DocxEditor {
         /** A new table of [rows]×[cols] empty cells before paragraph [before]; the first row a [header] row; [pct]% of the text width, centred. */
         data class TableInsert(val before: Int, val rows: Int, val cols: Int, val header: Boolean, val pct: Int = 100) : Op()
 
+        /** Removes table [table]. */
+        data class TableDelete(val table: Int) : Op()
+
         /** Table [table] becomes [pct]% of the text width, centred. */
         data class TableWidth(val table: Int, val pct: Int) : Op()
 
@@ -478,7 +481,7 @@ object DocxEditor {
                 if (old != now) effects?.add(Op.Text(i, 0, old.length, now))
                 continue
             }
-            if (op is Op.TableCell || op is Op.TableRowAdd || op is Op.TableRowDelete || op is Op.TableInsert || op is Op.TableWidth) {
+            if (op is Op.TableCell || op is Op.TableRowAdd || op is Op.TableRowDelete || op is Op.TableInsert || op is Op.TableWidth || op is Op.TableDelete) {
                 // Tables hold no body paragraphs: paragraph addresses and texts are unchanged.
                 table(document, paragraphs, op, notes)
                 continue
@@ -547,7 +550,7 @@ object DocxEditor {
                 is Op.PageSetup, is Op.Defaults, is Op.HeaderFooter, is Op.Revision, is Op.CommentAdd, is Op.CommentDelete, is Op.InkAdd, is Op.InkDelete, is Op.ImageAdd, is Op.StyleDefs,
                 is Op.FootnoteAdd, is Op.FootnoteSet, is Op.FootnoteDelete,
                 is Op.TableCell, is Op.TableRowAdd, is Op.TableRowDelete, is Op.TableInsert, is Op.TableWidth,
-                is Op.ImageSize, is Op.ImageDelete -> error("unreachable")
+                is Op.ImageSize, is Op.ImageDelete, is Op.TableDelete -> error("unreachable")
             }
             val p = checkNotNull(paragraphs.getOrNull(index)) { "no paragraph $index for $op" }
             when (op) {
@@ -564,10 +567,23 @@ object DocxEditor {
                 is Op.PageSetup, is Op.Defaults, is Op.HeaderFooter, is Op.Revision, is Op.CommentAdd, is Op.CommentDelete, is Op.InkAdd, is Op.InkDelete, is Op.ImageAdd, is Op.StyleDefs,
                 is Op.FootnoteAdd, is Op.FootnoteSet, is Op.FootnoteDelete,
                 is Op.TableCell, is Op.TableRowAdd, is Op.TableRowDelete, is Op.TableInsert, is Op.TableWidth,
-                is Op.ImageSize, is Op.ImageDelete -> {}
+                is Op.ImageSize, is Op.ImageDelete, is Op.TableDelete -> {}
             }
             // Splits and joins renumber the paragraphs after them.
             if (op is Op.Split || op is Op.Join) paragraphs = bodyParagraphs(document)
+        }
+        // Repair: a paragraph's properties come first (builds before 2026-09-28 could put a
+        // picture in front of them in an empty paragraph; Word tolerates it, the schema doesn't).
+        val ps = document.getElementsByTagNameNS(W, "p")
+        for (i in 0 until ps.length) {
+            val p = ps.item(i) as Element
+            val pPr = child(p, "pPr") ?: continue
+            val first = elementChildren(p).firstOrNull()
+            if (first !== pPr) {
+                p.removeChild(pPr)
+                p.insertBefore(pPr, p.firstChild)
+                notes.add("paragraph properties moved first")
+            }
         }
         return styleIds.added || stylesTouched
     }
@@ -1221,6 +1237,7 @@ object DocxEditor {
             is Op.TableRowAdd -> op.table
             is Op.TableRowDelete -> op.table
             is Op.TableWidth -> op.table
+            is Op.TableDelete -> op.table
             else -> error("not a table edit: $op")
         }
         val tbl = checkNotNull(bodyTables(document).getOrNull(index)) { "no table $index" }
@@ -1235,16 +1252,25 @@ object DocxEditor {
             }
             is Op.TableRowAdd -> {
                 val tr = checkNotNull(rows.getOrNull(op.row)) { "table $index has no row ${op.row}" }
-                val copy = tr.cloneNode(true) as Element
-                // A new row is an ordinary row: not a repeated header, merges from above undone.
+                fun isHeader(r: Element) = child(r, "trPr")?.let { child(it, "tblHeader") } != null
+                // A new row looks like an ordinary row: copied from a body row when the table has
+                // one, else from the header without its header look (CT: rows added under the
+                // header copied the line under it, so every row had one).
+                val like = if (isHeader(tr)) rows.firstOrNull { !isHeader(it) } ?: tr else tr
+                val copy = like.cloneNode(true) as Element
                 child(copy, "trPr")?.let { trPr -> child(trPr, "tblHeader")?.let { trPr.removeChild(it) } }
                 for (tc in elementChildren(copy).filter { it.localName == "tc" }) {
                     child(tc, "tcPr")?.let { tcPr -> child(tcPr, "vMerge")?.let { tcPr.removeChild(it) } }
+                    if (isHeader(like)) child(tc, "tcPr")?.let { tcPr -> child(tcPr, "tcBorders")?.let { tcPr.removeChild(it) } }
                     elementChildren(tc).filter { it.localName == "tbl" }.forEach { tc.removeChild(it) }
                     setCell(document, tc, emptyList())
                 }
                 tbl.insertBefore(copy, if (op.below) tr.nextSibling else tr)
                 notes.add("table $index row added ${if (op.below) "below" else "above"} ${op.row}")
+            }
+            is Op.TableDelete -> {
+                tbl.parentNode.removeChild(tbl)
+                notes.add("table $index deleted")
             }
             is Op.TableWidth -> {
                 setTableWidth(document, tbl, op.pct)
@@ -1623,9 +1649,11 @@ object DocxEditor {
         if (after != null) {
             after.parentNode.insertBefore(node, after.nextSibling)
         } else if (offset == 0) {
-            // An empty paragraph (or a start before everything): right after its properties.
+            // An empty paragraph (or a start before everything): right after its properties —
+            // at the end when they are all it has (CT: a picture landed before them, which
+            // breaks the file's rules: a paragraph's properties come first).
             val pPr = child(p, "pPr")
-            p.insertBefore(node, pPr?.nextSibling ?: p.firstChild)
+            if (pPr != null) p.insertBefore(node, pPr.nextSibling) else p.insertBefore(node, p.firstChild)
         } else {
             p.appendChild(node)
         }

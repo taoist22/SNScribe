@@ -56,6 +56,13 @@ class TablesTest {
         val inset = save(blank, listOf(Op.TableInsert(0, 2, 2, header = false, pct = 75)), "table-inset")
         assertEquals(0.75, tables(inset).single().widthFrac, 0.01)
 
+        // A row added under the header has no header line of its own.
+        val underHeader = save(made, listOf(Op.TableRowAdd(0, 0, below = true)), "table-under-header")
+        val xml = java.util.zip.ZipFile(underHeader).use { z -> String(z.getInputStream(z.getEntry("word/document.xml")).readBytes()) }
+        assertEquals(1, xml.split("<w:tr>").count { it.contains("tcBorders") })
+        val noTable = save(made, listOf(Op.TableDelete(0)), "table-deleted")
+        assertTrue(tables(noTable).isEmpty())
+
         val shrunk = save(grown, listOf(Op.TableRowDelete(0, 1)), "table-shrunk")
         val sh = tables(shrunk).single()
         assertEquals(2, sh.rows)
