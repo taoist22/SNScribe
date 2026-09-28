@@ -15,11 +15,11 @@ import {
   type LayoutChangeEvent,
 } from 'react-native';
 import {PluginManager, RattaFileSelector} from 'sn-plugin-lib';
-import {BlockView, cellColumns} from './BlockView';
+import {BlockView, cellColumns, tableBox} from './BlockView';
 import {PageCounter} from './PageCounter';
 import {pageInfo, pageMarks} from './domain/pageInfo';
 import {targetLabel, wordCounts} from './domain/wordcount';
-import {figureOps, pictureEmu, tableOps} from './domain/figures';
+import {PICTURE_SIZES, figureOps, pictureAtWidth, tableOps} from './domain/figures';
 import {editPieces, noteText} from './domain/footnotes';
 import {TouchLayer} from './services/touch';
 import {
@@ -126,6 +126,8 @@ const START: Anchor = {block: 0, offset: 0};
 const TAP_SLOP = 12;
 /** A finger swipe this far (dp), mostly sideways, turns the page. */
 const SWIPE_MIN = 80;
+/** Table widths offered, as % of the text width. */
+const TABLE_WIDTHS = [100, 90, 75, 50];
 /** A second tap this soon, this close, selects the word under it. */
 const DOUBLE_TAP_MS = 500;
 
@@ -135,7 +137,7 @@ type Typing = {mode: 'insert'; at: Pos} | {mode: 'replace'; range: Range};
 type HfLine = {text: string; align: 'left' | 'center' | 'right'; page: boolean};
 
 type Menu =
-  | 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count' | 'page' | 'preset' | 'header' | 'link' | 'thread' | 'comment' | 'note' | 'hl' | 'find' | 'cite' | 'quotes' | 'spell' | 'goto' | 'picture' | 'footnote' | 'cell' | 'table'
+  | 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count' | 'page' | 'preset' | 'header' | 'link' | 'thread' | 'comment' | 'note' | 'hl' | 'find' | 'cite' | 'quotes' | 'spell' | 'goto' | 'picture' | 'footnote' | 'cell' | 'table' | 'picsize'
   | 'recent' | 'versions' | 'recover';
 
 /** Drop-down menu width; menus are kept inside the screen. */
@@ -171,7 +173,10 @@ export function Reader(): React.JSX.Element {
   /** The cell being edited (table ordinal, row, cell) and its text. */
   const [cellEdit, setCellEdit] = useState<{table: number; row: number; cell: number; text: string; note: string}>({table: 0, row: 0, cell: 0, text: '', note: ''});
   /** Insert table…: after which paragraph, its size, header row, label and title. */
-  const [tbl, setTbl] = useState<{para: number; rows: number; cols: number; header: boolean; label: boolean; title: string}>({
+  /** The picture being resized: its paragraph and character. */
+  const [picSize, setPicSize] = useState<{para: number; at: number}>({para: -1, at: -1});
+  const [tbl, setTbl] = useState<{para: number; rows: number; cols: number; header: boolean; label: boolean; title: string; pct: number}>({
+    pct: 100,
     para: -1,
     rows: 3,
     cols: 3,
@@ -182,7 +187,8 @@ export function Reader(): React.JSX.Element {
   /** The footnote panel: an existing footnote (its id) or a new one at `at`, and the text being edited. */
   const [fnEdit, setFnEdit] = useState<{id: string | null; at: Pos | null; text: string; note: string}>({id: null, at: null, text: '', note: ''});
   /** Insert picture…: the file chosen, its pixels, and the figure label/title to add. */
-  const [pic, setPic] = useState<{para: number; path?: string; w?: number; h?: number; label: boolean; title: string; note: string}>({
+  const [pic, setPic] = useState<{para: number; path?: string; w?: number; h?: number; label: boolean; title: string; note: string; frac: number}>({
+    frac: 0.5,
     para: -1,
     label: true,
     title: '',
@@ -1314,7 +1320,7 @@ export function Reader(): React.JSX.Element {
         return null;
       }
       const lx = x - f.x;
-      const c = (cellColumns(b, textW)[r] ?? []).findIndex(col => lx >= col.x && lx < col.x + col.w);
+      const c = (cellColumns(b, tableBox(b, textW).w)[r] ?? []).findIndex(col => lx >= col.x && lx < col.x + col.w);
       return c >= 0 ? {table: b.t ?? 0, row: r, cell: c} : null;
     }
     return null;
@@ -1387,7 +1393,7 @@ export function Reader(): React.JSX.Element {
       setStatus(problem);
       return;
     }
-    const {ops, n} = tableOps(blocks, para, {rows: tbl.rows, cols: tbl.cols, header: tbl.header}, tbl.label ? tbl.title : null, citeStyle);
+    const {ops, n} = tableOps(blocks, para, {rows: tbl.rows, cols: tbl.cols, header: tbl.header, pct: tbl.pct}, tbl.label ? tbl.title : null, citeStyle);
     setMenu(null);
     commit(ops, 'insert table');
     setCaret(null);
@@ -1396,6 +1402,65 @@ export function Reader(): React.JSX.Element {
   };
 
   // ---------------------------------------------------------------- pictures and figures
+
+  /** The text width and two-thirds of the text height, in EMU: the room a picture has. */
+  const pictureBounds = (): {maxW: number; maxH: number} => {
+    const page = pageAfter(doc?.page, applied);
+    const twip = 635;
+    return {
+      maxW: Math.max(1440, page.width - page.left - page.right) * twip,
+      maxH: Math.max(1440, Math.round(((page.height - page.top - page.bottom) * 2) / 3)) * twip,
+    };
+  };
+
+  /** The character offset of the picture at character `char` of paragraph `para`, or null. */
+  const pictureAt = (para: number, char: number): number | null => {
+    const p = paragraph(para);
+    let off = 0;
+    for (const r of p?.runs ?? []) {
+      if (char >= off && char < off + r.t.length) {
+        return r.obj === 'image' ? off : null;
+      }
+      off += r.t.length;
+    }
+    return null;
+  };
+
+  const pictureRun = (para: number, at: number): Run | null => {
+    let off = 0;
+    for (const r of paragraph(para)?.runs ?? []) {
+      if (off === at && r.obj === 'image') {
+        return r;
+      }
+      off += r.t.length;
+    }
+    return null;
+  };
+
+  const openPictureSize = (para: number, at: number) => {
+    flushTyping();
+    setPicSize({para, at});
+    setMenuX(Math.max(0, pageW - MENU_W));
+    setMenu('picsize');
+  };
+
+  const resizePicture = (frac: number) => {
+    const r = pictureRun(picSize.para, picSize.at);
+    if (!r?.cx || !r.cy) {
+      setStatus('This picture has no size SNScribe can change.');
+      return;
+    }
+    const {maxW, maxH} = pictureBounds();
+    const {cx, cy} = pictureAtWidth(r.cx, r.cy, frac, maxW, maxH);
+    setMenu(null);
+    commit([{op: 'imageSize', para: picSize.para, at: picSize.at, cx, cy}], 'picture size');
+  };
+
+  const deletePicture = () => {
+    setMenu(null);
+    commit([{op: 'imageDelete', para: picSize.para, at: picSize.at}], 'delete picture');
+    setStatus('Picture deleted. Undo puts it back.');
+  };
 
   /** Insert picture…: after the paragraph with the caret (or the end of the selection). */
   const startPicture = () => {
@@ -1446,12 +1511,9 @@ export function Reader(): React.JSX.Element {
       setPic(p => ({...p, note: problem}));
       return;
     }
-    // As big as it is (at 96 dpi), no wider than the text and no taller than two-thirds of the page.
-    const page = pageAfter(doc.page, applied);
-    const twip = 635;
-    const maxW = Math.max(1440, page.width - page.left - page.right) * twip;
-    const maxH = Math.max(1440, Math.round(((page.height - page.top - page.bottom) * 2) / 3)) * twip;
-    const {cx, cy} = pictureEmu(pic.w, pic.h, maxW, maxH);
+    // The chosen share of the text width, no taller than two-thirds of the page.
+    const {maxW, maxH} = pictureBounds();
+    const {cx, cy} = pictureAtWidth(pic.w, pic.h, pic.frac, maxW, maxH);
     const alt = pic.label && pic.title.trim() ? pic.title.trim() : pic.path.slice(pic.path.lastIndexOf('/') + 1);
     const {ops, n} = figureOps(blocks, para, {path: pic.path, cx, cy, alt}, pic.label ? pic.title : null, citeStyle);
     setMenu(null);
@@ -1634,10 +1696,15 @@ export function Reader(): React.JSX.Element {
       flushTyping();
       keys.current?.focus();
       setScript(null);
-      // A tap on a footnote's number opens the footnote.
+      // A tap on a footnote's number opens the footnote; on a picture, its size.
       const tapped = tap && !doubleTap ? noteAt(ha.para, ha.char) : null;
       if (tapped) {
         openFootnote(tapped);
+        return;
+      }
+      const picAt = tap && !doubleTap ? pictureAt(ha.para, ha.char) : null;
+      if (picAt !== null) {
+        openPictureSize(ha.para, picAt);
         return;
       }
       if (tap && !doubleTap) {
@@ -4780,6 +4847,34 @@ export function Reader(): React.JSX.Element {
           </View>
         );
       }
+      case 'picsize': {
+        const r = pictureRun(picSize.para, picSize.at);
+        const {maxW} = pictureBounds();
+        const now = r?.cx ? r.cx / maxW : 0;
+        return (
+          <View style={styles.nameForm}>
+            <Text allowFontScaling={false} style={styles.menuText}>
+              {'Picture size'}
+            </Text>
+            <Text allowFontScaling={false} style={styles.presetSummary}>
+              {now ? `Now about ${Math.round(now * 100)}% of the text width. Its proportions stay.` : 'Its proportions stay.'}
+            </Text>
+            <View style={styles.chips}>
+              {PICTURE_SIZES.map(z => (
+                <Pressable key={z.name} onPress={once(`psize:${z.name}`, () => resizePicture(z.frac))} style={[styles.chip, Math.abs(now - z.frac) < 0.03 ? styles.chipOn : null]}>
+                  <Text allowFontScaling={false} style={[styles.chipText, Math.abs(now - z.frac) < 0.03 ? styles.chipTextOn : null]}>
+                    {`${z.name} (${Math.round(z.frac * 100)}%)`}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+            <View style={styles.row}>
+              {panelButton('Delete picture', deletePicture)}
+              {button('Close', () => setMenu(null))}
+            </View>
+          </View>
+        );
+      }
       case 'cell': {
         const t = tableBlock(cellEdit.table);
         const c = t?.grid?.[cellEdit.row]?.[cellEdit.cell];
@@ -4807,6 +4902,24 @@ export function Reader(): React.JSX.Element {
             <View style={styles.row}>
               {locked ? null : panelButton('Save', saveCell)}
               {button('Close', () => setMenu(null))}
+            </View>
+            <Text allowFontScaling={false} style={styles.paraLabel}>
+              {'Table width (centered)'}
+            </Text>
+            <View style={styles.chips}>
+              {TABLE_WIDTHS.map(pct => (
+                <Pressable
+                  key={pct}
+                  onPress={once(`twidth:${pct}`, () => {
+                    setMenu(null);
+                    commit([{op: 'tableWidth', para: -1, table: cellEdit.table, pct}], 'table width');
+                  })}
+                  style={[styles.chip, Math.abs((t?.wf ?? 1) * 100 - pct) < 3 ? styles.chipOn : null]}>
+                  <Text allowFontScaling={false} style={[styles.chipText, Math.abs((t?.wf ?? 1) * 100 - pct) < 3 ? styles.chipTextOn : null]}>
+                    {pct === 100 ? 'Full' : `${pct}%`}
+                  </Text>
+                </Pressable>
+              ))}
             </View>
             <View style={styles.row}>
               {panelButton('Row above', () => rowEdit('above'))}
@@ -4843,6 +4956,10 @@ export function Reader(): React.JSX.Element {
               {'Columns'}
             </Text>
             <View style={styles.chips}>{[2, 3, 4, 5, 6].map(n => chipFor(String(n), tbl.cols === n, () => setTbl(x => ({...x, cols: n}))))}</View>
+            <Text allowFontScaling={false} style={styles.paraLabel}>
+              {'Width (centered)'}
+            </Text>
+            <View style={styles.chips}>{TABLE_WIDTHS.map(pct => chipFor(pct === 100 ? 'Full' : `${pct}%`, tbl.pct === pct, () => setTbl(x => ({...x, pct}))))}</View>
             <View style={styles.chips}>
               {chipFor(tbl.header ? '✓ First row is a header' : 'First row is a header', tbl.header, () => setTbl(x => ({...x, header: !x.header})))}
               {chipFor(tbl.label ? '✓ Table label and title' : 'Table label and title', tbl.label, () => setTbl(x => ({...x, label: !x.label})))}
@@ -4884,7 +5001,7 @@ export function Reader(): React.JSX.Element {
               {'Insert picture'}
             </Text>
             <Text allowFontScaling={false} style={styles.presetSummary}>
-              {'It goes after the paragraph you tapped, as wide as it is (never wider than the text).'}
+              {'It goes after the paragraph you tapped. Tap it later with the pen to change its size or delete it.'}
             </Text>
             <View style={styles.row}>{panelButton(pic.path ? 'Choose another…' : 'Choose picture…', choosePicture)}</View>
             {pic.note ? (
@@ -4892,6 +5009,18 @@ export function Reader(): React.JSX.Element {
                 {pic.note}
               </Text>
             ) : null}
+            <Text allowFontScaling={false} style={styles.paraLabel}>
+              {'Size'}
+            </Text>
+            <View style={styles.chips}>
+              {PICTURE_SIZES.map(z => (
+                <Pressable key={z.name} onPress={once(`isize:${z.name}`, () => setPic(p => ({...p, frac: z.frac})))} style={[styles.chip, pic.frac === z.frac ? styles.chipOn : null]}>
+                  <Text allowFontScaling={false} style={[styles.chipText, pic.frac === z.frac ? styles.chipTextOn : null]}>
+                    {`${z.name} (${Math.round(z.frac * 100)}%)`}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
             <Pressable onPress={once('fig-label', () => setPic(p => ({...p, label: !p.label})))} style={[styles.chip, styles.findCase, pic.label ? styles.chipOn : null]}>
               <Text allowFontScaling={false} style={[styles.chipText, pic.label ? styles.chipTextOn : null]}>
                 {pic.label ? '✓ Figure label and title' : 'Figure label and title'}
@@ -5219,6 +5348,7 @@ export function Reader(): React.JSX.Element {
                   fonts={fonts}
                   scale={textScale}
                   width={textW}
+                  pageHeight={pageH}
                   onFrame={onFrame(i)}
                   onLines={onLines(i)}
                   onTextFrame={onTextFrame(i)}

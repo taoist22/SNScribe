@@ -1,5 +1,5 @@
 import {applyOps, expectedTexts} from '../src/domain/edits';
-import {figureLabels, figureOps, pictureEmu} from '../src/domain/figures';
+import {figureLabels, figureOps, pictureAtWidth, pictureEmu} from '../src/domain/figures';
 import {OBJECT, paragraphText, type Block, type ParagraphBlock} from '../src/model/docx';
 
 const para = (index: number, t: string, extra: Partial<ParagraphBlock> = {}): ParagraphBlock => ({
@@ -52,5 +52,21 @@ describe('figures', () => {
     const {ops, n} = figureOps(one, one[0] as ParagraphBlock, pic, null, 'apa');
     expect(n).toBe(0);
     expect(texts(applyOps(one, ops))).toEqual(['Text.', OBJECT]);
+  });
+});
+
+describe('picture sizes', () => {
+  it('a share of the text width, proportions kept, never taller than allowed', () => {
+    expect(pictureAtWidth(2000, 1000, 0.5, 5943600, 1e9)).toEqual({cx: 2971800, cy: 1485900});
+    // A tall picture at full width is held to the height limit, narrower.
+    expect(pictureAtWidth(1000, 3000, 1, 5943600, 6000000)).toEqual({cx: 2000000, cy: 6000000});
+  });
+
+  it('resizes and deletes a picture in the text', () => {
+    const p: Block[] = [para(0, '', {runs: [{t: 'A '}, {t: OBJECT, obj: 'image', src: '/x.png', cx: 10, cy: 5}, {t: ' B'}]})];
+    const big = applyOps(p, [{op: 'imageSize', para: 0, at: 2, cx: 40, cy: 20}])[0] as ParagraphBlock;
+    expect(big.runs[1]).toMatchObject({obj: 'image', cx: 40, cy: 20});
+    const gone = applyOps(p, [{op: 'imageDelete', para: 0, at: 2}]);
+    expect(texts(gone)).toEqual(['A  B']);
   });
 });

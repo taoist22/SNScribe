@@ -487,13 +487,16 @@ object DocxReader {
         val index: Int = 0,
         val widths: List<Int> = emptyList(),
         val grid: List<List<Cell>> = emptyList(),
+        /** Its width as a share of the text width (0–1], and how it sits: "left", "center" or "right". */
+        val widthFrac: Double = 1.0,
+        val align: String = "left",
     ) : Block()
 
     /** A table cell: how many grid columns it spans, whether it continues a merge from above (shown empty), its text. */
     data class Cell(val span: Int, val merged: Boolean, val pieces: List<NotePiece>, val nested: Boolean = false)
 
     /** A table's structure for the screen. */
-    fun tableOf(tbl: Element, index: Int): Table {
+    fun tableOf(tbl: Element, index: Int, textWidth: Int = 9360): Table {
         val rows = elementChildren(tbl).filter { it.localName == "tr" }
         val grid = rows.map { tr ->
             elementChildren(tr).filter { it.localName == "tc" }.map { tc ->
@@ -507,7 +510,16 @@ object DocxReader {
         }
         val widths = child(tbl, "tblGrid")?.let { g -> elementChildren(g).filter { it.localName == "gridCol" }.map { it.getAttributeNS(W, "w").toIntOrNull() ?: 0 } }.orEmpty()
         val cols = maxOf(widths.size, grid.maxOfOrNull { r -> r.sumOf { it.span } } ?: 0)
-        return Table(rows.size, cols, preview(tbl), index, widths, grid)
+        val tblPr = child(tbl, "tblPr")
+        val tblW = tblPr?.let { child(it, "tblW") }
+        val w = tblW?.getAttributeNS(W, "w")?.toIntOrNull() ?: 0
+        val frac = when (tblW?.getAttributeNS(W, "type")) {
+            "dxa" -> if (w > 0) w.toDouble() / textWidth else null
+            "pct" -> if (w > 0) w / 5000.0 else null
+            else -> null
+        } ?: widths.sum().takeIf { it > 0 }?.let { it.toDouble() / textWidth } ?: 1.0
+        val align = alignOf(tblPr?.let { child(it, "jc") }?.getAttributeNS(W, "val"))
+        return Table(rows.size, cols, preview(tbl), index, widths, grid, frac.coerceIn(0.2, 1.0), if (align == "justify") "left" else align)
     }
 
     data class Protected(val what: String, val preview: String) : Block()
@@ -598,12 +610,13 @@ object DocxReader {
         val body = child(document.documentElement, "body") ?: return Result(emptyList(), ctx.report())
         val blocks = ArrayList<Block>()
         var paraIndex = 0
+        val textWidth = pageSetup(child(body, "sectPr"))?.let { it.width - it.left - it.right }?.takeIf { it > 0 } ?: 9360
         for (el in elementChildren(body)) {
             if (el.namespaceURI != W) continue
             when (el.localName) {
                 "p" -> blocks.add(ctx.paragraph(el, paraIndex++))
                 "tbl" -> {
-                    blocks.add(tableOf(el, ctx.tables++))
+                    blocks.add(tableOf(el, ctx.tables++, textWidth))
                     ctx.scan(el)
                 }
                 "sdt" -> {

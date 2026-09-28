@@ -9,6 +9,25 @@ import {paragraphText, type Block, type ParagraphBlock} from '../model/docx';
 import type {CiteStyle} from './citations';
 import type {Op} from './edits';
 
+/** Picture sizes offered: a share of the text width. */
+export const PICTURE_SIZES: Array<{name: string; frac: number}> = [
+  {name: 'Small', frac: 0.25},
+  {name: 'Medium', frac: 0.5},
+  {name: 'Large', frac: 0.75},
+  {name: 'Full width', frac: 1},
+];
+
+/** A picture `frac` of the text width (`maxW` EMU) wide, keeping its proportions (w:h), and no taller than `maxH` EMU. */
+export function pictureAtWidth(w: number, h: number, frac: number, maxW: number, maxH: number): {cx: number; cy: number} {
+  let cx = maxW * frac;
+  let cy = (cx * Math.max(1, h)) / Math.max(1, w);
+  if (cy > maxH) {
+    cx = (cx * maxH) / cy;
+    cy = maxH;
+  }
+  return {cx: Math.max(1, Math.round(cx)), cy: Math.max(1, Math.round(cy))};
+}
+
 /** A picture's size in EMU: its pixels at 96 dpi, shrunk (never enlarged) to fit `maxW` × `maxH` EMU. */
 export function pictureEmu(pxW: number, pxH: number, maxW: number, maxH: number): {cx: number; cy: number} {
   const EMU_PER_PX = 9525;
@@ -123,7 +142,7 @@ export function figureOps(
  * Numbered among the tables around it; later tables renumbered. A plain paragraph follows
  * the table (where the text goes on).
  */
-export function tableOps(blocks: Block[], after: ParagraphBlock, size: {rows: number; cols: number; header: boolean}, title: string | null, style: CiteStyle): {ops: Op[]; n: number} {
+export function tableOps(blocks: Block[], after: ParagraphBlock, size: {rows: number; cols: number; header: boolean; pct?: number}, title: string | null, style: CiteStyle): {ops: Op[]; n: number} {
   const labels = title !== null ? figureLabels(blocks, style, 'table') : [];
   const n = labels.filter(l => l.para <= after.index).length + 1;
   const ops: Op[] = labels
@@ -156,6 +175,6 @@ export function tableOps(blocks: Block[], after: ParagraphBlock, size: {rows: nu
     }
   }
   // The paragraph after the table: plain, no bold or italic carried over from a title.
-  ops.push({op: 'para', para: p, align: 'left', first: 0, pb: false}, {op: 'tableInsert', para: -1, before: p, rows: size.rows, cols: size.cols, header: size.header});
+  ops.push({op: 'para', para: p, align: 'left', first: 0, pb: false}, {op: 'tableInsert', para: -1, before: p, rows: size.rows, cols: size.cols, header: size.header, pct: size.pct ?? 100});
   return {ops, n: title !== null ? n : 0};
 }

@@ -116,13 +116,16 @@ instead. The source joins the reference list. The files don't need to be in Zote
   footnote. **Edit → Footnote…** adds one at the caret. Italics in a note (a book title) stay
   where you don't retype the words.
 - **Pictures** in a document show on the page (PNG, JPEG, GIF, BMP; Word's EMF/WMF drawings stay a
-  placeholder). **Edit → Insert picture…** adds one after the paragraph you tapped, no wider than
-  the text, with an optional **figure label and title** in your citation style (APA: *Figure N*
+  placeholder). **Edit → Insert picture…** adds one after the paragraph you tapped — Small, Medium,
+  Large or Full width (25–100% of the text width) — with an optional **figure label and title** in
+  your citation style (APA: *Figure N*
   bold and the title in italics above; MLA and Chicago: a caption below). Later figures are
   renumbered; mentions like "see Figure 2" in your text are not.
-- **Tables** show as grids. **Tap a cell** to type in it, add a row above or below, or delete a
-  row. **Edit → Insert table…** adds one (rows × columns, header row, optional *Table N* label and
-  title), ruled as APA tables are. Columns, merged cells and borders stay as Word made them.
+  **Tap a picture** with the pen to change its size or delete it.
+- **Tables** show as grids. **Tap a cell** to type in it, add a row above or below, delete a row,
+  or set the table's width (Full, 90%, 75%, 50%, centered). **Edit → Insert table…** adds one
+  (rows × columns, width, header row, optional *Table N* label and title), ruled as APA tables are.
+  Columns, merged cells and borders stay as Word made them. The cell lines on screen are a guide.
 
 ## Review: comments, tracked changes, handwritten notes
 
@@ -146,7 +149,7 @@ are planned.
 
 - Text boxes, Word drawings (EMF/WMF), tables inside tables, fields and content controls are
   kept exactly as they are and shown as placeholders. Endnotes show their numbers but can't be
-  edited yet. Pictures can be added but not resized or moved.
+  edited yet. Pictures can be resized but not moved or cropped.
 - Formatting and paragraph-level tracked changes can't be reviewed yet; they stay as they are.
 - Every save is checked: if the result would not match what the screen shows, nothing is
   written.

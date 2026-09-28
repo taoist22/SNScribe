@@ -32,6 +32,8 @@ describe('tables', () => {
     expect(tables(b)[0].grid![1].map(c => c.p)).toEqual([[], []]);
     b = applyOps(b, [{op: 'tableRowDelete', para: -1, table: 0, row: 0}]);
     expect(tables(b)[0].grid!.map(r => r.map(c => c.p.length))).toEqual([[0, 0]]);
+    const narrow = tables(applyOps(b, [{op: 'tableWidth', para: -1, table: 0, pct: 75}]))[0];
+    expect(narrow).toMatchObject({wf: 0.75, ta: 'center'});
     // The last row stays.
     b = applyOps(b, [{op: 'tableRowDelete', para: -1, table: 0, row: 0}]);
     expect(tables(b)[0].rows).toBe(1);

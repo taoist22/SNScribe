@@ -33,7 +33,7 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
 
     companion object {
         /** Bumped with each native change; first log line, to spot stale installs. */
-        const val NATIVE_BUILD = 18
+        const val NATIVE_BUILD = 19
         private val EXPORT_DIR = File("/storage/emulated/0/EXPORT")
         private const val LOG_MAX_BYTES = 2L * 1024 * 1024
         private const val LOG_LINE_MAX = 4000
@@ -306,7 +306,10 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
         "tableCell" -> DocxEditor.Op.TableCell(m.getInt("table"), m.getInt("row"), m.getInt("cell"), pieces(m.getArray("pieces")))
         "tableRowAdd" -> DocxEditor.Op.TableRowAdd(m.getInt("table"), m.getInt("row"), m.getBoolean("below"))
         "tableRowDelete" -> DocxEditor.Op.TableRowDelete(m.getInt("table"), m.getInt("row"))
-        "tableInsert" -> DocxEditor.Op.TableInsert(m.getInt("before"), m.getInt("rows"), m.getInt("cols"), m.hasKey("header") && m.getBoolean("header"))
+        "tableInsert" -> DocxEditor.Op.TableInsert(m.getInt("before"), m.getInt("rows"), m.getInt("cols"), m.hasKey("header") && m.getBoolean("header"), if (m.hasKey("pct")) m.getInt("pct") else 100)
+        "tableWidth" -> DocxEditor.Op.TableWidth(m.getInt("table"), m.getInt("pct"))
+        "imageSize" -> DocxEditor.Op.ImageSize(m.getInt("para"), m.getInt("at"), m.getDouble("cx").toLong(), m.getDouble("cy").toLong())
+        "imageDelete" -> DocxEditor.Op.ImageDelete(m.getInt("para"), m.getInt("at"))
         "footnote" -> DocxEditor.Op.FootnoteAdd(m.getInt("para"), m.getInt("at"), m.getInt("id"), pieces(m.getArray("pieces")))
         "footnoteSet" -> DocxEditor.Op.FootnoteSet(m.getInt("id"), pieces(m.getArray("pieces")))
         "footnoteDelete" -> DocxEditor.Op.FootnoteDelete(m.getInt("id"))
@@ -839,6 +842,8 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
                 putString("preview", b.preview)
                 putInt("t", b.index)
                 putArray("widths", Arguments.createArray().apply { b.widths.forEach { pushInt(it) } })
+                if (b.widthFrac < 0.995) putDouble("wf", b.widthFrac)
+                if (b.align != "left") putString("ta", b.align)
                 putArray("grid", Arguments.createArray().apply {
                     for (row in b.grid) pushArray(Arguments.createArray().apply {
                         for (c in row) pushMap(Arguments.createMap().apply {

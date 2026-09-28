@@ -125,7 +125,8 @@ export type ParagraphBlock = {
 /** A table cell: grid columns spanned (s), continuing a merge from above (m: shown empty), holding a table (n), its text (p). */
 export type TableCell = {s?: number; m?: boolean; n?: boolean; p: NotePiece[]};
 /** A top-level table: `t` its ordinal among the body's tables (what edits address), `widths` its grid columns (twips). */
-export type TableBlock = {type: 'table'; rows: number; cols: number; preview: string; t?: number; widths?: number[]; grid?: TableCell[][]};
+/** `wf`: its width as a share of the text width (absent: full); `ta`: how it sits ("center", "right"; absent: left). */
+export type TableBlock = {type: 'table'; rows: number; cols: number; preview: string; t?: number; widths?: number[]; grid?: TableCell[][]; wf?: number; ta?: string};
 export type ProtectedBlock = {type: 'protected'; what: string; preview: string};
 export type Block = ParagraphBlock | TableBlock | ProtectedBlock;
 

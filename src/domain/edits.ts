@@ -97,7 +97,12 @@ export type Op =
   | {op: 'tableRowAdd'; para: -1; table: number; row: number; below: boolean}
   | {op: 'tableRowDelete'; para: -1; table: number; row: number}
   /** A new rows × cols table before paragraph `before` (the first row a header row when `header`). */
-  | {op: 'tableInsert'; para: -1; before: number; rows: number; cols: number; header: boolean}
+  | {op: 'tableInsert'; para: -1; before: number; rows: number; cols: number; header: boolean; pct?: number}
+  /** Table `table` becomes `pct`% of the text width, centred. */
+  | {op: 'tableWidth'; para: -1; table: number; pct: number}
+  /** The picture at `at` becomes cx × cy EMU / is removed. */
+  | {op: 'imageSize'; para: number; at: number; cx: number; cy: number}
+  | {op: 'imageDelete'; para: number; at: number}
   /** Footnote `id` with the text `pieces`, its number at `at` (DocxEditor.addFootnote). */
   | {op: 'footnote'; para: number; at: number; id: number; pieces: NotePiece[]}
   /** Footnote `id`'s text becomes `pieces`. */
@@ -455,7 +460,7 @@ export function applyOps(blocks: Block[], ops: Op[]): Block[] {
     if (op.op === 'headerFooter' || op.op === 'page' || op.op === 'footnoteSet') {
       continue;
     }
-    if (op.op === 'tableCell' || op.op === 'tableRowAdd' || op.op === 'tableRowDelete' || op.op === 'tableInsert') {
+    if (op.op === 'tableCell' || op.op === 'tableRowAdd' || op.op === 'tableRowDelete' || op.op === 'tableInsert' || op.op === 'tableWidth') {
       tableEdit(out, op);
       continue;
     }
@@ -579,6 +584,27 @@ export function applyOps(blocks: Block[], ops: Op[]): Block[] {
       case 'link':
         out[i] = {...p, runs: setLink(p.runs, op.start, op.end, true)};
         break;
+      case 'imageSize':
+        out[i] = {
+          ...p,
+          runs: splitRuns(p.runs, [op.at, op.at + 1]).map((r, k, all) => {
+            const start = all.slice(0, k).reduce((n, x) => n + x.t.length, 0);
+            return start === op.at && r.obj === 'image' ? {...r, cx: op.cx, cy: op.cy} : r;
+          }),
+        };
+        break;
+      case 'imageDelete': {
+        let offset = 0;
+        const runs: Run[] = [];
+        for (const r of splitRuns(p.runs, [op.at, op.at + 1])) {
+          if (!(offset === op.at && r.obj === 'image')) {
+            runs.push(r);
+          }
+          offset += r.t.length;
+        }
+        out[i] = withMarks(withRevs({...p, runs}, shiftDeletions(p.revs, op.at, op.at + 1, 0)), shiftMarks(p.marks, op.at, op.at + 1, 0));
+        break;
+      }
       case 'footnote':
       case 'image': {
         const pic: Run = op.op === 'image' ? {t: OBJECT, obj: 'image', src: op.path, cx: op.cx, cy: op.cy} : {t: OBJECT, obj: 'note', sup: true, fn: String(op.id)};
@@ -739,7 +765,7 @@ export function threadIds(comments: Comment[], id: string): number[] {
 }
 
 /** Mirrors DocxEditor.table: a cell's text, a row added or removed, a table inserted. */
-function tableEdit(out: Block[], op: Extract<Op, {op: 'tableCell' | 'tableRowAdd' | 'tableRowDelete' | 'tableInsert'}>): void {
+function tableEdit(out: Block[], op: Extract<Op, {op: 'tableCell' | 'tableRowAdd' | 'tableRowDelete' | 'tableInsert' | 'tableWidth'}>): void {
   if (op.op === 'tableInsert') {
     const at = out.findIndex(b => b.type === 'p' && b.index === op.before);
     if (at < 0) {
@@ -753,7 +779,16 @@ function tableEdit(out: Block[], op: Extract<Op, {op: 'tableCell' | 'tableRowAdd
       }
     }
     const grid = Array.from({length: op.rows}, () => Array.from({length: op.cols}, () => ({p: []}) as TableCell));
-    out.splice(at, 0, {type: 'table', rows: op.rows, cols: op.cols, preview: '', t: ordinal, widths: Array(op.cols).fill(1), grid});
+    const pct = op.pct ?? 100;
+    out.splice(at, 0, {type: 'table', rows: op.rows, cols: op.cols, preview: '', t: ordinal, widths: Array(op.cols).fill(1), grid, ...(pct < 100 ? {wf: pct / 100, ta: 'center'} : {})});
+    return;
+  }
+  if (op.op === 'tableWidth') {
+    const k = out.findIndex(x => x.type === 'table' && x.t === op.table);
+    const tb = out[k];
+    if (k >= 0 && tb.type === 'table') {
+      out[k] = {...tb, wf: Math.min(1, Math.max(0.2, op.pct / 100)), ta: 'center'};
+    }
     return;
   }
   const j = out.findIndex(b => b.type === 'table' && b.t === op.table);

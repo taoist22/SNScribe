@@ -165,8 +165,17 @@ object DocxEditor {
         /** Removes row [row] (never the last one). */
         data class TableRowDelete(val table: Int, val row: Int) : Op()
 
-        /** A new table of [rows]×[cols] empty cells before paragraph [before]; the first row a [header] row. */
-        data class TableInsert(val before: Int, val rows: Int, val cols: Int, val header: Boolean) : Op()
+        /** A new table of [rows]×[cols] empty cells before paragraph [before]; the first row a [header] row; [pct]% of the text width, centred. */
+        data class TableInsert(val before: Int, val rows: Int, val cols: Int, val header: Boolean, val pct: Int = 100) : Op()
+
+        /** Table [table] becomes [pct]% of the text width, centred. */
+        data class TableWidth(val table: Int, val pct: Int) : Op()
+
+        /** The picture at character [at] of [para] becomes [cx]×[cy] EMU. */
+        data class ImageSize(val para: Int, val at: Int, val cx: Long, val cy: Long) : Op()
+
+        /** Removes the picture at character [at] of [para]. */
+        data class ImageDelete(val para: Int, val at: Int) : Op()
 
         /** A footnote [id] with the text [pieces], its number at character [at] of [para]. */
         data class FootnoteAdd(val para: Int, val at: Int, val id: Int, val pieces: List<DocxReader.NotePiece>) : Op()
@@ -460,7 +469,16 @@ object DocxEditor {
                 deleteComments(document, pkg, op, notes)
                 continue
             }
-            if (op is Op.TableCell || op is Op.TableRowAdd || op is Op.TableRowDelete || op is Op.TableInsert) {
+            if (op is Op.ImageSize || op is Op.ImageDelete) {
+                val i = if (op is Op.ImageSize) op.para else (op as Op.ImageDelete).para
+                val p = checkNotNull(paragraphs.getOrNull(i)) { "no paragraph $i for $op" }
+                val old = paragraphText(p)
+                if (op is Op.ImageSize) imageSize(p, op, notes) else imageDelete(document, p, pkg, op as Op.ImageDelete, notes)
+                val now = paragraphText(p)
+                if (old != now) effects?.add(Op.Text(i, 0, old.length, now))
+                continue
+            }
+            if (op is Op.TableCell || op is Op.TableRowAdd || op is Op.TableRowDelete || op is Op.TableInsert || op is Op.TableWidth) {
                 // Tables hold no body paragraphs: paragraph addresses and texts are unchanged.
                 table(document, paragraphs, op, notes)
                 continue
@@ -528,7 +546,8 @@ object DocxEditor {
                 is Op.Unlink -> op.para
                 is Op.PageSetup, is Op.Defaults, is Op.HeaderFooter, is Op.Revision, is Op.CommentAdd, is Op.CommentDelete, is Op.InkAdd, is Op.InkDelete, is Op.ImageAdd, is Op.StyleDefs,
                 is Op.FootnoteAdd, is Op.FootnoteSet, is Op.FootnoteDelete,
-                is Op.TableCell, is Op.TableRowAdd, is Op.TableRowDelete, is Op.TableInsert -> error("unreachable")
+                is Op.TableCell, is Op.TableRowAdd, is Op.TableRowDelete, is Op.TableInsert, is Op.TableWidth,
+                is Op.ImageSize, is Op.ImageDelete -> error("unreachable")
             }
             val p = checkNotNull(paragraphs.getOrNull(index)) { "no paragraph $index for $op" }
             when (op) {
@@ -544,7 +563,8 @@ object DocxEditor {
                 is Op.Unlink -> unlink(p, op, notes)
                 is Op.PageSetup, is Op.Defaults, is Op.HeaderFooter, is Op.Revision, is Op.CommentAdd, is Op.CommentDelete, is Op.InkAdd, is Op.InkDelete, is Op.ImageAdd, is Op.StyleDefs,
                 is Op.FootnoteAdd, is Op.FootnoteSet, is Op.FootnoteDelete,
-                is Op.TableCell, is Op.TableRowAdd, is Op.TableRowDelete, is Op.TableInsert -> {}
+                is Op.TableCell, is Op.TableRowAdd, is Op.TableRowDelete, is Op.TableInsert, is Op.TableWidth,
+                is Op.ImageSize, is Op.ImageDelete -> {}
             }
             // Splits and joins renumber the paragraphs after them.
             if (op is Op.Split || op is Op.Join) paragraphs = bodyParagraphs(document)
@@ -1080,6 +1100,110 @@ object DocxEditor {
         notes.add("ink note ${op.id} at p${op.para}:${op.at} → $part (${"%.2f".format(inches)}″)")
     }
 
+    // ---------------------------------------------------------------- picture size, table width
+
+    /** The w:drawing that is character [at] of paragraph [p] (a picture's U+FFFC), or null. */
+    private fun drawingAt(p: Element, at: Int): Element? {
+        var offset = 0
+        for (seg in DocxReader.segments(p)) {
+            val len = seg.length
+            if (seg.isRun && at >= offset && at < offset + len) {
+                var pos = offset
+                for (c in elementChildren(seg.el)) {
+                    val l = DocxReader.textOf(c).length
+                    if (pos == at && l > 0) return c.takeIf { it.localName == "drawing" }
+                    pos += l
+                }
+                return null
+            }
+            offset += len
+        }
+        return null
+    }
+
+    /** Picture at [Op.ImageSize.at] gets the size cx × cy EMU (its frame and its picture). */
+    private fun imageSize(p: Element, op: Op.ImageSize, notes: MutableList<String>) {
+        val d = checkNotNull(drawingAt(p, op.at)) { "no picture at p${op.para}:${op.at} that SNScribe can resize" }
+        check(op.cx in 1..(40 * EMU_PER_INCH) && op.cy in 1..(40 * EMU_PER_INCH)) { "picture size out of range" }
+        val extent = checkNotNull(d.getElementsByTagNameNS(DocxReader.WP, "extent").item(0) as? Element) { "picture without a size" }
+        extent.setAttribute("cx", op.cx.toString())
+        extent.setAttribute("cy", op.cy.toString())
+        val exts = d.getElementsByTagNameNS(DocxReader.A, "ext")
+        for (i in 0 until exts.length) {
+            val e = exts.item(i) as Element
+            if (e.hasAttribute("cx")) {
+                e.setAttribute("cx", op.cx.toString())
+                e.setAttribute("cy", op.cy.toString())
+            }
+        }
+        notes.add("picture p${op.para}:${op.at} → ${op.cx}×${op.cy} EMU")
+    }
+
+    /** Removes the picture at [Op.ImageDelete.at], and its file when nothing else shows it. */
+    private fun imageDelete(document: Document, p: Element, pkg: Pkg, op: Op.ImageDelete, notes: MutableList<String>) {
+        val d = checkNotNull(drawingAt(p, op.at)) { "no picture at p${op.para}:${op.at}" }
+        val rId = (d.getElementsByTagNameNS(DocxReader.A, "blip").item(0) as? Element)?.getAttributeNS(R_NS, "embed")
+        val run = d.parentNode as Element
+        run.removeChild(d)
+        if (elementChildren(run).all { it.localName == "rPr" }) run.parentNode.removeChild(run)
+        if (!rId.isNullOrEmpty()) {
+            val blips = document.getElementsByTagNameNS(DocxReader.A, "blip")
+            val stillUsed = (0 until blips.length).any { (blips.item(it) as Element).getAttributeNS(R_NS, "embed") == rId }
+            if (!stillUsed) pkg.target(rId)?.let { part -> pkg.unrelate(rId); pkg.remove(part) }
+        }
+        notes.add("picture p${op.para}:${op.at} deleted")
+    }
+
+    /** The width between the margins (twips), from the last section. */
+    private fun textWidth(document: Document): Int {
+        val sect = child(document.documentElement, "body")?.let { child(it, "sectPr") }
+        fun twips(e: Element?, a: String, dflt: Int) = e?.getAttributeNS(W, a)?.toIntOrNull() ?: dflt
+        val pgSz = sect?.let { child(it, "pgSz") }
+        val pgMar = sect?.let { child(it, "pgMar") }
+        return (twips(pgSz, "w", 12240) - twips(pgMar, "left", 1440) - twips(pgMar, "right", 1440)).coerceAtLeast(1440)
+    }
+
+    private val TBLPR_ORDER = listOf(
+        "tblStyle", "tblpPr", "tblOverlap", "bidiVisual", "tblStyleRowBandSize", "tblStyleColBandSize", "tblW", "jc",
+        "tblCellSpacing", "tblInd", "tblBorders", "shd", "tblLayout", "tblCellMar", "tblLook", "tblCaption", "tblDescription",
+    )
+
+    /**
+     * Table [tbl] becomes [pct]% of the text width, centred: its preferred width, its grid
+     * columns (in proportion) and each cell's width follow; fixed layout keeps them.
+     */
+    private fun setTableWidth(document: Document, tbl: Element, pct: Int) {
+        val w = textWidth(document) * pct.coerceIn(20, 100) / 100
+        val tblPr = child(tbl, "tblPr") ?: document.createElementNS(W, "w:tblPr").also { tbl.insertBefore(it, tbl.firstChild) }
+        fun el(tag: String) = child(tblPr, tag) ?: document.createElementNS(W, "w:$tag").also { insertInOrder(tblPr, it, TBLPR_ORDER) }
+        el("tblW").apply { setAttributeNS(W, "w:w", w.toString()); setAttributeNS(W, "w:type", "dxa") }
+        el("jc").setAttributeNS(W, "w:val", "center")
+        child(tblPr, "tblInd")?.let { tblPr.removeChild(it) }
+        el("tblLayout").setAttributeNS(W, "w:type", "fixed")
+        val grid = child(tbl, "tblGrid")
+        val cols = grid?.let { g -> elementChildren(g).filter { it.localName == "gridCol" } }.orEmpty()
+        val old = cols.map { it.getAttributeNS(W, "w").toIntOrNull()?.coerceAtLeast(1) ?: 1 }
+        val sum = old.sum().coerceAtLeast(1)
+        val widths = old.map { it * w / sum }
+        cols.forEachIndexed { i, c -> c.setAttributeNS(W, "w:w", widths[i].toString()) }
+        for (tr in elementChildren(tbl).filter { it.localName == "tr" }) {
+            var g = 0
+            for (tc in elementChildren(tr).filter { it.localName == "tc" }) {
+                val tcPr = child(tc, "tcPr") ?: document.createElementNS(W, "w:tcPr").also { tc.insertBefore(it, tc.firstChild) }
+                val span = child(tcPr, "gridSpan")?.getAttributeNS(W, "val")?.toIntOrNull() ?: 1
+                val cw = widths.drop(g).take(span).sum()
+                g += span
+                if (widths.isEmpty()) continue
+                val tcW = child(tcPr, "tcW") ?: document.createElementNS(W, "w:tcW").also { e ->
+                    val cnf = child(tcPr, "cnfStyle")
+                    tcPr.insertBefore(e, cnf?.nextSibling ?: tcPr.firstChild)
+                }
+                tcW.setAttributeNS(W, "w:w", cw.toString())
+                tcW.setAttributeNS(W, "w:type", "dxa")
+            }
+        }
+    }
+
     // ---------------------------------------------------------------- tables
 
     private fun bodyTables(document: Document): List<Element> {
@@ -1096,6 +1220,7 @@ object DocxEditor {
             is Op.TableCell -> op.table
             is Op.TableRowAdd -> op.table
             is Op.TableRowDelete -> op.table
+            is Op.TableWidth -> op.table
             else -> error("not a table edit: $op")
         }
         val tbl = checkNotNull(bodyTables(document).getOrNull(index)) { "no table $index" }
@@ -1120,6 +1245,10 @@ object DocxEditor {
                 }
                 tbl.insertBefore(copy, if (op.below) tr.nextSibling else tr)
                 notes.add("table $index row added ${if (op.below) "below" else "above"} ${op.row}")
+            }
+            is Op.TableWidth -> {
+                setTableWidth(document, tbl, op.pct)
+                notes.add("table $index width ${op.pct}%")
             }
             is Op.TableRowDelete -> {
                 check(rows.size > 1) { "a table keeps at least one row" }
@@ -1202,7 +1331,8 @@ object DocxEditor {
         val tbl = document.importNode(DocxReader.parse(xml.toByteArray()).documentElement, true) as Element
         tbl.removeAttributeNS("http://www.w3.org/2000/xmlns/", "w")
         at.parentNode.insertBefore(tbl, at)
-        notes.add("table ${op.rows}×${op.cols} before p${op.before}")
+        if (op.pct < 100) setTableWidth(document, tbl, op.pct)
+        notes.add("table ${op.rows}×${op.cols} (${op.pct}%) before p${op.before}")
     }
 
     // ---------------------------------------------------------------- footnotes

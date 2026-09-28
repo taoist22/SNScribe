@@ -48,6 +48,14 @@ class TablesTest {
         assertEquals("new", g.grid[2][1].pieces.single().text)
         assertTrue(g.grid[2][2].pieces.isEmpty())
 
+        val narrow = save(grown, listOf(Op.TableWidth(0, 50)), "table-narrow")
+        val nw = tables(narrow).single()
+        assertEquals(0.5, nw.widthFrac, 0.01)
+        assertEquals("center", nw.align)
+        assertTrue(kotlin.math.abs(nw.widths.sum() - 9360 / 2) <= 3)
+        val inset = save(blank, listOf(Op.TableInsert(0, 2, 2, header = false, pct = 75)), "table-inset")
+        assertEquals(0.75, tables(inset).single().widthFrac, 0.01)
+
         val shrunk = save(grown, listOf(Op.TableRowDelete(0, 1)), "table-shrunk")
         val sh = tables(shrunk).single()
         assertEquals(2, sh.rows)

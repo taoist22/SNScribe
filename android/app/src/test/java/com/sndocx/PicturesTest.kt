@@ -43,6 +43,17 @@ class PicturesTest {
 
         val pictures = DocxReader.extractImages(dest, File(work, "pics"))
         assertTrue(File(pictures.getValue(rel)).readBytes().contentEquals(png.readBytes()))
+        val resized = File(work, "figure-resized.docx")
+        DocxEditor.save(dest, listOf(Op.ImageSize(3, 0, 457200, 228600)), resized, File(work, "tmp2"))
+        resized.copyTo(File(keep, "figure-resized.docx"), overwrite = true)
+        val small = DocxReader.read(resized).blocks.filterIsInstance<DocxReader.Paragraph>()[3].runs.single()
+        assertEquals(457200L, small.cx)
+        assertEquals(228600L, small.cy)
+        val gone = File(work, "figure-deleted.docx")
+        DocxEditor.save(resized, listOf(Op.ImageDelete(3, 0)), gone, File(work, "tmp3"))
+        gone.copyTo(File(keep, "figure-deleted.docx"), overwrite = true)
+        assertEquals("", DocxReader.read(gone).blocks.filterIsInstance<DocxReader.Paragraph>()[3].text)
+        ZipFile(gone).use { z -> assertTrue(z.entries().asSequence().none { it.name.startsWith("word/media/sndocx-picture") }) }
         ZipFile(dest).use { z ->
             val types = String(z.getInputStream(z.getEntry("[Content_Types].xml")).readBytes())
             assertTrue(types.contains("Extension=\"png\""))

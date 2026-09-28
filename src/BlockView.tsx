@@ -36,6 +36,8 @@ type Props = {
   scale?: number;
   /** The text column's width: pictures wider than it are shown smaller; tables fill it. */
   width?: number;
+  /** The page's height: a picture is never drawn taller than most of it. */
+  pageHeight?: number;
   /** For a table: where each row is (y, height in the block), for finding the cell under the pen. */
   onRow?: (row: number, y: number, height: number) => void;
 };
@@ -143,19 +145,18 @@ function pieces(p: ParagraphBlock, selection: {start: number; end: number} | nul
   return out;
 }
 
-/** A picture's size on screen: Word's size (EMU) on the same scale as text, no wider than `maxW`. */
-function pictureSize(r: Run, scale: number, maxW: number): {width: number; height: number} {
+/** A picture's size on screen: Word's size (EMU) on the same scale as text, within `maxW` × `maxH`. */
+function pictureSize(r: Run, scale: number, maxW: number, maxH: number): {width: number; height: number} {
   const toDp = (emu: number) => (emu / 12700) * 1.82 * scale;
   let w = r.cx ? toDp(r.cx) : 200;
   let h = r.cy ? toDp(r.cy) : 150;
-  if (w > maxW) {
-    h = (h * maxW) / w;
-    w = maxW;
-  }
+  const k = Math.min(1, maxW / w, maxH / h);
+  w *= k;
+  h *= k;
   return {width: Math.max(8, Math.round(w)), height: Math.max(8, Math.round(h))};
 }
 
-function ParagraphView({p, selection, spell, onFrame, onLines, textRef, onTextFrame, fonts, scale = 1, width = 700}: Omit<Props, 'block'> & {p: ParagraphBlock}) {
+function ParagraphView({p, selection, spell, onFrame, onLines, textRef, onTextFrame, fonts, scale = 1, width = 700, pageHeight = 1000}: Omit<Props, 'block'> & {p: ParagraphBlock}) {
   // The document's own sizes when it has them, times the reader's text size; the line
   // height follows the largest.
   // Text without a size of its own takes its style's (bs), else the kind's default.
@@ -210,7 +211,7 @@ function ParagraphView({p, selection, spell, onFrame, onLines, textRef, onTextFr
           </View>
         ) : r.obj === 'image' && r.src ? (
           // One character in the TextView, like the placeholder it replaces: offsets stay the same.
-          <Image key={i} source={{uri: `file://${r.src}`}} style={[pictureSize(r, scale, maxPicture), r.sel ? styles.pictureSelected : null]} resizeMode="contain" />
+          <Image key={i} source={{uri: `file://${r.src}`}} style={[pictureSize(r, scale, maxPicture, Math.max(80, pageHeight * 0.85)), r.sel ? styles.pictureSelected : null]} resizeMode="contain" />
         ) : r.caret ? (
           // Pulled together (negative spacing) so the text beside it barely moves.
           <Text key={i} style={[styles.caret, {fontSize: runSize(r), letterSpacing: -Math.round(runSize(r) * 0.18)}]}>
@@ -268,6 +269,13 @@ function ParagraphView({p, selection, spell, onFrame, onLines, textRef, onTextFr
  * grid columns (Word's widths, scaled to `width`), spans counted. Shared with the reader,
  * which finds the cell under the pen with it.
  */
+/** A table's width and left offset in a column `width` wide: its share of the text width, placed as Word places it. */
+export function tableBox(table: TableBlock, width: number): {w: number; left: number} {
+  const w = Math.round(width * Math.min(1, Math.max(0.2, table.wf ?? 1)));
+  const left = table.ta === 'center' ? Math.round((width - w) / 2) : table.ta === 'right' ? width - w : 0;
+  return {w, left};
+}
+
 export function cellColumns(table: TableBlock, width: number): Array<Array<{x: number; w: number}>> {
   const cols = Math.max(1, table.cols);
   const ws = table.widths && table.widths.length === cols && table.widths.every(w => w > 0) ? table.widths : Array(cols).fill(1);
@@ -290,10 +298,11 @@ export function cellColumns(table: TableBlock, width: number): Array<Array<{x: n
 
 /** A table drawn as a grid: its text per cell (italics and bold kept); a tap opens a cell. */
 function TableView({table, width, scale, onFrame, onRow}: {table: TableBlock; width: number; scale: number; onFrame: (e: LayoutChangeEvent) => void; onRow?: (row: number, y: number, h: number) => void}) {
-  const cols = cellColumns(table, width);
+  const box = tableBox(table, width);
+  const cols = cellColumns(table, box.w);
   const size = Math.round(17 * scale);
   return (
-    <View style={styles.table} onLayout={onFrame}>
+    <View style={[styles.table, {width: box.w, marginLeft: box.left}]} onLayout={onFrame}>
       {(table.grid ?? []).map((row, r) => (
         <View key={r} style={styles.tableRow} onLayout={e => onRow?.(r, e.nativeEvent.layout.y, e.nativeEvent.layout.height)}>
           {row.map((c, k) => (
@@ -346,7 +355,8 @@ export const BlockView = React.memo(
     sameRanges(a.spell, b.spell) &&
     a.fonts === b.fonts &&
     a.scale === b.scale &&
-    a.width === b.width,
+    a.width === b.width &&
+    a.pageHeight === b.pageHeight,
 );
 
 function BlockViewInner({block, ...rest}: Props): React.JSX.Element {
@@ -412,8 +422,9 @@ const styles = StyleSheet.create({
   pageBreak: {height: 28, justifyContent: 'center', alignItems: 'center', borderTopWidth: 1, borderColor: '#000', borderStyle: 'dashed'},
   pageBreakText: {color: '#000', fontSize: 13},
   table: {borderTopWidth: 1, borderBottomWidth: 1, borderColor: '#000', marginVertical: 10},
-  tableRow: {borderTopWidth: StyleSheet.hairlineWidth, borderColor: '#999'},
-  tableCell: {position: 'absolute', top: 0, bottom: 0, paddingHorizontal: 6, paddingVertical: 4, borderLeftWidth: StyleSheet.hairlineWidth, borderColor: '#bbb'},
+  // Cell lines are a guide on screen (e-ink needs them solid); the Word table keeps its own borders.
+  tableRow: {borderTopWidth: 1, borderColor: '#555'},
+  tableCell: {position: 'absolute', top: 0, bottom: 0, paddingHorizontal: 6, paddingVertical: 4, borderLeftWidth: 1, borderColor: '#555'},
   tableMerged: {backgroundColor: '#f2f2f2'},
   tableText: {color: '#000'},
   tableSizer: {flexDirection: 'row'},
