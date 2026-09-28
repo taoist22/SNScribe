@@ -37,14 +37,23 @@ documents) and **internet** (only for Zotero and DOI look-ups).
 ## Getting started
 
 - **File → Open…** a `.docx`, or **File → New…** (blank) / **New from template…** (.docx or .dotx).
-- **Tap** the page to place the caret and type. **Drag the pen** across words to select them;
-  a drag inside one word selects just those letters. A **double tap** selects a word.
+- **Tap** the page with the pen to place the caret and type. **Drag the pen** across words to
+  select them; a drag inside one word selects just those letters. A **double tap** selects a word.
+- **Swipe with a finger** to turn pages (left: next, right: previous). A finger never selects
+  or types, so a hand resting on the screen does nothing.
 - **Save** writes over the document. Before every save the previous version is kept
   (**File → Previous versions…**), and if the file was changed elsewhere since you opened it,
   SNScribe saves a copy instead of overwriting. **Save a copy** saves beside it.
 - Unsaved work survives a crash or restart: SNScribe offers to **Restore** it next time.
-- **◀ ▶** turn pages; **Contents** lists the headings; the page count opens **Pages**
-  (thumbnails, *New page after*, *Select page*). **View** changes the text size.
+- **◀ ▶** go to the previous and next page. The bottom line shows **Page N of M**; tap it (or
+  **View → Go to page…**) to jump to a page. **Contents** lists the headings.
+- **Pages** (tap the page count at the top) shows a card per page with its headings and how many
+  comments, handwritten notes and tracked changes it has; **Only pages with notes** narrows the
+  list. Card buttons (*New page after*, *Select page*, *Remove page break*) take a second tap.
+- **Backspace** at the start of a page removes that page's page break.
+- **View → Word count…** shows the word count, and can set a **target** for the body text
+  (without a title page and the reference list); progress shows on the bottom line.
+  **View** also changes the text size.
 
 ## Writing and formatting
 
@@ -56,7 +65,7 @@ documents) and **internet** (only for Zotero and DOI look-ups).
 | **List ▾** | Numbered, bulleted (lists continue as you type) |
 | **Font ▾** | Strikethrough, superscript, subscript, font. With no text selected, Superscript/Subscript switch on for what you type next (type *H*, Subscript, *2*, Subscript, *O*) |
 | **Size ▾** | Text size |
-| **Edit ▾** | Cut, copy, paste, delete, **Find & replace**, **Spelling**, links, comments, citations, quotes, handwritten notes, accept/reject all changes |
+| **Edit ▾** | Cut, copy, paste, delete, **Find & replace**, **Spelling**, links, comments, citations, quotes, handwritten notes, **footnotes**, **pictures**, **tables**, accept/reject all changes |
 | **File ▾** | Page setup (paper, margins, orientation), **Paper format (APA 7, MLA 9, Chicago)**, header/footer & page numbers, versions |
 
 **Paper formats** set fonts, spacing, indents, margins, page numbers (with your last name for
@@ -86,6 +95,9 @@ new page at the end the first time; *Works Cited* for MLA), in alphabetical orde
 Zotero in APA 7, MLA 9 or Chicago author-date. Citing a source again never duplicates it.
 Your library must sync to zotero.org; Wi-Fi is needed.
 
+**Chicago (notes)** cites in footnotes instead: a full note the first time a source is cited,
+a short note (*Author, Short Title, page.*) after that, and the source in a **Bibliography**.
+
 ## Quotes from your PDFs and EPUBs
 
 1. In a PDF or EPUB, select a passage and tap **Quote → SNScribe** on the selection toolbar.
@@ -95,8 +107,22 @@ Your library must sync to zotero.org; Wi-Fi is needed.
    **EPUB's own details**, **Find in Zotero**, or **Type the details** — then **Insert**.
 
 Short quotes go into the sentence in quotation marks with (Author, Year, p. N); quotes of 40
-words or more become a block quote. The source joins the reference list. The files don't need
-to be in Zotero.
+words or more become a block quote. With Chicago (notes), a footnote follows the quotation
+instead. The source joins the reference list. The files don't need to be in Zotero.
+
+## Footnotes, pictures and tables
+
+- **Footnotes:** numbers show raised in the text; **tap a number** to read, change or delete the
+  footnote. **Edit → Footnote…** adds one at the caret. Italics in a note (a book title) stay
+  where you don't retype the words.
+- **Pictures** in a document show on the page (PNG, JPEG, GIF, BMP; Word's EMF/WMF drawings stay a
+  placeholder). **Edit → Insert picture…** adds one after the paragraph you tapped, no wider than
+  the text, with an optional **figure label and title** in your citation style (APA: *Figure N*
+  bold and the title in italics above; MLA and Chicago: a caption below). Later figures are
+  renumbered; mentions like "see Figure 2" in your text are not.
+- **Tables** show as grids. **Tap a cell** to type in it, add a row above or below, or delete a
+  row. **Edit → Insert table…** adds one (rows × columns, header row, optional *Table N* label and
+  title), ruled as APA tables are. Columns, merged cells and borders stay as Word made them.
 
 ## Review: comments, tracked changes, handwritten notes
 
@@ -118,8 +144,9 @@ are planned.
 
 ## Good to know
 
-- Tables, pictures and text boxes in a document are kept exactly as they are and shown as
-  placeholders; they can't be edited yet. Footnotes, fields and content controls are kept too.
+- Text boxes, Word drawings (EMF/WMF), tables inside tables, fields and content controls are
+  kept exactly as they are and shown as placeholders. Endnotes show their numbers but can't be
+  edited yet. Pictures can be added but not resized or moved.
 - Formatting and paragraph-level tracked changes can't be reviewed yet; they stay as they are.
 - Every save is checked: if the result would not match what the screen shows, nothing is
   written.
