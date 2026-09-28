@@ -18,6 +18,7 @@ import {PluginManager, RattaFileSelector} from 'sn-plugin-lib';
 import {BlockView} from './BlockView';
 import {PageCounter} from './PageCounter';
 import {pageInfo, pageMarks} from './domain/pageInfo';
+import {targetLabel, wordCounts} from './domain/wordcount';
 import {TouchLayer} from './services/touch';
 import {
   applyOps,
@@ -162,6 +163,9 @@ export function Reader(): React.JSX.Element {
   /** Pages view: only the pages with comments, handwritten notes or tracked changes. */
   const [notesOnly, setNotesOnly] = useState(false);
   const [goToText, setGoToText] = useState('');
+  /** Word-count target for this document (body text), kept per document; null = none. */
+  const [target, setTarget] = useState<number | null>(null);
+  const [targetText, setTargetText] = useState('');
   const [goToNote, setGoToNote] = useState('');
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
@@ -829,6 +833,41 @@ export function Reader(): React.JSX.Element {
   // A recount keeps showing the last full count until it is done (no page number jumping on e-ink).
   const map = pageMap && pageMap.layout === layoutKey ? pageMap : null;
   const pageNumber = map ? pageIndexOf(map.pages, anchor) + 1 : null;
+  // From the committed text (counts are remembered per paragraph): for the target on the bottom line.
+  const words = useMemo(() => wordCounts(committed), [committed]);
+
+  // The target belongs to the document.
+  useEffect(() => {
+    setTarget(null);
+    setTargetText('');
+    if (!doc) {
+      return;
+    }
+    (async () => {
+      try {
+        const n = Number(JSON.parse((await Docx?.load(`target-${docKey(doc.path)}`)) ?? 'null'));
+        if (Number.isInteger(n) && n > 0) {
+          setTarget(n);
+          setTargetText(String(n));
+        }
+      } catch {
+        // None set.
+      }
+    })();
+  }, [doc?.path]);
+
+  const saveTarget = (text: string) => {
+    if (!doc) {
+      return;
+    }
+    const n = Number(text);
+    const value = Number.isInteger(n) && n > 0 ? n : null;
+    setTarget(value);
+    setTargetText(value ? String(value) : '');
+    Docx?.store(`target-${docKey(doc.path)}`, JSON.stringify(value));
+    setStatus(value ? `Target set: ${value.toLocaleString()} words of body text.` : 'Target removed.');
+  };
+
   // Only while the Pages view shows: what each page holds, for its card.
   const pageInfos = useMemo(() => {
     if (!showPages || !map) {
@@ -4196,6 +4235,35 @@ export function Reader(): React.JSX.Element {
             <Text allowFontScaling={false} style={styles.menuText}>
               {`Document: ${all.words.toLocaleString()} words, ${all.chars.toLocaleString()} characters (no spaces)`}
             </Text>
+            <Text allowFontScaling={false} style={[styles.menuText, styles.countSel]}>
+              {`Body text: ${words.body.toLocaleString()} words`}
+            </Text>
+            <Text allowFontScaling={false} style={styles.presetSummary}>
+              {'Body text leaves out a title page and the reference list (and anything after it), as most assignment limits do.'}
+            </Text>
+            <Text allowFontScaling={false} style={[styles.menuText, styles.findLabel]}>
+              {'Target (body text)'}
+            </Text>
+            <View style={styles.row}>
+              <TextInput
+                style={styles.nameInput}
+                value={targetText}
+                onChangeText={t => setTargetText(t.replace(/[^0-9]/g, ''))}
+                keyboardType="number-pad"
+                placeholder="e.g. 2500"
+                allowFontScaling={false}
+                onSubmitEditing={() => saveTarget(targetText)}
+              />
+            </View>
+            {target ? (
+              <Text allowFontScaling={false} style={styles.presetSummary}>
+                {`${words.body >= target ? 'Reached: ' : ''}${targetLabel(words.body, target)} (${Math.round((words.body / target) * 100)}%). It shows on the bottom line.`}
+              </Text>
+            ) : null}
+            <View style={styles.row}>
+              {panelButton('Set target', () => saveTarget(targetText), targetText === '')}
+              {target ? panelButton('Remove target', () => saveTarget('')) : null}
+            </View>
             {sel ? (
               <Text allowFontScaling={false} style={[styles.menuText, styles.countSel]}>
                 {`Selection: ${sel.words.toLocaleString()} words, ${sel.chars.toLocaleString()} characters`}
@@ -4738,6 +4806,13 @@ export function Reader(): React.JSX.Element {
               ? 'Pen: tap to type · drag to select · double-tap a word. Finger: swipe to turn pages.'
               : '')}
         </Text>
+        {doc && target ? (
+          <Pressable onPress={once('count', () => setMenu('count'))} style={styles.statusPage}>
+            <Text allowFontScaling={false} style={styles.statusPageText}>
+              {`${words.body >= target ? '✓ ' : ''}${targetLabel(words.body, target)}`}
+            </Text>
+          </Pressable>
+        ) : null}
         {doc && pageNumber !== null && map ? (
           <Pressable onPress={once('goto', openGoTo)} style={styles.statusPage}>
             <Text allowFontScaling={false} style={styles.statusPageText}>
