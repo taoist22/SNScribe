@@ -4,6 +4,10 @@
 
 import type {Source} from '../domain/citations';
 
+/** Zotero item types whose titles go in quotation marks (shorter works); the rest are italic. */
+const SHORT_WORKS = new Set(['journalArticle', 'magazineArticle', 'newspaperArticle', 'bookSection', 'encyclopediaArticle', 'dictionaryEntry', 'webpage', 'blogPost', 'forumPost', 'conferencePaper', 'podcast', 'interview', 'letter', 'email', 'presentation']);
+const kindOf = (itemType?: string): Source['kind'] => (itemType && SHORT_WORKS.has(itemType) ? 'article' : 'book');
+
 export type ZoteroAccount = {userId: string; apiKey: string};
 
 const API = 'https://api.zotero.org';
@@ -99,6 +103,7 @@ export async function zoteroItem(account: ZoteroAccount, key: string, csl: strin
     year: (it.meta?.parsedDate ?? it.data?.date ?? '').slice(0, 4),
     citation: it.citation,
     bibHtml: it.bib,
+    kind: kindOf(it.data?.itemType),
   };
 }
 
@@ -119,5 +124,6 @@ export async function searchZotero(account: ZoteroAccount, query: string, csl: s
       year: (it.meta?.parsedDate ?? it.data?.date ?? '').slice(0, 4),
       citation: it.citation!,
       bibHtml: it.bib!,
+      kind: kindOf(it.data?.itemType),
     }));
 }

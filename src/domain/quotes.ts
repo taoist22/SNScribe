@@ -2,7 +2,7 @@
 // where each source file's citation details come from (chosen once per file, remembered).
 
 import {paragraphText, type Block} from '../model/docx';
-import {htmlToPieces, inText, referenceOps, type CiteStyle, type Source} from './citations';
+import {htmlToPieces, inText, isNoteStyle, notePieces, referenceOps, type CiteStyle, type Source} from './citations';
 import type {Details} from './reference';
 import type {Op} from './edits';
 
@@ -62,9 +62,12 @@ export function quoteOps(
   source: Source,
   style: CiteStyle,
   page: string,
+  note?: {id: number; short: boolean},
 ): {ops: Op[]; block: boolean; caret: {para: number; offset: number}} {
   const quote = text.trim().replace(/^[“"]+|[”"]+$/g, '');
-  const cite = inText(source, style, false, page);
+  // Chicago notes: no citation in the sentence; a footnote after the quotation instead.
+  const footnote = isNoteStyle(style) && note ? {id: note.id, pieces: notePieces(source, page, note.short)} : null;
+  const cite = footnote ? '' : inText(source, style, false, page);
   const ops: Op[] = [];
   let caret = at;
   const block = words(quote) >= BLOCK_WORDS;
@@ -72,16 +75,20 @@ export function quoteOps(
   const ptext = p && p.type === 'p' ? paragraphText(p) : '';
   if (block) {
     const next = at.para + 1;
-    const body = /[.!?]$/.test(quote) ? `${quote} ${cite}` : `${quote}. ${cite}`;
+    const ended = /[.!?]$/.test(quote) ? quote : `${quote}.`;
+    const body = cite ? `${ended} ${cite}` : ended;
     ops.push(
       {op: 'split', para: at.para, offset: ptext.length},
       {op: 'text', para: next, start: 0, end: 0, text: body},
       {op: 'style', para: next, kind: 'quote'},
       {op: 'para', para: next, first: 0, pb: false},
     );
-    caret = {para: next, offset: body.length};
+    if (footnote) {
+      ops.push({op: 'footnote', para: next, at: body.length, id: footnote.id, pieces: footnote.pieces});
+    }
+    caret = {para: next, offset: body.length + (footnote ? 1 : 0)};
   } else {
-    let insert = `“${quote}” ${cite}`;
+    let insert = cite ? `“${quote}” ${cite}` : `“${quote}”`;
     if (at.offset > 0 && !/[\s(\[]/.test(ptext[at.offset - 1])) {
       insert = ` ${insert}`;
     }
@@ -89,7 +96,14 @@ export function quoteOps(
       insert = `${insert} `;
     }
     ops.push({op: 'text', para: at.para, start: at.offset, end: at.offset, text: insert});
-    caret = {para: at.para, offset: at.offset + insert.length};
+    if (footnote) {
+      // The number right after the closing quotation mark.
+      const after = at.offset + insert.trimEnd().length;
+      ops.push({op: 'footnote', para: at.para, at: after, id: footnote.id, pieces: footnote.pieces});
+      caret = {para: at.para, offset: at.offset + insert.length + 1};
+    } else {
+      caret = {para: at.para, offset: at.offset + insert.length};
+    }
   }
   return {ops, block, caret};
 }
@@ -103,8 +117,9 @@ export function quoteWithReference(
   source: Source,
   style: CiteStyle,
   page: string,
+  note?: {id: number; short: boolean},
 ): {ops: Op[]; block: boolean; caret: {para: number; offset: number}; added: boolean} {
-  const q = quoteOps(blocks, at, text, source, style, page);
+  const q = quoteOps(blocks, at, text, source, style, page, note);
   const ref = referenceOps(applyOps(blocks, q.ops), htmlToPieces(source.bibHtml), style);
   return {...q, ops: [...q.ops, ...ref.ops], added: ref.added};
 }

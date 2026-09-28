@@ -97,14 +97,55 @@ function summary(authors: Person[], style: CiteStyle): string {
   if (fam.length === 2) {
     return `${fam[0]} and ${fam[1]}`;
   }
-  if (style === 'chicago' && fam.length === 3) {
+  if ((style === 'chicago' || style === 'chicago-notes') && fam.length === 3) {
     return `${fam[0]}, ${fam[1]}, and ${fam[2]}`;
   }
   return `${fam[0]} et al.`;
 }
 
 /** A source formatted in `style`, in the shape Zotero's formatting has. */
+/** Authors as a note names them: "Jane Smith", "Jane Smith and Ann Lee", "Jane Smith, Ann Lee, and Bo Park", "Jane Smith et al.". */
+function noteNames(authors: Person[]): string {
+  const names = authors.map(full);
+  if (names.length <= 2) {
+    return names.join(' and ');
+  }
+  if (names.length === 3) {
+    return `${names[0]}, ${names[1]}, and ${names[2]}`;
+  }
+  return `${names[0]} et al.`;
+}
+
 export function formatSource(d: Details, style: CiteStyle, key = ''): Source {
+  const kind: Source['kind'] = d.type === 'book' ? 'book' : 'article';
+  if (style === 'chicago-notes') {
+    // Chicago notes-bibliography (17th ed.): the bibliography entry and the full note.
+    const year = clean(d.year);
+    const t = title(d.title);
+    const container = clean(d.container);
+    const link = d.doi ? doiUrl(d.doi) : clean(d.url);
+    const names = chicagoNames(d.authors);
+    const lead = names ? `${esc(stop(names))} ` : '';
+    const who = noteNames(d.authors);
+    const whoNote = who ? `${esc(who)}, ` : '';
+    const vol = d.volume ? ` ${esc(clean(d.volume))}${d.issue ? `, no. ${esc(clean(d.issue))}` : ''}` : '';
+    const pages = d.pages ? esc(dash(d.pages)) : '';
+    let bib: string;
+    let note: string;
+    if (d.type === 'book') {
+      const pub = [d.publisher ? esc(clean(d.publisher)) : '', esc(year)].filter(Boolean).join(', ');
+      bib = `${lead}${i(t)}. ${pub ? `${pub}.` : ''}`;
+      note = `${whoNote}${i(t)}${pub ? ` (${pub})` : ''}.`;
+    } else if (d.type === 'article') {
+      bib = `${lead}“${esc(t)}.” ${container ? i(container) : ''}${vol}${year ? ` (${esc(year)})` : ''}${pages ? `: ${pages}` : ''}.`;
+      note = `${whoNote}“${esc(t)},” ${container ? i(container) : ''}${vol}${year ? ` (${esc(year)})` : ''}${pages ? `: ${pages}` : ''}.`;
+    } else {
+      bib = `${lead}“${esc(t)}.” ${[container ? esc(container) : '', esc(year)].filter(Boolean).join(', ')}.`;
+      note = `${whoNote}“${esc(t)},” ${[container ? esc(container) : '', esc(year)].filter(Boolean).join(', ')}.`;
+    }
+    bib = `${bib.replace(/\s+\./g, '.').trim()}${link ? ` ${esc(link)}.` : ''}`;
+    return {key, title: t, authors: summary(d.authors, style), year, citation: `<span>${note.replace(/\s+\./g, '.')}</span>`, bibHtml: `<div class="csl-entry">${bib}</div>`, kind};
+  }
   const year = clean(d.year) || (style === 'apa' ? 'n.d.' : '');
   const who = summary(d.authors, style);
   const t = title(d.title);
@@ -155,7 +196,7 @@ export function formatSource(d: Details, style: CiteStyle, key = ''): Source {
     bib = `${bib.trim()}${link ? ` ${esc(link)}.` : ''}`;
     cite = `(${esc(who || `“${t}”`)} ${esc(year)})`;
   }
-  return {key, title: t, authors: who, year, citation: `<span>${cite}</span>`, bibHtml: `<div class="csl-entry">${bib}</div>`};
+  return {key, title: t, authors: who, year, citation: `<span>${cite}</span>`, bibHtml: `<div class="csl-entry">${bib}</div>`, kind};
 }
 
 /** doi.org's CSL JSON (Accept: application/vnd.citationstyles.csl+json) as details. */

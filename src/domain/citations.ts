@@ -5,13 +5,17 @@
 import {paragraphText, type Block, type ParagraphBlock} from '../model/docx';
 import type {Op} from './edits';
 
-export type CiteStyle = 'apa' | 'mla' | 'chicago';
+export type CiteStyle = 'apa' | 'mla' | 'chicago' | 'chicago-notes';
 
 export const CITE_STYLES: Array<{id: CiteStyle; name: string; csl: string; heading: string}> = [
   {id: 'apa', name: 'APA 7', csl: 'apa', heading: 'References'},
   {id: 'mla', name: 'MLA 9', csl: 'modern-language-association', heading: 'Works Cited'},
   {id: 'chicago', name: 'Chicago (author-date)', csl: 'chicago-author-date', heading: 'References'},
+  {id: 'chicago-notes', name: 'Chicago (notes)', csl: 'chicago-note-bibliography', heading: 'Bibliography'},
 ];
+
+/** Styles that cite in footnotes rather than in the sentence. */
+export const isNoteStyle = (style: CiteStyle) => style === 'chicago-notes';
 
 /** One source from the library, with Zotero's formatting for the chosen style. */
 export type Source = {
@@ -24,6 +28,8 @@ export type Source = {
   citation: string;
   /** Zotero's reference entry as HTML (italics as <i>). */
   bibHtml: string;
+  /** A book-length work (title in italics) or a shorter one (title in quotation marks): for short notes. */
+  kind?: 'book' | 'article';
 };
 
 /** A piece of formatted text. */
@@ -85,6 +91,62 @@ export function htmlToPieces(html: string): Piece[] {
 
 export const piecesText = (pieces: Piece[]) => pieces.map(p => p.t).join('');
 
+/** A title shortened for a short note (Chicago): up to its colon, at most four words. */
+export function shortTitle(title: string): string {
+  const main = title.split(/[:?]/)[0].trim();
+  const words = main.split(/\s+/).filter(Boolean);
+  return words.length > 4 ? words.slice(0, 4).join(' ') : main;
+}
+
+/** Joins neighbouring pieces that look the same. */
+function tidyPieces(pieces: Piece[]): Piece[] {
+  const out: Piece[] = [];
+  for (const p of pieces) {
+    const last = out[out.length - 1];
+    if (last && !!last.i === !!p.i && !!last.b === !!p.b) {
+      last.t += p.t;
+    } else if (p.t) {
+      out.push({...p});
+    }
+  }
+  return out;
+}
+
+/**
+ * A footnote citing `source` (Chicago notes): the full note the first time, a short note
+ * ("Smith, Short Title, 23.") after that. The page goes where Chicago puts it: after the
+ * publication details of a book, in place of an article's page range.
+ */
+export function notePieces(source: Source, page: string, short: boolean): Piece[] {
+  const pg = page.trim().replace(/\s*-\s*/g, '–');
+  if (short) {
+    const t = shortTitle(source.title);
+    const who = source.authors ? `${source.authors}, ` : '';
+    if (source.kind === 'article') {
+      return tidyPieces([{t: `${who}“${t}${pg ? `,” ${pg}.` : '.”'}`}]);
+    }
+    return tidyPieces([{t: who}, {t, i: true}, {t: pg ? `, ${pg}.` : '.'}]);
+  }
+  const pieces = htmlToPieces(source.citation).map(p => ({...p}));
+  if (pieces.length === 0) {
+    return [];
+  }
+  const last = pieces[pieces.length - 1];
+  last.t = last.t.replace(/\s+$/, '');
+  if (pg) {
+    if (source.kind === 'article' && /: ?[0-9ivxlc]+(?:[–-][0-9ivxlc]+)?\.$/i.test(last.t)) {
+      last.t = last.t.replace(/: ?[0-9ivxlc]+(?:[–-][0-9ivxlc]+)?\.$/i, `: ${pg}.`);
+    } else if (last.t.endsWith('.')) {
+      last.t = `${last.t.slice(0, -1)}, ${pg}.`;
+    } else {
+      last.t = `${last.t}, ${pg}.`;
+    }
+  } else if (!/[.!?]$/.test(last.t)) {
+    last.t += '.';
+  }
+  return tidyPieces(pieces);
+}
+
 /** "14" → "p. 14"; "14-16" / "14–16" → "pp. 14–16" (APA). */
 function apaPages(page: string): string {
   const p = page.trim().replace(/\s*-\s*/g, '–');
@@ -98,6 +160,10 @@ function apaPages(page: string): string {
  * Chicago author-date (Smith and Lee 2020, 14) / Smith and Lee (2020, 14).
  */
 export function inText(source: Source, style: CiteStyle, narrative: boolean, page = ''): string {
+  if (isNoteStyle(style)) {
+    // Shown for checking: the footnote's text.
+    return piecesText(notePieces(source, page, false));
+  }
   const pg = page.trim();
   const zotero = piecesText(htmlToPieces(source.citation));
   if (!narrative) {

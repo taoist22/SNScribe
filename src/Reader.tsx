@@ -66,7 +66,7 @@ import {PAPER_FORMATS, presetOps} from './domain/presets';
 import {docKey, parseRecovery, recoveryFor, touchRecent, type RecentDoc, type RecoveryRecord} from './domain/recovery';
 import {DocxInk, InkSurfaceView, activateInk, deactivateInk, isInkAvailable} from './services/ink';
 import {shownFont, withStandIns} from './domain/fonts';
-import {CITE_STYLES, htmlToPieces, inText, piecesText, referenceOps, type CiteStyle, type Source} from './domain/citations';
+import {CITE_STYLES, htmlToPieces, inText, isNoteStyle, notePieces, piecesText, referenceOps, shortTitle, type CiteStyle, type Source} from './domain/citations';
 import {credentialsIn, searchZotero, setZoteroLog, testZotero, zoteroItem, type ZoteroAccount} from './services/zotero';
 import {lookUpDoi} from './services/doi';
 import {QUOTES_KEY, SOURCES_KEY, fileName, isEpub, parseList, parseMap, quoteWithReference, type SavedQuote, type SourceRef} from './domain/quotes';
@@ -352,7 +352,7 @@ export function Reader(): React.JSX.Element {
         } catch {
           // No account yet.
         }
-        if (saved.citeStyle === 'apa' || saved.citeStyle === 'mla' || saved.citeStyle === 'chicago') {
+        if (saved.citeStyle === 'apa' || saved.citeStyle === 'mla' || saved.citeStyle === 'chicago' || saved.citeStyle === 'chicago-notes') {
           setCiteStyle(saved.citeStyle);
         }
         if (typeof saved.author === 'string') {
@@ -1193,6 +1193,12 @@ export function Reader(): React.JSX.Element {
     return null;
   };
 
+  /** Whether `source` is cited in a footnote already (Chicago: later citations are short notes). */
+  const citedBefore = (source: Source): boolean => {
+    const key = shortTitle(source.title);
+    return !!key && footnotes.some(f => noteText(f.pieces).includes(key));
+  };
+
   /** The number a footnote shows, from the page ("3"). */
   const noteNumber = (id: string): string => {
     for (const b of blocks) {
@@ -1799,6 +1805,16 @@ export function Reader(): React.JSX.Element {
       setStatus(problem);
       return;
     }
+    if (isNoteStyle(citeStyle)) {
+      // Chicago notes: a footnote at the caret, and the source in the bibliography.
+      const fn: Op = {op: 'footnote', para: at.para, at: at.offset, id: nextFootnoteId(footnotes, blocks), pieces: notePieces(src, cite.page, citedBefore(src))};
+      const {ops: bibOps, added: inBib} = referenceOps(applyOps(blocks, [fn]), htmlToPieces(src.bibHtml), citeStyle);
+      commit([fn, ...bibOps], 'citation');
+      setCaret({para: at.para, offset: at.offset + 1});
+      setMenu(null);
+      setStatus(inBib ? 'Cited in a footnote, and added to the bibliography.' : 'Cited in a footnote (already in the bibliography).');
+      return;
+    }
     const text = textOf(at.para);
     let cited = inText(src, citeStyle, cite.narrative, cite.page);
     if (at.offset > 0 && !/[\s(\[]/.test(text[at.offset - 1])) {
@@ -2132,7 +2148,8 @@ export function Reader(): React.JSX.Element {
       setQp(q => ({...q, message: problem}));
       return;
     }
-    const r = quoteWithReference(blocks, applyOps, at, quote.text, source, citeStyle, qp.page);
+    const note = isNoteStyle(citeStyle) ? {id: nextFootnoteId(footnotes, blocks), short: citedBefore(source)} : undefined;
+    const r = quoteWithReference(blocks, applyOps, at, quote.text, source, citeStyle, qp.page, note);
     commit(r.ops, 'quote');
     setCaret(r.caret);
     setMenu(null);
@@ -4012,10 +4029,12 @@ export function Reader(): React.JSX.Element {
                 <Text allowFontScaling={false} style={[styles.cardHead, styles.findLabel]} numberOfLines={2}>
                   {chosen.title}
                 </Text>
-                <View style={[styles.chips, styles.findLabel]}>
-                  {chip('Parenthetical', !cite.narrative, () => setCite(c => ({...c, narrative: false})))}
-                  {chip('Narrative', cite.narrative, () => setCite(c => ({...c, narrative: true})))}
-                </View>
+                {isNoteStyle(citeStyle) ? null : (
+                  <View style={[styles.chips, styles.findLabel]}>
+                    {chip('Parenthetical', !cite.narrative, () => setCite(c => ({...c, narrative: false})))}
+                    {chip('Narrative', cite.narrative, () => setCite(c => ({...c, narrative: true})))}
+                  </View>
+                )}
                 <View style={[styles.row, styles.presetName]}>
                   <Text allowFontScaling={false} style={styles.menuText}>
                     {'Page (optional)'}
@@ -4023,10 +4042,16 @@ export function Reader(): React.JSX.Element {
                   <TextInput style={styles.nameInput} value={cite.page} onChangeText={page => setCite(c => ({...c, page}))} allowFontScaling={false} />
                 </View>
                 <Text allowFontScaling={false} style={styles.paraLabel}>
-                  {'In the text'}
+                  {isNoteStyle(citeStyle) ? (citedBefore(chosen) ? 'Footnote (short form: cited before)' : 'Footnote') : 'In the text'}
                 </Text>
                 <Text allowFontScaling={false} style={styles.menuText}>
-                  {inText(chosen, citeStyle, cite.narrative, cite.page)}
+                  {isNoteStyle(citeStyle)
+                    ? notePieces(chosen, cite.page, citedBefore(chosen)).map((pc, i) => (
+                        <Text key={i} style={pc.i ? styles.italicText : null}>
+                          {pc.t}
+                        </Text>
+                      ))
+                    : inText(chosen, citeStyle, cite.narrative, cite.page)}
                 </Text>
                 <Text allowFontScaling={false} style={styles.paraLabel}>
                   {`In ${CITE_STYLES.find(x => x.id === citeStyle)!.heading}`}
@@ -4201,10 +4226,20 @@ export function Reader(): React.JSX.Element {
             {src ? (
               <>
                 <Text allowFontScaling={false} style={styles.paraLabel}>
-                  {long ? 'As a block quote, cited' : 'In the text'}
+                  {isNoteStyle(citeStyle)
+                    ? `${long ? 'As a block quote, with a footnote' : 'Footnote after the quotation'}${citedBefore(src) ? ' (short form: cited before)' : ''}`
+                    : long
+                    ? 'As a block quote, cited'
+                    : 'In the text'}
                 </Text>
                 <Text allowFontScaling={false} style={styles.menuText}>
-                  {inText(src, citeStyle, false, qp.page)}
+                  {isNoteStyle(citeStyle)
+                    ? notePieces(src, qp.page, citedBefore(src)).map((pc, i) => (
+                        <Text key={i} style={pc.i ? styles.italicText : null}>
+                          {pc.t}
+                        </Text>
+                      ))
+                    : inText(src, citeStyle, false, qp.page)}
                 </Text>
                 <Text allowFontScaling={false} style={styles.paraLabel}>
                   {`In ${CITE_STYLES.find(x => x.id === citeStyle)!.heading}`}
