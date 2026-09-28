@@ -32,6 +32,8 @@ export type Run = {
   sz?: number;
   /** Inside a tracked insertion: its id (ParagraphBlock.revs). */
   rv?: string;
+  /** A Word page break: its "\n" ends the page (the next line starts a new one). */
+  pg?: boolean;
 };
 
 /**

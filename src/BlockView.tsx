@@ -1,6 +1,6 @@
 import React from 'react';
 import {StyleSheet, Text, View, type LayoutChangeEvent, type TextLayoutEventData, type NativeSyntheticEvent} from 'react-native';
-import {markSelection, splitRuns} from './domain/edits';
+import {PAGE_BREAK_LABEL, markSelection, splitRuns} from './domain/edits';
 import {shownFont} from './domain/fonts';
 import {OBJECT, type Block, type ParagraphBlock, type Run} from './model/docx';
 import type {LineBox} from './domain/paging';
@@ -71,7 +71,34 @@ export function leadChars(b: Block): number {
   return b.type === 'p' && (b.first ?? 0) > 0 && b.runs.length > 0 ? 1 : 0;
 }
 
-type Piece = Run & {sel?: boolean; del?: boolean; sp?: boolean; caret?: boolean};
+type Piece = Run & {sel?: boolean; del?: boolean; sp?: boolean; caret?: boolean; label?: boolean};
+
+/** Each Word page break labelled just before its line break (edits.shownExtras counts the label). */
+function withPageBreaks(ps: Piece[]): Piece[] {
+  if (!ps.some(r => r.pg && !r.del)) {
+    return ps;
+  }
+  const out: Piece[] = [];
+  for (const r of ps) {
+    if (!r.pg || r.del) {
+      out.push(r);
+      continue;
+    }
+    let rest = r.t;
+    for (let i = rest.indexOf('\n'); i >= 0; i = rest.indexOf('\n')) {
+      if (i > 0) {
+        out.push({...r, t: rest.slice(0, i)});
+      }
+      out.push({t: PAGE_BREAK_LABEL, label: true, sz: r.sz});
+      out.push({...r, t: '\n'});
+      rest = rest.slice(i + 1);
+    }
+    if (rest) {
+      out.push({...r, t: rest});
+    }
+  }
+  return out;
+}
 
 /** The caret drawn in the text while typing, so it shows in the same screen update as the typed letters. */
 const CARET = '|';
@@ -85,7 +112,7 @@ function withCaret(ps: Piece[], caret: number | undefined): Piece[] {
   let off = 0;
   let placed = false;
   for (const r of ps) {
-    if (!placed && !r.del && caret < off + r.t.length) {
+    if (!placed && !r.del && !r.label && caret < off + r.t.length) {
       const k = caret - off;
       if (k > 0) {
         out.push({...r, t: r.t.slice(0, k)});
@@ -96,12 +123,12 @@ function withCaret(ps: Piece[], caret: number | undefined): Piece[] {
     } else {
       out.push(r);
     }
-    if (!r.del) {
+    if (!r.del && !r.label) {
       off += r.t.length;
     }
   }
   if (!placed) {
-    const last = [...ps].reverse().find(r => !r.del);
+    const last = [...ps].reverse().find(r => !r.del && !r.label);
     out.push({t: CARET, caret: true, sz: last?.sz});
   }
   return out;
@@ -180,8 +207,12 @@ function ParagraphView({p, selection, spell, onFrame, onLines, textRef, onTextFr
         onLines?.(e.nativeEvent.lines.map(l => ({y: l.y, height: l.height, len: l.text.length})))
       }>
       {leadChars(p) ? <View key="first-line" style={{width: dpForTwips(p.first!, scale), height: 1}} /> : null}
-      {withCaret(pieces(p, selection ?? null, spell), p.caret).map((r, i) =>
-        r.caret ? (
+      {withCaret(withPageBreaks(pieces(p, selection ?? null, spell)), p.caret).map((r, i) =>
+        r.label ? (
+          <Text key={i} style={[styles.pageBreakLabel, {fontSize: Math.round(runSize(r) * 0.7)}]}>
+            {PAGE_BREAK_LABEL}
+          </Text>
+        ) : r.caret ? (
           // Pulled together (negative spacing) so the text beside it barely moves.
           <Text key={i} style={[styles.caret, {fontSize: runSize(r), letterSpacing: -Math.round(runSize(r) * 0.18)}]}>
             {CARET}
@@ -303,6 +334,7 @@ const styles = StyleSheet.create({
   highlight: {backgroundColor: '#cfcfcf'},
   selected: {backgroundColor: '#000', color: '#fff'},
   caret: {color: '#000', fontWeight: '400', fontStyle: 'normal'},
+  pageBreakLabel: {color: '#555', fontWeight: '400', fontStyle: 'italic', textDecorationLine: 'none', backgroundColor: 'transparent'},
   inserted: {color: '#333'},
   misspelled: {backgroundColor: '#e6e6e6'},
   deleted: {color: '#777'},

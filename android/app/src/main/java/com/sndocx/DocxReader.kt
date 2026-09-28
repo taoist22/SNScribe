@@ -308,6 +308,8 @@ object DocxReader {
         val rev: String? = null,
         /** A handwritten note DOCX put in the margin (obj "ink"): its note id. */
         val ink: String? = null,
+        /** A Word page break (w:br w:type="page"): its text is "\n", and the next line starts a new page. */
+        val pageBreak: Boolean = false,
         /**
          * What the run sets itself (w:rPr and its character style), without what its
          * paragraph style gives it — the screen shows the style's part from the paragraph, so
@@ -723,7 +725,7 @@ object DocxReader {
             val own = styles.character(charStyle).merge(Fmt.of(rPr))
             val fmt = base.merge(own)
             val isLink = link || charStyle.equals("Hyperlink", ignoreCase = true)
-            fun add(text: String, obj: String? = null, ink: String? = null) {
+            fun add(text: String, obj: String? = null, ink: String? = null, pageBreak: Boolean = false) {
                 if (text.isEmpty()) return
                 out.add(
                     Run(
@@ -747,6 +749,7 @@ object DocxReader {
                         size = fmt.size,
                         rev = rev,
                         ink = ink,
+                        pageBreak = pageBreak,
                         ownBold = own.bold,
                         ownItalic = own.italic,
                         ownFont = theme.resolve(own.font),
@@ -761,7 +764,12 @@ object DocxReader {
                     if (c.localName == "fldChar") fields++
                     continue
                 }
-                if (t[0] == OBJECT) {
+                if (c.localName == "br" && c.getAttributeNS(W, "type") == "page") {
+                    // A page break Word shows as one: its own run, so the screen can show it and page there.
+                    add(text.toString())
+                    text.clear()
+                    add(t, pageBreak = true)
+                } else if (t[0] == OBJECT) {
                     add(text.toString())
                     text.clear()
                     val ink = if (c.localName == "drawing") inkNoteId(c) else null

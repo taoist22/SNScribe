@@ -47,6 +47,8 @@ import {
   textEditProblem,
   threadIds,
   toShown,
+  shownPageBreaks,
+  pageBreakChars,
   wordAround,
   type FormatProp,
   type Op,
@@ -458,7 +460,7 @@ export function Reader(): React.JSX.Element {
         if (!f || (b.type === 'p' && b.runs.length > 0 && !l)) {
           return undefined;
         }
-        return {top: f.top, height: f.height, lines: l, forced: b.type === 'p' && !!b.pb};
+        return {top: f.top, height: f.height, lines: l, forced: b.type === 'p' && !!b.pb, breaks: b.type === 'p' ? shownPageBreaks(b) : undefined};
       }),
     [window],
   );
@@ -988,6 +990,54 @@ export function Reader(): React.JSX.Element {
     setCaret(blank);
     keys.current?.focus();
     setStatus('New page. Type to fill it.');
+  };
+
+  /**
+   * Page card buttons take a second tap: a finger scrolling the Pages view can end on one
+   * (CT got a blank page added in the middle of a paper that way).
+   */
+  const [armed, setArmed] = useState<string | null>(null);
+  useEffect(() => {
+    if (!armed) {
+      return;
+    }
+    const t = setTimeout(() => setArmed(null), 6000);
+    return () => clearTimeout(t);
+  }, [armed]);
+
+  const cardButton = (key: string, label: string, question: string, action: () => void) => (
+    <Pressable
+      key={key}
+      onPress={once(key, () => {
+        if (armed === key) {
+          setArmed(null);
+          action();
+        } else {
+          setArmed(key);
+          setStatus(question);
+        }
+      })}
+      style={[styles.pageCardButton, armed === key ? styles.pageCardButtonArmed : null]}>
+      <Text allowFontScaling={false} style={[styles.pageCardButtonText, armed === key ? styles.pageCardButtonTextArmed : null]}>
+        {armed === key ? 'Tap again' : label}
+      </Text>
+    </Pressable>
+  );
+
+  /** The edit that removes the page break page i starts with, or null when it starts with none. */
+  const pageBreakAt = (i: number): Op[] | null => {
+    const at = map ? pageStartPos(map.pages[i]) : null;
+    return at ? pageBreakRemoval(at) : null;
+  };
+
+  const removePageBreak = (i: number) => {
+    const ops = pageBreakAt(i);
+    if (!ops) {
+      return;
+    }
+    flushTyping();
+    commit(ops, 'remove page break');
+    setStatus(`Removed the page break before page ${i + 1}. Undo puts it back.`);
   };
 
   /** Selects exactly the text on page i, to see it before deleting it. */
@@ -2424,6 +2474,27 @@ export function Reader(): React.JSX.Element {
   };
 
   /** Backspace at a caret while typing: the character before it, or a paragraph join. */
+  /**
+   * The edit that removes the page break just before `at`, or null: the paragraph's own
+   * "starts on a new page", or a Word page break (its line break) right before it — in the
+   * same paragraph, or ending the paragraph before.
+   */
+  const pageBreakRemoval = (at: Pos): Op[] | null => {
+    const p = paragraph(at.para);
+    if (!p) {
+      return null;
+    }
+    if (at.offset === 0 && p.pb) {
+      return [{op: 'para', para: at.para, pb: false}];
+    }
+    if (at.offset > 0) {
+      return pageBreakChars(p).includes(at.offset - 1) ? [{op: 'text', para: at.para, start: at.offset - 1, end: at.offset, text: ''}] : null;
+    }
+    const prev = paragraph(at.para - 1);
+    const len = prev ? paragraphText(prev).length : 0;
+    return prev && len > 0 && pageBreakChars(prev).includes(len - 1) ? [{op: 'text', para: prev.index, start: len - 1, end: len, text: ''}] : null;
+  };
+
   const backspaceAt = (at: Pos) => {
     const p = paragraph(at.para);
     if (!p) {
@@ -2433,6 +2504,14 @@ export function Reader(): React.JSX.Element {
       // At the start of a list item: the number or bullet goes first, as in Word.
       endListAt(at);
       setTyping({mode: 'insert', at});
+      return;
+    }
+    // At the start of a page: the page break goes first, as in Word; a second Backspace joins.
+    const unbreak = at.offset === 0 ? pageBreakRemoval(at) : null;
+    if (unbreak) {
+      commit(unbreak, 'remove page break');
+      setTyping({mode: 'insert', at});
+      setStatus('Page break removed. Backspace again joins this paragraph to the one before.');
       return;
     }
     if (at.offset === 0) {
@@ -4522,16 +4601,11 @@ export function Reader(): React.JSX.Element {
                       {pv.text}
                     </Text>
                     <View style={styles.pageCardTools}>
-                      <Pressable onPress={once(`newpage:${i}`, () => newPageAfter(i))} style={styles.pageCardButton}>
-                        <Text allowFontScaling={false} style={styles.pageCardButtonText}>
-                          {'New page after'}
-                        </Text>
-                      </Pressable>
-                      <Pressable onPress={once(`selpage:${i}`, () => selectPage(i))} style={styles.pageCardButton}>
-                        <Text allowFontScaling={false} style={styles.pageCardButtonText}>
-                          {'Select page'}
-                        </Text>
-                      </Pressable>
+                      {cardButton(`newpage:${i}`, 'New page after', `Tap again to add a blank page after page ${i + 1}.`, () => newPageAfter(i))}
+                      {cardButton(`selpage:${i}`, 'Select page', `Tap again to select the text of page ${i + 1}.`, () => selectPage(i))}
+                      {i > 0 && pageBreakAt(i)
+                        ? cardButton(`unbreak:${i}`, 'Remove page break', `Tap again to remove the page break before page ${i + 1}.`, () => removePageBreak(i))
+                        : null}
                     </View>
                   </Pressable>
                 );
@@ -4713,12 +4787,14 @@ const styles = StyleSheet.create({
   chipTextOn: {color: '#fff'},
   countSel: {marginTop: 8},
   presetSummary: {color: '#333', fontSize: 14, marginTop: 4},
-  pageCardTools: {flexDirection: 'row', marginTop: 'auto'},
-  pageCardButton: {borderWidth: 1, borderColor: '#000', borderRadius: 4, paddingVertical: 5, paddingHorizontal: 6, marginRight: 6},
+  pageCardTools: {flexDirection: 'row', flexWrap: 'wrap', marginTop: 'auto'},
+  pageCardButton: {borderWidth: 1, borderColor: '#000', borderRadius: 4, paddingVertical: 5, paddingHorizontal: 6, marginRight: 6, marginTop: 6},
+  pageCardButtonArmed: {backgroundColor: '#000'},
+  pageCardButtonTextArmed: {color: '#fff'},
   pageCardButtonText: {color: '#000', fontSize: 12, fontWeight: '700'},
   pagesHead: {flexDirection: 'row', alignItems: 'center', paddingVertical: 8, borderBottomWidth: 1, borderColor: '#000'},
   pagesGrid: {flexDirection: 'row', flexWrap: 'wrap', paddingTop: 8},
-  pageCard: {width: 220, height: 210, borderWidth: 1, borderColor: '#000', padding: 10, marginRight: 12, marginBottom: 12},
+  pageCard: {width: 220, minHeight: 210, borderWidth: 1, borderColor: '#000', padding: 10, marginRight: 12, marginBottom: 12},
   pageCardHere: {borderWidth: 3},
   pageCardNumber: {color: '#000', fontSize: 18, fontWeight: '700'},
   pageCardHeading: {color: '#000', fontSize: 15, fontWeight: '700', marginTop: 4},

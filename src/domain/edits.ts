@@ -223,7 +223,8 @@ function editText(p: ParagraphBlock, op: Extract<Op, {op: 'text'}>): ParagraphBl
     kept.push(r);
   }
   if (op.text) {
-    const {t: _t, obj: _o, k: _k, ...format} = source ?? {t: ''};
+    // Typed text is text: never an object, field or page break, whatever it sits beside.
+    const {t: _t, obj: _o, k: _k, pg: _g, ...format} = source ?? {t: ''};
     kept.splice(insertAt < 0 ? kept.length : insertAt, 0, {...format, t: op.text});
   }
   return {...p, runs: kept};
@@ -315,7 +316,8 @@ function split(out: Block[], i: number, op: Extract<Op, {op: 'split'}>): void {
     ...(p.revs ?? []).filter(v => v.kind === 'ins'),
     ...dels.filter(v => (v.at ?? 0) <= op.offset),
   ]);
-  let second: ParagraphBlock = withRevs({...p, index: p.index + 1, runs: after}, [
+  // Only the first half starts a new page (DocxEditor.splitParagraph).
+  let second: ParagraphBlock = withRevs({...p, index: p.index + 1, runs: after, pb: undefined}, [
     ...(p.revs ?? []).filter(v => v.kind === 'ins'),
     ...dels.filter(v => (v.at ?? 0) > op.offset).map(v => ({...v, at: (v.at ?? 0) - op.offset})),
   ]);
@@ -701,8 +703,8 @@ function shiftDeletions(revs: Revision[] | undefined, start: number, end: number
  * first-line indent spacer (lead, before everything) and deleted text shown struck through
  * before character `at`. The TextView's offsets count them; the model's do not.
  */
-export function shownExtras(p: ParagraphBlock): Array<{at: number; len: number; lead?: boolean; caret?: boolean}> {
-  const out: Array<{at: number; len: number; lead?: boolean; caret?: boolean}> = [];
+export function shownExtras(p: ParagraphBlock): Array<{at: number; len: number; lead?: boolean; caret?: boolean; label?: boolean}> {
+  const out: Array<{at: number; len: number; lead?: boolean; caret?: boolean; label?: boolean}> = [];
   if ((p.first ?? 0) > 0 && p.runs.length > 0) {
     out.push({at: 0, len: 1, lead: true});
   }
@@ -711,11 +713,41 @@ export function shownExtras(p: ParagraphBlock): Array<{at: number; len: number; 
       out.push({at: Math.max(0, v.at ?? 0), len: v.runs.reduce((n, r) => n + r.t.length, 0)});
     }
   }
+  for (const at of pageBreakChars(p)) {
+    // A Word page break is labelled in the text, just before its line break.
+    out.push({at, len: PAGE_BREAK_LABEL.length, label: true});
+  }
   if (p.caret !== undefined) {
     // Drawn in the text while typing: after deleted text at the same place, before the character.
     out.push({at: p.caret, len: 1, caret: true});
   }
   return out;
+}
+
+/** What a Word page break shows as (before its line break). */
+export const PAGE_BREAK_LABEL = ' — page break — ';
+
+/** Text offsets of the paragraph's Word page breaks (the "\n" of each). */
+export function pageBreakChars(p: ParagraphBlock): number[] {
+  const out: number[] = [];
+  let off = 0;
+  for (const r of p.runs) {
+    if (r.pg) {
+      for (let i = 0; i < r.t.length; i++) {
+        if (r.t[i] === '\n') {
+          out.push(off + i);
+        }
+      }
+    }
+    off += r.t.length;
+  }
+  return out;
+}
+
+/** Where each Word page break's line break is in the paragraph's TextView (for paging). */
+export function shownPageBreaks(p: ParagraphBlock): number[] {
+  // The character itself: everything shown at its place (deleted text, the label, the caret) comes first.
+  return pageBreakChars(p).map(at => toShown(p, at + 1) - 1);
 }
 
 /** A text offset as a TextView offset: extras before it are counted (a deletion at the caret is after it). */
@@ -733,7 +765,9 @@ export function toShown(p: ParagraphBlock, offset: number): number {
 export function fromShown(p: ParagraphBlock, shown: number): number {
   let extra = 0;
   // Extras in display order: the lead first, then deletions by position.
-  const xs = shownExtras(p).sort((a, b) => (a.lead ? -1 : b.lead ? 1 : a.at - b.at || (a.caret ? 1 : 0) - (b.caret ? 1 : 0)));
+  // At one place: deleted text, then a page break's label, then the caret.
+  const rank = (x: {caret?: boolean; label?: boolean}) => (x.caret ? 2 : x.label ? 1 : 0);
+  const xs = shownExtras(p).sort((a, b) => (a.lead ? -1 : b.lead ? 1 : a.at - b.at || rank(a) - rank(b)));
   for (const x of xs) {
     const startShown = (x.lead ? 0 : x.at) + extra;
     if (shown < startShown) {

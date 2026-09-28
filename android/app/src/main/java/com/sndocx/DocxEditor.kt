@@ -658,6 +658,10 @@ object DocxEditor {
         }
         moveBefore(p, first, op.offset)
         p.parentNode.insertBefore(first, p)
+        // Only the first half starts a new page: the rest continues on it (CT: pressing Enter
+        // in a paragraph that started a page added another page break). A style's page break
+        // stays with the style.
+        child(p, "pPr")?.let { pPr -> child(pPr, "pageBreakBefore")?.let { pPr.removeChild(it) } }
 
         // Enter at the end of a heading: the new paragraph takes the style's "next" style.
         if (op.offset == total && styleBefore != null) {
@@ -1556,7 +1560,10 @@ object DocxEditor {
         }
         op.pageBreakBefore?.let { on ->
             child(pPr, "pageBreakBefore")?.let { pPr.removeChild(it) }
-            if (on) insertInOrder(pPr, document.createElementNS(W, "w:pageBreakBefore"), PPR_ORDER)
+            // Off is written out ("0"), so it also removes a page break the paragraph's style gives it.
+            val el = document.createElementNS(W, "w:pageBreakBefore")
+            if (!on) el.setAttributeNS(W, "w:val", "0")
+            insertInOrder(pPr, el, PPR_ORDER)
         }
         notes.add("paragraph p${op.para}: $op")
     }
