@@ -92,6 +92,8 @@ export type Op =
    * picture `png` (width×height px). Its anchor is one object character in the text.
    */
   | {op: 'ink'; para: number; at: number; id: string; png: string; width: number; height: number}
+  /** A picture from the file `path`, cx × cy EMU, in the text at `at` (DocxEditor.addImage). */
+  | {op: 'image'; para: number; at: number; path: string; cx: number; cy: number; alt?: string}
   /** Remove handwritten note `id` from the document (its anchor and picture). */
   | {op: 'inkDelete'; para: number; id: string}
   /** Redefine paragraph styles (a paper format's headings); para is -1. */
@@ -224,7 +226,7 @@ function editText(p: ParagraphBlock, op: Extract<Op, {op: 'text'}>): ParagraphBl
   }
   if (op.text) {
     // Typed text is text: never an object, field or page break, whatever it sits beside.
-    const {t: _t, obj: _o, k: _k, pg: _g, ...format} = source ?? {t: ''};
+    const {t: _t, obj: _o, k: _k, pg: _g, src: _s, cx: _x, cy: _y, ...format} = source ?? {t: ''};
     kept.splice(insertAt < 0 ? kept.length : insertAt, 0, {...format, t: op.text});
   }
   return {...p, runs: kept};
@@ -533,6 +535,25 @@ export function applyOps(blocks: Block[], ops: Op[]): Block[] {
       case 'link':
         out[i] = {...p, runs: setLink(p.runs, op.start, op.end, true)};
         break;
+      case 'image': {
+        const pic: Run = {t: OBJECT, obj: 'image', src: op.path, cx: op.cx, cy: op.cy};
+        let offset = 0;
+        const runs: Run[] = [];
+        let placed = false;
+        for (const r of splitRuns(p.runs, [op.at])) {
+          if (!placed && offset >= op.at) {
+            runs.push(pic);
+            placed = true;
+          }
+          runs.push(r);
+          offset += r.t.length;
+        }
+        if (!placed) {
+          runs.push(pic);
+        }
+        out[i] = withMarks(withRevs({...p, runs}, shiftDeletions(p.revs, op.at, op.at, 1)), shiftMarks(p.marks, op.at, op.at, 1));
+        break;
+      }
       case 'ink': {
         let offset = 0;
         const runs: Run[] = [];

@@ -1,5 +1,5 @@
 import React from 'react';
-import {StyleSheet, Text, View, type LayoutChangeEvent, type TextLayoutEventData, type NativeSyntheticEvent} from 'react-native';
+import {Image, StyleSheet, Text, View, type LayoutChangeEvent, type TextLayoutEventData, type NativeSyntheticEvent} from 'react-native';
 import {markSelection, splitRuns} from './domain/edits';
 import {shownFont} from './domain/fonts';
 import {OBJECT, type Block, type ParagraphBlock, type Run} from './model/docx';
@@ -34,6 +34,8 @@ type Props = {
   fonts?: Set<string>;
   /** Text size factor chosen by the reader (A− / A+); 1 = the document's sizes. */
   scale?: number;
+  /** The text column's width: pictures wider than it are shown smaller. */
+  width?: number;
 };
 
 const SYMBOL: Record<string, string> = {image: '▣', note: '*', object: '◇', ink: '✎'};
@@ -139,7 +141,19 @@ function pieces(p: ParagraphBlock, selection: {start: number; end: number} | nul
   return out;
 }
 
-function ParagraphView({p, selection, spell, onFrame, onLines, textRef, onTextFrame, fonts, scale = 1}: Omit<Props, 'block'> & {p: ParagraphBlock}) {
+/** A picture's size on screen: Word's size (EMU) on the same scale as text, no wider than `maxW`. */
+function pictureSize(r: Run, scale: number, maxW: number): {width: number; height: number} {
+  const toDp = (emu: number) => (emu / 12700) * 1.82 * scale;
+  let w = r.cx ? toDp(r.cx) : 200;
+  let h = r.cy ? toDp(r.cy) : 150;
+  if (w > maxW) {
+    h = (h * maxW) / w;
+    w = maxW;
+  }
+  return {width: Math.max(8, Math.round(w)), height: Math.max(8, Math.round(h))};
+}
+
+function ParagraphView({p, selection, spell, onFrame, onLines, textRef, onTextFrame, fonts, scale = 1, width = 700}: Omit<Props, 'block'> & {p: ParagraphBlock}) {
   // The document's own sizes when it has them, times the reader's text size; the line
   // height follows the largest.
   // Text without a size of its own takes its style's (bs), else the kind's default.
@@ -164,6 +178,9 @@ function ParagraphView({p, selection, spell, onFrame, onLines, textRef, onTextFr
   // margin to pull into, so they start at the left edge instead of off it.
   // A block quote with no indent of its own shows indented anyway, as Word's Quote style does.
   const indent = Math.max(0, Math.min(160, Math.round(((p.quote && !p.indent ? 720 : p.indent) / 20) * scale)));
+  // A picture makes its line as tall as itself: a fixed line height would draw it over the lines around it.
+  const hasPicture = p.runs.some(r => r.obj === 'image' && r.src);
+  const maxPicture = Math.max(60, width - indent - (p.list !== undefined ? LIST_LABEL_W : 0) - 4);
   const text = (
     <Text
       ref={textRef}
@@ -171,7 +188,7 @@ function ParagraphView({p, selection, spell, onFrame, onLines, textRef, onTextFr
       allowFontScaling={false}
       style={[
         styles.text,
-        {fontSize: size, lineHeight, textAlign: p.align},
+        hasPicture ? {fontSize: size, textAlign: p.align} : {fontSize: size, lineHeight, textAlign: p.align},
         (heading && p.kind !== 'subtitle') || p.sb ? styles.bold : null,
         p.kind === 'subtitle' || p.quote || p.si ? styles.italic : null,
         p.list !== undefined ? styles.flex : null,
@@ -182,7 +199,10 @@ function ParagraphView({p, selection, spell, onFrame, onLines, textRef, onTextFr
       }>
       {leadChars(p) ? <View key="first-line" style={{width: dpForTwips(p.first!, scale), height: 1}} /> : null}
       {withCaret(pieces(p, selection ?? null, spell), p.caret).map((r, i) =>
-        r.caret ? (
+        r.obj === 'image' && r.src ? (
+          // One character in the TextView, like the placeholder it replaces: offsets stay the same.
+          <Image key={i} source={{uri: `file://${r.src}`}} style={[pictureSize(r, scale, maxPicture), r.sel ? styles.pictureSelected : null]} resizeMode="contain" />
+        ) : r.caret ? (
           // Pulled together (negative spacing) so the text beside it barely moves.
           <Text key={i} style={[styles.caret, {fontSize: runSize(r), letterSpacing: -Math.round(runSize(r) * 0.18)}]}>
             {CARET}
@@ -252,7 +272,8 @@ export const BlockView = React.memo(
     sameRange(a.selection, b.selection) &&
     sameRanges(a.spell, b.spell) &&
     a.fonts === b.fonts &&
-    a.scale === b.scale,
+    a.scale === b.scale &&
+    a.width === b.width,
 );
 
 function BlockViewInner({block, ...rest}: Props): React.JSX.Element {
@@ -304,6 +325,7 @@ const styles = StyleSheet.create({
   highlight: {backgroundColor: '#cfcfcf'},
   selected: {backgroundColor: '#000', color: '#fff'},
   caret: {color: '#000', fontWeight: '400', fontStyle: 'normal'},
+  pictureSelected: {opacity: 0.4},
   inserted: {color: '#333'},
   misspelled: {backgroundColor: '#e6e6e6'},
   deleted: {color: '#777'},

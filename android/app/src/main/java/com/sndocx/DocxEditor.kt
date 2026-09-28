@@ -156,6 +156,9 @@ object DocxEditor {
          */
         data class StyleDefs(val defs: List<StyleDef>) : Op()
 
+        /** A picture from the file [path] (PNG, JPEG, GIF or BMP) in the text at [at], [cx]×[cy] EMU; [alt] its description. */
+        data class ImageAdd(val para: Int, val at: Int, val path: String, val cx: Long, val cy: Long, val alt: String = "") : Op()
+
         /** A handwritten note [id]: the PNG [png] ([width]×[height] px) in the right margin, anchored at [at]. */
         data class InkAdd(val para: Int, val at: Int, val id: String, val png: String, val width: Int, val height: Int) : Op()
 
@@ -436,6 +439,13 @@ object DocxEditor {
                 deleteComments(document, pkg, op, notes)
                 continue
             }
+            if (op is Op.ImageAdd) {
+                val p = checkNotNull(paragraphs.getOrNull(op.para)) { "no paragraph ${op.para} for $op" }
+                val old = paragraphText(p)
+                addImage(document, p, pkg, op, notes)
+                effects?.add(Op.Text(op.para, 0, old.length, paragraphText(p)))
+                continue
+            }
             if (op is Op.InkAdd || op is Op.InkDelete) {
                 val i = if (op is Op.InkAdd) op.para else (op as Op.InkDelete).para
                 val p = checkNotNull(paragraphs.getOrNull(i)) { "no paragraph $i for $op" }
@@ -471,7 +481,7 @@ object DocxEditor {
                 is Op.ParaProps -> op.para
                 is Op.Link -> op.para
                 is Op.Unlink -> op.para
-                is Op.PageSetup, is Op.Defaults, is Op.HeaderFooter, is Op.Revision, is Op.CommentAdd, is Op.CommentDelete, is Op.InkAdd, is Op.InkDelete, is Op.StyleDefs -> error("unreachable")
+                is Op.PageSetup, is Op.Defaults, is Op.HeaderFooter, is Op.Revision, is Op.CommentAdd, is Op.CommentDelete, is Op.InkAdd, is Op.InkDelete, is Op.ImageAdd, is Op.StyleDefs -> error("unreachable")
             }
             val p = checkNotNull(paragraphs.getOrNull(index)) { "no paragraph $index for $op" }
             when (op) {
@@ -485,7 +495,7 @@ object DocxEditor {
                 is Op.ParaProps -> paraProps(document, p, op, notes)
                 is Op.Link -> link(document, p, op, pkg, styleIds, notes)
                 is Op.Unlink -> unlink(p, op, notes)
-                is Op.PageSetup, is Op.Defaults, is Op.HeaderFooter, is Op.Revision, is Op.CommentAdd, is Op.CommentDelete, is Op.InkAdd, is Op.InkDelete, is Op.StyleDefs -> {}
+                is Op.PageSetup, is Op.Defaults, is Op.HeaderFooter, is Op.Revision, is Op.CommentAdd, is Op.CommentDelete, is Op.InkAdd, is Op.InkDelete, is Op.ImageAdd, is Op.StyleDefs -> {}
             }
             // Splits and joins renumber the paragraphs after them.
             if (op is Op.Split || op is Op.Join) paragraphs = bodyParagraphs(document)
@@ -1019,6 +1029,35 @@ object DocxEditor {
         for (prefix in listOf("w", "wp", "a", "pic", "r")) run.removeAttributeNS("http://www.w3.org/2000/xmlns/", prefix)
         placeAt(p, op.at, run, before = true)
         notes.add("ink note ${op.id} at p${op.para}:${op.at} → $part (${"%.2f".format(inches)}″)")
+    }
+
+    /** Picture formats a document may carry, by file extension: the content type Word expects. */
+    private val PICTURE_TYPES = mapOf("png" to "image/png", "jpg" to "image/jpeg", "jpeg" to "image/jpeg", "gif" to "image/gif", "bmp" to "image/bmp")
+
+    /**
+     * A picture in the text (inline, as Word's Insert ▸ Pictures puts it): the file [Op.ImageAdd.path]
+     * copied into word/media, at character [Op.ImageAdd.at], [Op.ImageAdd.cx]×[Op.ImageAdd.cy] EMU.
+     * It is one U+FFFC in the paragraph's text, like any picture.
+     */
+    private fun addImage(document: Document, p: Element, pkg: Pkg, op: Op.ImageAdd, notes: MutableList<String>) {
+        val ext = op.path.substringAfterLast('.', "").lowercase()
+        val type = checkNotNull(PICTURE_TYPES[ext]) { "not a picture Word can hold: ${op.path}" }
+        val bytes = File(op.path).readBytes()
+        check(bytes.size in 1..25_000_000) { "picture too large (${bytes.size} bytes)" }
+        check(op.cx in 1..(40 * EMU_PER_INCH) && op.cy in 1..(40 * EMU_PER_INCH)) { "picture size out of range" }
+        val part = pkg.freeName("word/media/sndocx-picture-", ext)
+        pkg.addBinary(part, bytes, ext, type)
+        val rId = pkg.relate(REL_IMAGE, part.removePrefix("word/"), external = false)
+        var maxDocPr = 0
+        val prs = document.getElementsByTagNameNS(DocxReader.WP, "docPr")
+        for (i in 0 until prs.length) maxDocPr = maxOf(maxDocPr, (prs.item(i) as Element).getAttribute("id").toIntOrNull() ?: 0)
+        val docPr = maxDocPr + 1
+        val alt = op.alt.replace("&", "&amp;").replace("<", "&lt;").replace("\"", "&quot;")
+        val xml = """<w:r xmlns:w="$W" xmlns:wp="${DocxReader.WP}" xmlns:a="${DocxReader.A}" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="$R_NS"><w:rPr><w:noProof/></w:rPr><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${op.cx}" cy="${op.cy}"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:docPr id="$docPr" name="Picture $docPr" descr="$alt"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="$docPr" name="Picture $docPr"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="$rId"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${op.cx}" cy="${op.cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>"""
+        val run = document.importNode(DocxReader.parse(xml.toByteArray()).documentElement, true) as Element
+        for (prefix in listOf("w", "wp", "a", "pic", "r")) run.removeAttributeNS("http://www.w3.org/2000/xmlns/", prefix)
+        placeAt(p, op.at, run, before = true)
+        notes.add("picture at p${op.para}:${op.at} → $part (${op.cx}×${op.cy} EMU)")
     }
 
     /** Removes handwritten note [Op.InkDelete.id]: its anchor, and its picture when nothing else shows it. */

@@ -241,6 +241,38 @@ object DocxReader {
         }
     }
 
+    /** Picture formats Android can draw (Word's EMF/WMF and SVG can't be: those stay a placeholder). */
+    private val RASTER = setOf("png", "jpg", "jpeg", "gif", "bmp", "webp")
+
+    /**
+     * Copies the document's pictures out of [file] into [dir], for the screen: relationship id →
+     * file path. Only formats Android can draw; each at most 20 MB.
+     */
+    fun extractImages(file: File, dir: File): Map<String, String> {
+        ZipFile(file).use { zip ->
+            val rels = zip.getEntry(DOCUMENT_RELS)?.let { parse(readEntry(zip, it)) } ?: return emptyMap()
+            val out = LinkedHashMap<String, String>()
+            var n = rels.documentElement?.firstChild
+            while (n != null) {
+                if (n is Element && n.localName == "Relationship" && n.getAttribute("Type").endsWith("/image") && n.getAttribute("TargetMode") != "External") {
+                    val target = n.getAttribute("Target")
+                    val part = if (target.startsWith("/")) target.removePrefix("/") else "word/" + target.removePrefix("./")
+                    val ext = part.substringAfterLast('.', "").lowercase()
+                    val entry = zip.getEntry(part)
+                    if (ext in RASTER && entry != null && entry.size in 1..20_000_000) {
+                        checkEntryName(part)
+                        dir.mkdirs()
+                        val dest = File(dir, part.substringAfterLast('/').replace(Regex("[^A-Za-z0-9_.-]"), "_"))
+                        if (!dest.exists() || dest.length() != entry.size) dest.writeBytes(readEntry(zip, entry))
+                        out[n.getAttribute("Id")] = dest.path
+                    }
+                }
+                n = n.nextSibling
+            }
+            return out
+        }
+    }
+
     /** Copies each handwritten note's picture out of [file] into [dir]; note id → file path. */
     fun extractInk(file: File, dir: File): Map<String, String> {
         ZipFile(file).use { zip ->
@@ -310,6 +342,10 @@ object DocxReader {
         val ink: String? = null,
         /** A Word page break (w:br w:type="page"): its text is "\n", and the next line starts a new page. */
         val pageBreak: Boolean = false,
+        /** For obj "image": the picture's relationship id (a:blip r:embed) and its size in EMU (wp:extent). */
+        val imageRel: String? = null,
+        val cx: Long = 0,
+        val cy: Long = 0,
         /**
          * What the run sets itself (w:rPr and its character style), without what its
          * paragraph style gives it — the screen shows the style's part from the paragraph, so
@@ -725,7 +761,7 @@ object DocxReader {
             val own = styles.character(charStyle).merge(Fmt.of(rPr))
             val fmt = base.merge(own)
             val isLink = link || charStyle.equals("Hyperlink", ignoreCase = true)
-            fun add(text: String, obj: String? = null, ink: String? = null, pageBreak: Boolean = false) {
+            fun add(text: String, obj: String? = null, ink: String? = null, pageBreak: Boolean = false, picture: Element? = null) {
                 if (text.isEmpty()) return
                 out.add(
                     Run(
@@ -750,6 +786,9 @@ object DocxReader {
                         rev = rev,
                         ink = ink,
                         pageBreak = pageBreak,
+                        imageRel = picture?.let { d -> (d.getElementsByTagNameNS(A, "blip").item(0) as? Element)?.getAttributeNS(R_NS, "embed")?.takeIf { it.isNotEmpty() } },
+                        cx = picture?.let { d -> (d.getElementsByTagNameNS(WP, "extent").item(0) as? Element)?.getAttribute("cx")?.toLongOrNull() } ?: 0,
+                        cy = picture?.let { d -> (d.getElementsByTagNameNS(WP, "extent").item(0) as? Element)?.getAttribute("cy")?.toLongOrNull() } ?: 0,
                         ownBold = own.bold,
                         ownItalic = own.italic,
                         ownFont = theme.resolve(own.font),
@@ -779,7 +818,7 @@ object DocxReader {
                         c.localName == "footnoteReference" || c.localName == "endnoteReference" -> "note"
                         else -> "object"
                     }
-                    add(t, kind, ink)
+                    add(t, kind, ink, picture = if (kind == "image" && c.localName == "drawing") c else null)
                 } else {
                     text.append(t)
                 }

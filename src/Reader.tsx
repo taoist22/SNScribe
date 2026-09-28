@@ -19,6 +19,7 @@ import {BlockView} from './BlockView';
 import {PageCounter} from './PageCounter';
 import {pageInfo, pageMarks} from './domain/pageInfo';
 import {targetLabel, wordCounts} from './domain/wordcount';
+import {figureOps, pictureEmu} from './domain/figures';
 import {TouchLayer} from './services/touch';
 import {
   applyOps,
@@ -130,7 +131,7 @@ type Typing = {mode: 'insert'; at: Pos} | {mode: 'replace'; range: Range};
 type HfLine = {text: string; align: 'left' | 'center' | 'right'; page: boolean};
 
 type Menu =
-  | 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count' | 'page' | 'preset' | 'header' | 'link' | 'thread' | 'comment' | 'note' | 'hl' | 'find' | 'cite' | 'quotes' | 'spell' | 'goto'
+  | 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count' | 'page' | 'preset' | 'header' | 'link' | 'thread' | 'comment' | 'note' | 'hl' | 'find' | 'cite' | 'quotes' | 'spell' | 'goto' | 'picture'
   | 'recent' | 'versions' | 'recover';
 
 /** Drop-down menu width; menus are kept inside the screen. */
@@ -163,6 +164,13 @@ export function Reader(): React.JSX.Element {
   /** Pages view: only the pages with comments, handwritten notes or tracked changes. */
   const [notesOnly, setNotesOnly] = useState(false);
   const [goToText, setGoToText] = useState('');
+  /** Insert picture…: the file chosen, its pixels, and the figure label/title to add. */
+  const [pic, setPic] = useState<{para: number; path?: string; w?: number; h?: number; label: boolean; title: string; note: string}>({
+    para: -1,
+    label: true,
+    title: '',
+    note: '',
+  });
   /** Word-count target for this document (body text), kept per document; null = none. */
   const [target, setTarget] = useState<number | null>(null);
   const [targetText, setTargetText] = useState('');
@@ -1160,6 +1168,73 @@ export function Reader(): React.JSX.Element {
   };
 
   const atStart = anchor.block === 0 && anchor.offset === 0;
+
+  // ---------------------------------------------------------------- pictures and figures
+
+  /** Insert picture…: after the paragraph with the caret (or the end of the selection). */
+  const startPicture = () => {
+    const at = !typing && selection ? (comparePos(selection.from, selection.to) <= 0 ? selection.to : selection.from) : caretAt;
+    flushTyping();
+    if (!at) {
+      setStatus('Tap the paragraph the picture goes after.');
+      return;
+    }
+    setPic(p => ({...p, para: at.para, path: undefined, w: undefined, h: undefined, title: '', note: ''}));
+    setMenu('picture');
+  };
+
+  const choosePicture = async () => {
+    try {
+      if (!(await ensureFileReadPermission())) {
+        setPic(p => ({...p, note: 'File access was not allowed.'}));
+        return;
+      }
+      const picked = (await RattaFileSelector.selectFile({
+        selectType: 0,
+        maxNum: 1,
+        title: 'Choose a picture (PNG or JPEG)',
+        rightButtonText: 'Choose',
+        suffixList: ['png', 'jpg', 'jpeg', 'gif', 'bmp'],
+      })) as string[] | null | undefined;
+      const path = picked?.find(x => typeof x === 'string' && /\.(png|jpe?g|gif|bmp)$/i.test(x));
+      if (!path) {
+        return;
+      }
+      Image.getSize(
+        `file://${path}`,
+        (w, h) => setPic(p => ({...p, path, w, h, note: `${path.slice(path.lastIndexOf('/') + 1)} · ${w} × ${h} pixels`})),
+        () => setPic(p => ({...p, path: undefined, note: 'That picture could not be read.'})),
+      );
+    } catch (error) {
+      setPic(p => ({...p, note: `No picture chosen: ${errorText(error)}`}));
+    }
+  };
+
+  const insertPicture = () => {
+    const para = paragraph(pic.para);
+    if (!doc || !para || !pic.path || !pic.w || !pic.h) {
+      return;
+    }
+    const problem = splitProblem(para, paragraphText(para).length);
+    if (problem) {
+      setPic(p => ({...p, note: problem}));
+      return;
+    }
+    // As big as it is (at 96 dpi), no wider than the text and no taller than two-thirds of the page.
+    const page = pageAfter(doc.page, applied);
+    const twip = 635;
+    const maxW = Math.max(1440, page.width - page.left - page.right) * twip;
+    const maxH = Math.max(1440, Math.round(((page.height - page.top - page.bottom) * 2) / 3)) * twip;
+    const {cx, cy} = pictureEmu(pic.w, pic.h, maxW, maxH);
+    const alt = pic.label && pic.title.trim() ? pic.title.trim() : pic.path.slice(pic.path.lastIndexOf('/') + 1);
+    const {ops, n} = figureOps(blocks, para, {path: pic.path, cx, cy, alt}, pic.label ? pic.title : null, citeStyle);
+    setMenu(null);
+    commit(ops, 'insert picture');
+    setSelection(null);
+    setCaret(null);
+    const name = CITE_STYLES.find(x => x.id === citeStyle)?.name ?? '';
+    setStatus(n ? `Figure ${n} inserted (${name} style). Later figures were renumbered; check mentions like “see Figure ${n}” in the text.` : 'Picture inserted.');
+  };
 
   /** Go to page…: from View, or by tapping the page number on the bottom line. */
   const openGoTo = () => {
@@ -4365,6 +4440,7 @@ export function Reader(): React.JSX.Element {
             {item('Insert quote…', openQuotes)}
             {item('Comment…', startComment)}
             {inkOk ? item('Handwritten note…', startNote) : null}
+            {item('Insert picture…', startPicture)}
             {hasChanges ? item('Accept all changes', () => {
               setMenu(null);
               review(-1, '*', true);
@@ -4398,6 +4474,53 @@ export function Reader(): React.JSX.Element {
               {'The color shows in Word; on the Supernote highlights are gray.'}
             </Text>
           </>
+        );
+      }
+      case 'picture': {
+        const labelHelp =
+          citeStyle === 'apa'
+            ? 'APA 7: “Figure N” in bold and the title in italics, above the picture.'
+            : citeStyle === 'mla'
+            ? 'MLA 9: “Fig. N.” and the title below the picture.'
+            : 'Chicago: “Figure N.” and the title below the picture.';
+        return (
+          <View style={styles.nameForm}>
+            <Text allowFontScaling={false} style={styles.menuText}>
+              {'Insert picture'}
+            </Text>
+            <Text allowFontScaling={false} style={styles.presetSummary}>
+              {'It goes after the paragraph you tapped, as wide as it is (never wider than the text).'}
+            </Text>
+            <View style={styles.row}>{panelButton(pic.path ? 'Choose another…' : 'Choose picture…', choosePicture)}</View>
+            {pic.note ? (
+              <Text allowFontScaling={false} style={styles.presetSummary}>
+                {pic.note}
+              </Text>
+            ) : null}
+            <Pressable onPress={once('fig-label', () => setPic(p => ({...p, label: !p.label})))} style={[styles.chip, styles.findCase, pic.label ? styles.chipOn : null]}>
+              <Text allowFontScaling={false} style={[styles.chipText, pic.label ? styles.chipTextOn : null]}>
+                {pic.label ? '✓ Figure label and title' : 'Figure label and title'}
+              </Text>
+            </Pressable>
+            {pic.label ? (
+              <>
+                <TextInput
+                  style={styles.nameInput}
+                  value={pic.title}
+                  onChangeText={title => setPic(p => ({...p, title}))}
+                  placeholder="Figure title"
+                  allowFontScaling={false}
+                />
+                <Text allowFontScaling={false} style={styles.presetSummary}>
+                  {`${labelHelp} Numbered in order. The format follows the style chosen in Cite from Zotero (now ${CITE_STYLES.find(x => x.id === citeStyle)?.name ?? ''}).`}
+                </Text>
+              </>
+            ) : null}
+            <View style={styles.row}>
+              {panelButton('Insert', insertPicture, !pic.path)}
+              {button('Cancel', () => setMenu(null))}
+            </View>
+          </View>
         );
       }
       case 'goto':
@@ -4700,6 +4823,7 @@ export function Reader(): React.JSX.Element {
                   spell={spellFor(b)}
                   fonts={fonts}
                   scale={textScale}
+                  width={textW}
                   onFrame={onFrame(i)}
                   onLines={onLines(i)}
                   onTextFrame={onTextFrame(i)}

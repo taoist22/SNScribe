@@ -33,7 +33,7 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
 
     companion object {
         /** Bumped with each native change; first log line, to spot stale installs. */
-        const val NATIVE_BUILD = 15
+        const val NATIVE_BUILD = 16
         private val EXPORT_DIR = File("/storage/emulated/0/EXPORT")
         private const val LOG_MAX_BYTES = 2L * 1024 * 1024
         private const val LOG_LINE_MAX = 4000
@@ -110,6 +110,10 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
             try {
                 val file = File(path)
                 val result = DocxReader.read(file)
+                // The document's pictures, for the screen (also used by preview of this document).
+                pictures = runCatching {
+                    DocxReader.extractImages(file, File(reactContext.cacheDir, "sn-docx/pictures/" + Integer.toHexString(file.path.hashCode())))
+                }.onFailure { appendLog("pictures not read: $it") }.getOrNull() ?: emptyMap()
                 val ms = System.currentTimeMillis() - t0
                 appendLog("open ${file.name}: ${file.length()} B, ${result.blocks.size} blocks, $ms ms, ${result.report}")
                 promise.resolve(Arguments.createMap().apply {
@@ -288,6 +292,7 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
             parent = if (m.hasKey("parent") && !m.isNull("parent")) m.getInt("parent") else null,
         )
         "uncomment" -> DocxEditor.Op.CommentDelete(m.getArray("ids")?.let { a -> (0 until a.size()).map { a.getInt(it) } }.orEmpty())
+        "image" -> DocxEditor.Op.ImageAdd(m.getInt("para"), m.getInt("at"), m.getString("path") ?: "", m.getDouble("cx").toLong(), m.getDouble("cy").toLong(), if (m.hasKey("alt")) m.getString("alt") ?: "" else "")
         "ink" -> DocxEditor.Op.InkAdd(m.getInt("para"), m.getInt("at"), m.getString("id") ?: "", m.getString("png") ?: "", m.getInt("width"), m.getInt("height"))
         "inkDelete" -> DocxEditor.Op.InkDelete(m.getInt("para"), m.getString("id") ?: "")
         "revision" -> DocxEditor.Op.Revision(m.getInt("para"), m.getString("id") ?: "", m.getBoolean("accept"))
@@ -717,6 +722,10 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
         putInt("contentControls", r.contentControls)
     }
 
+    /** Relationship id → extracted file, for the open document's pictures. */
+    @Volatile
+    private var pictures: Map<String, String> = emptyMap()
+
     private fun runs(list: List<DocxReader.Run>) = Arguments.createArray().apply {
         for (r in list) pushMap(Arguments.createMap().apply {
             putString("t", r.text)
@@ -738,6 +747,11 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
             r.rev?.let { putString("rv", it) }
             r.ink?.let { putString("ink", it) }
             if (r.pageBreak) putBoolean("pg", true)
+            r.imageRel?.let { pictures[it] }?.let { putString("src", it) }
+            if (r.cx > 0 && r.cy > 0) {
+                putDouble("cx", r.cx.toDouble())
+                putDouble("cy", r.cy.toDouble())
+            }
         })
     }
 

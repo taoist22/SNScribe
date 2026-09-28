@@ -109,6 +109,7 @@ export function PageCounter({blocks, width, pageH, fonts, scale, seed, onPages}:
             block={b}
             fonts={fonts}
             scale={scale}
+            width={width}
             onFrame={(e: LayoutChangeEvent) => {
               const {y, height} = e.nativeEvent.layout;
               frames.current[i] = {top: y, height};

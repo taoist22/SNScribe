@@ -34,6 +34,10 @@ export type Run = {
   rv?: string;
   /** A Word page break: its "\n" ends the page (the next line starts a new one). */
   pg?: boolean;
+  /** For obj 'image': the picture file to draw (absent: a format the screen can't draw) and its size in EMU. */
+  src?: string;
+  cx?: number;
+  cy?: number;
 };
 
 /**
