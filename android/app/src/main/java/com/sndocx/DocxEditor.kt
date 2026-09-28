@@ -156,6 +156,15 @@ object DocxEditor {
          */
         data class StyleDefs(val defs: List<StyleDef>) : Op()
 
+        /** A footnote [id] with the text [pieces], its number at character [at] of [para]. */
+        data class FootnoteAdd(val para: Int, val at: Int, val id: Int, val pieces: List<DocxReader.NotePiece>) : Op()
+
+        /** Footnote [id]'s text becomes [pieces] (its number stays). */
+        data class FootnoteSet(val id: Int, val pieces: List<DocxReader.NotePiece>) : Op()
+
+        /** Removes footnote [id] and its number in the text. */
+        data class FootnoteDelete(val id: Int) : Op()
+
         /** A picture from the file [path] (PNG, JPEG, GIF or BMP) in the text at [at], [cx]×[cy] EMU; [alt] its description. */
         data class ImageAdd(val para: Int, val at: Int, val path: String, val cx: Long, val cy: Long, val alt: String = "") : Op()
 
@@ -439,6 +448,25 @@ object DocxEditor {
                 deleteComments(document, pkg, op, notes)
                 continue
             }
+            if (op is Op.FootnoteAdd || op is Op.FootnoteSet || op is Op.FootnoteDelete) {
+                // Body text changes (a number added or removed), as plain splices, for verify.
+                val before = paragraphs.map { paragraphText(it) }
+                when (op) {
+                    is Op.FootnoteAdd -> {
+                        val p = checkNotNull(paragraphs.getOrNull(op.para)) { "no paragraph ${op.para} for $op" }
+                        if (styles != null && footnoteStyles(styles)) stylesTouched = true
+                        addFootnote(document, p, pkg, styles, op, notes)
+                    }
+                    is Op.FootnoteSet -> setFootnote(document, pkg, styles, op.id, op.pieces, notes)
+                    is Op.FootnoteDelete -> deleteFootnote(document, pkg, op, notes)
+                    else -> {}
+                }
+                paragraphs.forEachIndexed { i, p ->
+                    val now = paragraphText(p)
+                    if (now != before[i]) effects?.add(Op.Text(i, 0, before[i].length, now))
+                }
+                continue
+            }
             if (op is Op.ImageAdd) {
                 val p = checkNotNull(paragraphs.getOrNull(op.para)) { "no paragraph ${op.para} for $op" }
                 val old = paragraphText(p)
@@ -481,7 +509,8 @@ object DocxEditor {
                 is Op.ParaProps -> op.para
                 is Op.Link -> op.para
                 is Op.Unlink -> op.para
-                is Op.PageSetup, is Op.Defaults, is Op.HeaderFooter, is Op.Revision, is Op.CommentAdd, is Op.CommentDelete, is Op.InkAdd, is Op.InkDelete, is Op.ImageAdd, is Op.StyleDefs -> error("unreachable")
+                is Op.PageSetup, is Op.Defaults, is Op.HeaderFooter, is Op.Revision, is Op.CommentAdd, is Op.CommentDelete, is Op.InkAdd, is Op.InkDelete, is Op.ImageAdd, is Op.StyleDefs,
+                is Op.FootnoteAdd, is Op.FootnoteSet, is Op.FootnoteDelete -> error("unreachable")
             }
             val p = checkNotNull(paragraphs.getOrNull(index)) { "no paragraph $index for $op" }
             when (op) {
@@ -495,7 +524,8 @@ object DocxEditor {
                 is Op.ParaProps -> paraProps(document, p, op, notes)
                 is Op.Link -> link(document, p, op, pkg, styleIds, notes)
                 is Op.Unlink -> unlink(p, op, notes)
-                is Op.PageSetup, is Op.Defaults, is Op.HeaderFooter, is Op.Revision, is Op.CommentAdd, is Op.CommentDelete, is Op.InkAdd, is Op.InkDelete, is Op.ImageAdd, is Op.StyleDefs -> {}
+                is Op.PageSetup, is Op.Defaults, is Op.HeaderFooter, is Op.Revision, is Op.CommentAdd, is Op.CommentDelete, is Op.InkAdd, is Op.InkDelete, is Op.ImageAdd, is Op.StyleDefs,
+                is Op.FootnoteAdd, is Op.FootnoteSet, is Op.FootnoteDelete -> {}
             }
             // Splits and joins renumber the paragraphs after them.
             if (op is Op.Split || op is Op.Join) paragraphs = bodyParagraphs(document)
@@ -1029,6 +1059,141 @@ object DocxEditor {
         for (prefix in listOf("w", "wp", "a", "pic", "r")) run.removeAttributeNS("http://www.w3.org/2000/xmlns/", prefix)
         placeAt(p, op.at, run, before = true)
         notes.add("ink note ${op.id} at p${op.para}:${op.at} → $part (${"%.2f".format(inches)}″)")
+    }
+
+    // ---------------------------------------------------------------- footnotes
+
+    private const val FOOTNOTES_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"
+
+    /** The footnotes part, created (with Word's two separators) when [create] and missing. */
+    private fun footnotesPath(pkg: Pkg, create: Boolean): String? {
+        DocxReader.relTarget(pkg.part(DocxReader.DOCUMENT_RELS), DocxReader.REL_FOOTNOTES)?.takeIf { pkg.exists(it) }?.let { return it }
+        if (!create) return null
+        val name = "word/footnotes.xml"
+        check(!pkg.exists(name)) { "unreadable $name" }
+        val xml = """<w:footnotes xmlns:w="$W"><w:footnote w:type="separator" w:id="-1"><w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:continuationSeparator/></w:r></w:p></w:footnote></w:footnotes>"""
+        pkg.add(name, DocxReader.parse(xml.toByteArray()), FOOTNOTES_TYPE, DocxReader.REL_FOOTNOTES)
+        return name
+    }
+
+    /** A style's id by its built-in name ("footnote text"), or null. */
+    private fun styleIdByName(styles: Document, type: String, name: String): String? =
+        elementChildren(styles.documentElement).firstOrNull {
+            it.localName == "style" && it.getAttributeNS(W, "type") == type && child(it, "name")?.getAttributeNS(W, "val")?.equals(name, ignoreCase = true) == true
+        }?.getAttributeNS(W, "styleId")
+
+    /**
+     * Word's footnote styles, added to styles.xml when missing: "footnote reference" (a raised
+     * number) and "footnote text" (10 pt, single spaced). Returns whether styles.xml changed.
+     */
+    private fun footnoteStyles(styles: Document): Boolean {
+        var changed = false
+        val root = styles.documentElement
+        if (styleIdByName(styles, "character", "footnote reference") == null) {
+            root.appendChild(styles.importNode(DocxReader.parse("""<w:style xmlns:w="$W" w:type="character" w:styleId="FootnoteReference"><w:name w:val="footnote reference"/><w:uiPriority w:val="99"/><w:semiHidden/><w:unhideWhenUsed/><w:rPr><w:vertAlign w:val="superscript"/></w:rPr></w:style>""".toByteArray()).documentElement, true))
+            changed = true
+        }
+        if (styleIdByName(styles, "paragraph", "footnote text") == null) {
+            val base = elementChildren(root).firstOrNull { it.localName == "style" && it.getAttributeNS(W, "type") == "paragraph" && it.getAttributeNS(W, "default").let { d -> d == "1" || d == "true" } }
+                ?.getAttributeNS(W, "styleId")
+            val basedOn = base?.let { "<w:basedOn w:val=\"$it\"/>" } ?: ""
+            root.appendChild(styles.importNode(DocxReader.parse("""<w:style xmlns:w="$W" w:type="paragraph" w:styleId="FootnoteText"><w:name w:val="footnote text"/>$basedOn<w:uiPriority w:val="99"/><w:unhideWhenUsed/><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/><w:ind w:firstLine="0"/></w:pPr><w:rPr><w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr></w:style>""".toByteArray()).documentElement, true))
+            changed = true
+        }
+        for (s in elementChildren(root).filter { it.localName == "style" }) s.removeAttributeNS("http://www.w3.org/2000/xmlns/", "w")
+        return changed
+    }
+
+    /** Runs for a footnote's text: italics and bold as given; "\n" becomes a space (one paragraph). */
+    private fun noteRuns(doc: Document, pieces: List<DocxReader.NotePiece>): List<Element> = pieces.filter { it.text.isNotEmpty() }.map { piece ->
+        doc.createElementNS(W, "w:r").also { r ->
+            if (piece.italic || piece.bold) {
+                val rPr = doc.createElementNS(W, "w:rPr")
+                if (piece.bold) rPr.appendChild(doc.createElementNS(W, "w:b"))
+                if (piece.italic) rPr.appendChild(doc.createElementNS(W, "w:i"))
+                r.appendChild(rPr)
+            }
+            val t = doc.createElementNS(W, "w:t")
+            t.setAttributeNS(XMLConstants.XML_NS_URI, "xml:space", "preserve")
+            t.textContent = piece.text.replace('\n', ' ')
+            r.appendChild(t)
+        }
+    }
+
+    /** The number run, as Word writes it: the footnote reference style, else raised text. */
+    private fun numberRun(doc: Document, styleId: String?, mark: String, id: Int?): Element {
+        val r = doc.createElementNS(W, "w:r")
+        val rPr = doc.createElementNS(W, "w:rPr")
+        if (styleId != null) {
+            rPr.appendChild(doc.createElementNS(W, "w:rStyle").also { it.setAttributeNS(W, "w:val", styleId) })
+        } else {
+            rPr.appendChild(doc.createElementNS(W, "w:vertAlign").also { it.setAttributeNS(W, "w:val", "superscript") })
+        }
+        r.appendChild(rPr)
+        r.appendChild(doc.createElementNS(W, "w:$mark").also { e -> id?.let { e.setAttributeNS(W, "w:id", it.toString()) } })
+        return r
+    }
+
+    /** Footnote [Op.FootnoteAdd.id]: its number at the given place, its text in the footnotes part. */
+    private fun addFootnote(document: Document, p: Element, pkg: Pkg, styles: Document?, op: Op.FootnoteAdd, notes: MutableList<String>) {
+        val path = checkNotNull(footnotesPath(pkg, create = true))
+        val part = checkNotNull(pkg.part(path)) { "unreadable $path" }
+        val all = elementChildren(part.documentElement).filter { it.localName == "footnote" }
+        check(all.none { it.getAttributeNS(W, "id") == op.id.toString() }) { "footnote ${op.id} exists already" }
+        val refStyle = styles?.let { styleIdByName(it, "character", "footnote reference") }
+        placeAt(p, op.at, numberRun(document, refStyle, "footnoteReference", op.id), before = true)
+        val note = part.createElementNS(W, "w:footnote")
+        note.setAttributeNS(W, "w:id", op.id.toString())
+        part.documentElement.appendChild(note)
+        fillFootnote(part, note, styles, op.pieces)
+        pkg.touch(path)
+        notes.add("footnote ${op.id} at p${op.para}:${op.at}")
+    }
+
+    /** [note]'s content becomes one paragraph: its number, a space, then [pieces]. */
+    private fun fillFootnote(part: Document, note: Element, styles: Document?, pieces: List<DocxReader.NotePiece>) {
+        val first = elementChildren(note).firstOrNull { it.localName == "p" }
+        val keptPPr = first?.let { child(it, "pPr") }?.cloneNode(true) as Element?
+        while (note.firstChild != null) note.removeChild(note.firstChild)
+        val p = part.createElementNS(W, "w:p")
+        val pPr = keptPPr?.let { part.importNode(it, true) as Element } ?: part.createElementNS(W, "w:pPr").also { pp ->
+            styles?.let { styleIdByName(it, "paragraph", "footnote text") }?.let { id ->
+                pp.appendChild(part.createElementNS(W, "w:pStyle").also { it.setAttributeNS(W, "w:val", id) })
+            }
+        }
+        if (pPr.hasChildNodes()) p.appendChild(pPr)
+        p.appendChild(numberRun(part, styles?.let { styleIdByName(it, "character", "footnote reference") }, "footnoteRef", null))
+        p.appendChild(noteRuns(part, listOf(DocxReader.NotePiece(" "))).single())
+        for (r in noteRuns(part, pieces)) p.appendChild(r)
+        note.appendChild(p)
+    }
+
+    private fun setFootnote(document: Document, pkg: Pkg, styles: Document?, id: Int, pieces: List<DocxReader.NotePiece>, notes: MutableList<String>) {
+        val path = checkNotNull(footnotesPath(pkg, create = false)) { "no footnotes in this document" }
+        val part = checkNotNull(pkg.part(path))
+        val note = elementChildren(part.documentElement).firstOrNull { it.localName == "footnote" && it.getAttributeNS(W, "id") == id.toString() }
+            ?: error("no footnote $id")
+        fillFootnote(part, note, styles, pieces)
+        pkg.touch(path)
+        notes.add("footnote $id text")
+    }
+
+    private fun deleteFootnote(document: Document, pkg: Pkg, op: Op.FootnoteDelete, notes: MutableList<String>) {
+        val refs = document.getElementsByTagNameNS(W, "footnoteReference")
+        val mine = (0 until refs.length).map { refs.item(it) as Element }.filter { it.getAttributeNS(W, "id") == op.id.toString() }
+        check(mine.isNotEmpty()) { "no footnote ${op.id} in the text" }
+        for (ref in mine) {
+            val run = ref.parentNode as Element
+            run.removeChild(ref)
+            if (elementChildren(run).all { it.localName == "rPr" }) run.parentNode.removeChild(run)
+        }
+        footnotesPath(pkg, create = false)?.let { path ->
+            val part = checkNotNull(pkg.part(path))
+            elementChildren(part.documentElement).filter { it.localName == "footnote" && it.getAttributeNS(W, "id") == op.id.toString() }
+                .forEach { part.documentElement.removeChild(it) }
+            pkg.touch(path)
+        }
+        notes.add("footnote ${op.id} deleted")
     }
 
     /** Picture formats a document may carry, by file extension: the content type Word expects. */

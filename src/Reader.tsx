@@ -20,6 +20,7 @@ import {PageCounter} from './PageCounter';
 import {pageInfo, pageMarks} from './domain/pageInfo';
 import {targetLabel, wordCounts} from './domain/wordcount';
 import {figureOps, pictureEmu} from './domain/figures';
+import {editPieces, noteText} from './domain/footnotes';
 import {TouchLayer} from './services/touch';
 import {
   applyOps,
@@ -27,6 +28,9 @@ import {
   deletionRange,
   expectedTexts,
   commentsAfter,
+  footnotesAfter,
+  nextFootnoteId,
+  numberNotes,
   findMatches,
   formatOps,
   fromShown,
@@ -131,7 +135,7 @@ type Typing = {mode: 'insert'; at: Pos} | {mode: 'replace'; range: Range};
 type HfLine = {text: string; align: 'left' | 'center' | 'right'; page: boolean};
 
 type Menu =
-  | 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count' | 'page' | 'preset' | 'header' | 'link' | 'thread' | 'comment' | 'note' | 'hl' | 'find' | 'cite' | 'quotes' | 'spell' | 'goto' | 'picture'
+  | 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count' | 'page' | 'preset' | 'header' | 'link' | 'thread' | 'comment' | 'note' | 'hl' | 'find' | 'cite' | 'quotes' | 'spell' | 'goto' | 'picture' | 'footnote'
   | 'recent' | 'versions' | 'recover';
 
 /** Drop-down menu width; menus are kept inside the screen. */
@@ -164,6 +168,8 @@ export function Reader(): React.JSX.Element {
   /** Pages view: only the pages with comments, handwritten notes or tracked changes. */
   const [notesOnly, setNotesOnly] = useState(false);
   const [goToText, setGoToText] = useState('');
+  /** The footnote panel: an existing footnote (its id) or a new one at `at`, and the text being edited. */
+  const [fnEdit, setFnEdit] = useState<{id: string | null; at: Pos | null; text: string; note: string}>({id: null, at: null, text: '', note: ''});
   /** Insert picture…: the file chosen, its pixels, and the figure label/title to add. */
   const [pic, setPic] = useState<{para: number; path?: string; w?: number; h?: number; label: boolean; title: string; note: string}>({
     para: -1,
@@ -419,7 +425,8 @@ export function Reader(): React.JSX.Element {
     return ops;
   }, [typing, input, script]);
   // List numbers are recounted after every edit, as Word does.
-  const blocks = useMemo(() => recount(applyOps(committed, pending), doc?.lists ?? {}), [committed, pending, doc]);
+  // List numbers are recounted and footnotes numbered after every edit, as Word does.
+  const blocks = useMemo(() => numberNotes(recount(applyOps(committed, pending), doc?.lists ?? {})), [committed, pending, doc]);
   /** Where the caret is drawn: after the typed text while typing. */
   const caretAt: Pos | null = typing
     ? {para: typedRange(typing).para, offset: typedRange(typing).start + clean(input).length}
@@ -1169,6 +1176,99 @@ export function Reader(): React.JSX.Element {
 
   const atStart = anchor.block === 0 && anchor.offset === 0;
 
+  // ---------------------------------------------------------------- footnotes
+
+  const footnotes = useMemo(() => footnotesAfter(doc?.footnotes, applied), [doc, applied]);
+
+  /** The footnote whose number is character `char` of paragraph `para`, or null. */
+  const noteAt = (para: number, char: number): string | null => {
+    const p = paragraph(para);
+    let off = 0;
+    for (const r of p?.runs ?? []) {
+      if (char >= off && char < off + r.t.length) {
+        return r.obj === 'note' && r.fn && !r.fn.startsWith('e') ? r.fn : null;
+      }
+      off += r.t.length;
+    }
+    return null;
+  };
+
+  /** The number a footnote shows, from the page ("3"). */
+  const noteNumber = (id: string): string => {
+    for (const b of blocks) {
+      if (b.type === 'p') {
+        const r = b.runs.find(x => x.obj === 'note' && x.fn === id);
+        if (r?.nn) {
+          return r.nn;
+        }
+      }
+    }
+    return '';
+  };
+
+  const openFootnote = (id: string) => {
+    flushTyping();
+    const f = footnotes.find(x => x.id === id);
+    setFnEdit({id, at: null, text: f ? noteText(f.pieces) : '', note: f ? '' : 'This footnote has no text in the file.'});
+    setMenuX(Math.max(0, pageW - MENU_W));
+    setMenu('footnote');
+  };
+
+  /** Edit ▸ Footnote…: a new footnote at the caret (or after the selection). */
+  const startFootnote = () => {
+    const at = !typing && selection ? (comparePos(selection.from, selection.to) <= 0 ? selection.to : selection.from) : caretAt;
+    flushTyping();
+    if (!at) {
+      setStatus('Tap where the footnote number goes (usually after the punctuation).');
+      return;
+    }
+    const p = paragraph(at.para);
+    const problem = p ? textEditProblem(p, at.offset, at.offset) : 'Paragraph not found.';
+    if (problem) {
+      setStatus(problem);
+      return;
+    }
+    setFnEdit({id: null, at, text: '', note: ''});
+    setMenu('footnote');
+  };
+
+  const saveFootnote = () => {
+    const text = fnEdit.text.trim();
+    if (!text) {
+      setFnEdit(f => ({...f, note: 'Type the footnote first.'}));
+      return;
+    }
+    if (fnEdit.id === null) {
+      const at = fnEdit.at;
+      if (!at) {
+        return;
+      }
+      const id = nextFootnoteId(footnotes, blocks);
+      setMenu(null);
+      commit([{op: 'footnote', para: at.para, at: at.offset, id, pieces: [{t: text}]}], 'footnote');
+      setCaret({para: at.para, offset: at.offset + 1});
+      setStatus('Footnote added. Tap its number to read or change it.');
+      return;
+    }
+    const f = footnotes.find(x => x.id === fnEdit.id);
+    setMenu(null);
+    if (f && noteText(f.pieces) === text) {
+      return;
+    }
+    commit([{op: 'footnoteSet', para: -1, id: Number(fnEdit.id), pieces: editPieces(f?.pieces ?? [], text)}], 'footnote text');
+    setStatus('Footnote changed.');
+  };
+
+  const deleteFootnote = () => {
+    if (fnEdit.id === null) {
+      setMenu(null);
+      return;
+    }
+    setMenu(null);
+    commit([{op: 'footnoteDelete', para: -1, id: Number(fnEdit.id)}], 'delete footnote');
+    setStatus('Footnote deleted; the ones after it are renumbered. Undo puts it back.');
+  };
+
   // ---------------------------------------------------------------- pictures and figures
 
   /** Insert picture…: after the paragraph with the caret (or the end of the selection). */
@@ -1401,6 +1501,12 @@ export function Reader(): React.JSX.Element {
       flushTyping();
       keys.current?.focus();
       setScript(null);
+      // A tap on a footnote's number opens the footnote.
+      const tapped = tap && !doubleTap ? noteAt(ha.para, ha.char) : null;
+      if (tapped) {
+        openFootnote(tapped);
+        return;
+      }
       if (tap && !doubleTap) {
         // One tap: a caret in the gap nearest the pen. The next key types there.
         setSelection(null);
@@ -4441,6 +4547,7 @@ export function Reader(): React.JSX.Element {
             {item('Comment…', startComment)}
             {inkOk ? item('Handwritten note…', startNote) : null}
             {item('Insert picture…', startPicture)}
+            {item('Footnote…', startFootnote)}
             {hasChanges ? item('Accept all changes', () => {
               setMenu(null);
               review(-1, '*', true);
@@ -4474,6 +4581,40 @@ export function Reader(): React.JSX.Element {
               {'The color shows in Word; on the Supernote highlights are gray.'}
             </Text>
           </>
+        );
+      }
+      case 'footnote': {
+        const f = fnEdit.id !== null ? footnotes.find(x => x.id === fnEdit.id) : undefined;
+        const italic = !!f?.pieces.some(x => x.i);
+        return (
+          <View style={styles.nameForm}>
+            <Text allowFontScaling={false} style={styles.menuText}>
+              {fnEdit.id === null ? 'New footnote' : `Footnote ${noteNumber(fnEdit.id)}`}
+            </Text>
+            <TextInput
+              style={[styles.nameInput, styles.noteInput]}
+              value={fnEdit.text}
+              onChangeText={text => setFnEdit(x => ({...x, text}))}
+              multiline
+              autoFocus={fnEdit.id === null}
+              allowFontScaling={false}
+            />
+            {fnEdit.note ? (
+              <Text allowFontScaling={false} style={styles.presetSummary}>
+                {fnEdit.note}
+              </Text>
+            ) : null}
+            {italic ? (
+              <Text allowFontScaling={false} style={styles.presetSummary}>
+                {'Italics (like a book title) stay where you don’t retype the words.'}
+              </Text>
+            ) : null}
+            <View style={styles.row}>
+              {panelButton(fnEdit.id === null ? 'Add' : 'Save', saveFootnote)}
+              {fnEdit.id !== null ? panelButton('Delete footnote', deleteFootnote) : null}
+              {button('Close', () => setMenu(null))}
+            </View>
+          </View>
         );
       }
       case 'picture': {
@@ -5026,6 +5167,7 @@ const styles = StyleSheet.create({
   hiddenInput: {position: 'absolute', left: 0, top: 0, width: 1, height: 1, opacity: 0},
   caretRow: {flex: 1, flexDirection: 'row', alignItems: 'center'},
   nameLabel: {color: '#000', fontSize: 16, marginRight: 8},
+  noteInput: {height: 140, textAlignVertical: 'top', paddingVertical: 8},
   nameInput: {flex: 1, height: 44, borderWidth: 1, borderColor: '#000', paddingHorizontal: 10, fontSize: 18, color: '#000'},
   panelHead: {flexDirection: 'row', alignItems: 'center', paddingVertical: 8, borderBottomWidth: 1, borderColor: '#000'},
   panelTitle: {flex: 1, color: '#000', fontSize: 18, fontWeight: '700'},

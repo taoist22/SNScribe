@@ -34,6 +34,10 @@ export type Run = {
   rv?: string;
   /** A Word page break: its "\n" ends the page (the next line starts a new one). */
   pg?: boolean;
+  /** For obj 'note': the footnote's id ("e" + id: an endnote). */
+  fn?: string;
+  /** For a footnote's number: what it shows ("3"), counted in reading order (numberNotes). */
+  nn?: string;
   /** For obj 'image': the picture file to draw (absent: a format the screen can't draw) and its size in EMU. */
   src?: string;
   cx?: number;
@@ -68,6 +72,10 @@ export type Comment = {
   done?: boolean;
   pictures?: number;
 };
+
+/** A piece of a footnote's text. */
+export type NotePiece = {t: string; i?: boolean; b?: boolean};
+export type Footnote = {id: string; pieces: NotePiece[]};
 
 export type ParagraphBlock = {
   type: 'p';
@@ -151,6 +159,8 @@ export type DocxDocument = {
   /** Tracked formatting and paragraph changes DOCX can't review; they stay as they are. */
   otherRevisions?: number;
   comments?: Comment[];
+  /** Footnotes: id and text (italics/bold kept), in the footnotes part's order. */
+  footnotes?: Footnote[];
   /** How each offered style looks in this document (DocxReader.StyleLook), by kind. */
   looks?: Record<string, StyleLook>;
   /** Handwritten margin notes' pictures, extracted for the screen: note id → file. */

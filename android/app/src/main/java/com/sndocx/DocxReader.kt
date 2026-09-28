@@ -145,6 +145,40 @@ object DocxReader {
     fun hasOtherContent(part: Document): Boolean = part.documentElement?.let(::hasOther) ?: false
 
     const val REL_COMMENTS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments"
+    const val REL_FOOTNOTES = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes"
+
+    /** A piece of a footnote's text, with its own italics and bold (a Chicago note's book title). */
+    data class NotePiece(val text: String, val italic: Boolean = false, val bold: Boolean = false)
+
+    /** A footnote: its w:id and its text (paragraphs joined by "\n"), without the number. */
+    data class Footnote(val id: String, val pieces: List<NotePiece>) {
+        val text: String get() = pieces.joinToString("") { it.text }
+    }
+
+    /** The footnotes in a footnotes part, in order, leaving out Word's separators. */
+    fun footnotes(part: Document): List<Footnote> =
+        elementChildren(part.documentElement).filter { it.localName == "footnote" && it.namespaceURI == W && it.getAttributeNS(W, "type").let { t -> t.isEmpty() || t == "normal" } }.map { f ->
+            val pieces = ArrayList<NotePiece>()
+            for ((pi, p) in elementChildren(f).filter { it.localName == "p" }.withIndex()) {
+                if (pi > 0) pieces.add(NotePiece("\n"))
+                for (seg in segments(p)) {
+                    if (!seg.isRun || elementChildren(seg.el).any { it.localName == "footnoteRef" }) continue
+                    val text = runText(seg.el).replace(OBJECT.toString(), "")
+                    if (text.isEmpty()) continue
+                    val rPr = child(seg.el, "rPr")
+                    val piece = NotePiece(text, isOn(rPr?.let { child(it, "i") }), isOn(rPr?.let { child(it, "b") }))
+                    val last = pieces.lastOrNull()
+                    if (last != null && last.italic == piece.italic && last.bold == piece.bold && last.text != "\n") {
+                        pieces[pieces.size - 1] = last.copy(text = last.text + piece.text)
+                    } else {
+                        pieces.add(piece)
+                    }
+                }
+            }
+            // Word puts a space between the number and the text: not part of the text.
+            if (pieces.isNotEmpty()) pieces[0] = pieces[0].copy(text = pieces[0].text.trimStart())
+            Footnote(f.getAttributeNS(W, "id"), pieces.filter { it.text.isNotEmpty() })
+        }
     const val REL_COMMENTS_EXTENDED = "http://schemas.microsoft.com/office/2011/relationships/commentsExtended"
     const val W14 = "http://schemas.microsoft.com/office/word/2010/wordml"
     const val W15 = "http://schemas.microsoft.com/office/word/2012/wordml"
@@ -346,6 +380,8 @@ object DocxReader {
         val imageRel: String? = null,
         val cx: Long = 0,
         val cy: Long = 0,
+        /** For obj "note": the footnote's w:id ("e" + id for an endnote). */
+        val noteId: String? = null,
         /**
          * What the run sets itself (w:rPr and its character style), without what its
          * paragraph style gives it — the screen shows the style's part from the paragraph, so
@@ -467,6 +503,7 @@ object DocxReader {
         /** Style kind ("heading1", …, "normal") → how it looks here. */
         val looks: Map<String, StyleLook> = emptyMap(),
         val comments: List<Comment> = emptyList(),
+        val footnotes: List<Footnote> = emptyList(),
     )
 
     /**
@@ -510,7 +547,8 @@ object DocxReader {
             val comments = relTarget(rels, REL_COMMENTS)?.let { part(it) }?.let { c ->
                 comments(c, relTarget(rels, REL_COMMENTS_EXTENDED)?.let { part(it) })
             }.orEmpty()
-            return result.copy(header = hf("headerReference"), footer = hf("footerReference"), comments = comments)
+            val footnotes = relTarget(rels, REL_FOOTNOTES)?.let { part(it) }?.let { footnotes(it) }.orEmpty()
+            return result.copy(header = hf("headerReference"), footer = hf("footerReference"), comments = comments, footnotes = footnotes)
         }
     }
 
@@ -761,7 +799,7 @@ object DocxReader {
             val own = styles.character(charStyle).merge(Fmt.of(rPr))
             val fmt = base.merge(own)
             val isLink = link || charStyle.equals("Hyperlink", ignoreCase = true)
-            fun add(text: String, obj: String? = null, ink: String? = null, pageBreak: Boolean = false, picture: Element? = null) {
+            fun add(text: String, obj: String? = null, ink: String? = null, pageBreak: Boolean = false, picture: Element? = null, noteId: String? = null) {
                 if (text.isEmpty()) return
                 out.add(
                     Run(
@@ -789,6 +827,7 @@ object DocxReader {
                         imageRel = picture?.let { d -> (d.getElementsByTagNameNS(A, "blip").item(0) as? Element)?.getAttributeNS(R_NS, "embed")?.takeIf { it.isNotEmpty() } },
                         cx = picture?.let { d -> (d.getElementsByTagNameNS(WP, "extent").item(0) as? Element)?.getAttribute("cx")?.toLongOrNull() } ?: 0,
                         cy = picture?.let { d -> (d.getElementsByTagNameNS(WP, "extent").item(0) as? Element)?.getAttribute("cy")?.toLongOrNull() } ?: 0,
+                        noteId = noteId,
                         ownBold = own.bold,
                         ownItalic = own.italic,
                         ownFont = theme.resolve(own.font),
@@ -818,7 +857,12 @@ object DocxReader {
                         c.localName == "footnoteReference" || c.localName == "endnoteReference" -> "note"
                         else -> "object"
                     }
-                    add(t, kind, ink, picture = if (kind == "image" && c.localName == "drawing") c else null)
+                    val noteId = when (c.localName) {
+                        "footnoteReference" -> c.getAttributeNS(W, "id")
+                        "endnoteReference" -> "e" + c.getAttributeNS(W, "id")
+                        else -> null
+                    }
+                    add(t, kind, ink, picture = if (kind == "image" && c.localName == "drawing") c else null, noteId = noteId)
                 } else {
                     text.append(t)
                 }

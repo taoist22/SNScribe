@@ -6,7 +6,7 @@
 // Offsets are into a paragraph's text (runs' `t` joined; objects are one U+FFFC), the
 // same text the native reader and writer use.
 
-import {OBJECT, paragraphText, type Block, type Comment, type Mark, type PageSetup, type ParagraphBlock, type Revision, type Run, type StyleLook} from '../model/docx';
+import {OBJECT, paragraphText, type Block, type Comment, type Footnote, type Mark, type NotePiece, type PageSetup, type ParagraphBlock, type Revision, type Run, type StyleLook} from '../model/docx';
 
 export type FormatProp = 'b' | 'i' | 'u' | 'h' | 's' | 'sup' | 'sub';
 export type StyleKind = 'heading1' | 'heading2' | 'heading3' | 'title' | 'quote' | 'normal';
@@ -92,6 +92,12 @@ export type Op =
    * picture `png` (width×height px). Its anchor is one object character in the text.
    */
   | {op: 'ink'; para: number; at: number; id: string; png: string; width: number; height: number}
+  /** Footnote `id` with the text `pieces`, its number at `at` (DocxEditor.addFootnote). */
+  | {op: 'footnote'; para: number; at: number; id: number; pieces: NotePiece[]}
+  /** Footnote `id`'s text becomes `pieces`. */
+  | {op: 'footnoteSet'; para: -1; id: number; pieces: NotePiece[]}
+  /** Removes footnote `id` and its number. */
+  | {op: 'footnoteDelete'; para: -1; id: number}
   /** A picture from the file `path`, cx × cy EMU, in the text at `at` (DocxEditor.addImage). */
   | {op: 'image'; para: number; at: number; path: string; cx: number; cy: number; alt?: string}
   /** Remove handwritten note `id` from the document (its anchor and picture). */
@@ -440,7 +446,35 @@ export function applyOps(blocks: Block[], ops: Op[]): Block[] {
       }
       continue;
     }
-    if (op.op === 'headerFooter' || op.op === 'page') {
+    if (op.op === 'headerFooter' || op.op === 'page' || op.op === 'footnoteSet') {
+      continue;
+    }
+    if (op.op === 'footnoteDelete') {
+      const id = String(op.id);
+      for (let j = 0; j < out.length; j++) {
+        const b = out[j];
+        if (b.type !== 'p' || !b.runs.some(r => r.fn === id)) {
+          continue;
+        }
+        let p = b;
+        for (;;) {
+          let offset = 0;
+          let at = -1;
+          for (const r of p.runs) {
+            if (at < 0 && r.obj === 'note' && r.fn === id) {
+              at = offset;
+            }
+            offset += r.t.length;
+          }
+          if (at < 0) {
+            break;
+          }
+          const runs = [...p.runs];
+          runs.splice(p.runs.findIndex(r => r.obj === 'note' && r.fn === id), 1);
+          p = withMarks(withRevs({...p, runs}, shiftDeletions(p.revs, at, at + 1, 0)), shiftMarks(p.marks, at, at + 1, 0));
+        }
+        out[j] = p;
+      }
       continue;
     }
     if (op.op === 'styleDefs') {
@@ -535,8 +569,9 @@ export function applyOps(blocks: Block[], ops: Op[]): Block[] {
       case 'link':
         out[i] = {...p, runs: setLink(p.runs, op.start, op.end, true)};
         break;
+      case 'footnote':
       case 'image': {
-        const pic: Run = {t: OBJECT, obj: 'image', src: op.path, cx: op.cx, cy: op.cy};
+        const pic: Run = op.op === 'image' ? {t: OBJECT, obj: 'image', src: op.path, cx: op.cx, cy: op.cy} : {t: OBJECT, obj: 'note', sup: true, fn: String(op.id)};
         let offset = 0;
         const runs: Run[] = [];
         let placed = false;
@@ -691,6 +726,67 @@ export function threadIds(comments: Comment[], id: string): number[] {
     out.push(...comments.filter(c => c.parent === out[i]).map(c => c.id));
   }
   return out.map(Number);
+}
+
+/** The footnotes after `ops`: added, retyped and removed ones. */
+export function footnotesAfter(notes: Footnote[] | undefined, ops: Op[]): Footnote[] {
+  let out = notes ?? [];
+  for (const op of ops) {
+    if (op.op === 'footnote') {
+      out = [...out, {id: String(op.id), pieces: op.pieces}];
+    } else if (op.op === 'footnoteSet') {
+      out = out.map(f => (f.id === String(op.id) ? {...f, pieces: op.pieces} : f));
+    } else if (op.op === 'footnoteDelete') {
+      out = out.filter(f => f.id !== String(op.id));
+    }
+  }
+  return out;
+}
+
+/** An unused footnote id (Word's are small numbers; 0 and -1 are its separators). */
+export function nextFootnoteId(notes: Footnote[], blocks: Block[]): number {
+  let max = 0;
+  for (const f of notes) {
+    max = Math.max(max, Number(f.id) || 0);
+  }
+  for (const b of blocks) {
+    if (b.type === 'p') {
+      for (const r of b.runs) {
+        if (r.fn && !r.fn.startsWith('e')) {
+          max = Math.max(max, Number(r.fn) || 0);
+        }
+      }
+    }
+  }
+  return max + 1;
+}
+
+/**
+ * Footnote numbers as Word shows them: 1, 2, 3 … in reading order (endnotes i, ii … are
+ * left as they are). A paragraph is replaced only when one of its numbers changes.
+ */
+export function numberNotes(blocks: Block[]): Block[] {
+  let n = 0;
+  let e = 0;
+  const roman = ['i', 'ii', 'iii', 'iv', 'v', 'vi', 'vii', 'viii', 'ix', 'x'];
+  return blocks.map(b => {
+    if (b.type !== 'p' || !b.runs.some(r => r.obj === 'note')) {
+      return b;
+    }
+    let changed = false;
+    const runs = b.runs.map(r => {
+      if (r.obj !== 'note') {
+        return r;
+      }
+      const label = r.fn?.startsWith('e') ? roman[e++] ?? String(e) : String(++n);
+      if (r.nn === label) {
+        return r;
+      }
+      changed = true;
+      return {...r, nn: label};
+    });
+    return changed ? {...b, runs} : b;
+  });
 }
 
 /** The paragraph with `revs`, keeping only insertions that still have text and dropping an empty list. */

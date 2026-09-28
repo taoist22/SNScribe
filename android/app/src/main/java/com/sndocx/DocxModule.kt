@@ -33,7 +33,7 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
 
     companion object {
         /** Bumped with each native change; first log line, to spot stale installs. */
-        const val NATIVE_BUILD = 16
+        const val NATIVE_BUILD = 17
         private val EXPORT_DIR = File("/storage/emulated/0/EXPORT")
         private const val LOG_MAX_BYTES = 2L * 1024 * 1024
         private const val LOG_LINE_MAX = 4000
@@ -151,6 +151,12 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
                             if (c.pictures > 0) putInt("pictures", c.pictures)
                         })
                     })
+                    putArray("footnotes", Arguments.createArray().apply {
+                        for (f in result.footnotes) pushMap(Arguments.createMap().apply {
+                            putString("id", f.id)
+                            putArray("pieces", notePieces(f.pieces))
+                        })
+                    })
                     result.page?.let { pg ->
                         putMap("page", Arguments.createMap().apply {
                             putInt("width", pg.width); putInt("height", pg.height)
@@ -223,6 +229,11 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
         }
     }
 
+    /** A footnote's text from JS: [{t, i?, b?}]. */
+    private fun pieces(a: ReadableArray?): List<DocxReader.NotePiece> = (0 until (a?.size() ?: 0)).mapNotNull { a!!.getMap(it) }.map {
+        DocxReader.NotePiece(it.getString("t") ?: "", it.hasKey("i") && it.getBoolean("i"), it.hasKey("b") && it.getBoolean("b"))
+    }
+
     private fun parseOps(ops: ReadableArray): List<DocxEditor.Op> = (0 until ops.size()).mapNotNull { i -> ops.getMap(i) }.map { m ->
         when (m.getString("op")) {
             "format" -> DocxEditor.Op.Format(
@@ -292,6 +303,9 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
             parent = if (m.hasKey("parent") && !m.isNull("parent")) m.getInt("parent") else null,
         )
         "uncomment" -> DocxEditor.Op.CommentDelete(m.getArray("ids")?.let { a -> (0 until a.size()).map { a.getInt(it) } }.orEmpty())
+        "footnote" -> DocxEditor.Op.FootnoteAdd(m.getInt("para"), m.getInt("at"), m.getInt("id"), pieces(m.getArray("pieces")))
+        "footnoteSet" -> DocxEditor.Op.FootnoteSet(m.getInt("id"), pieces(m.getArray("pieces")))
+        "footnoteDelete" -> DocxEditor.Op.FootnoteDelete(m.getInt("id"))
         "image" -> DocxEditor.Op.ImageAdd(m.getInt("para"), m.getInt("at"), m.getString("path") ?: "", m.getDouble("cx").toLong(), m.getDouble("cy").toLong(), if (m.hasKey("alt")) m.getString("alt") ?: "" else "")
         "ink" -> DocxEditor.Op.InkAdd(m.getInt("para"), m.getInt("at"), m.getString("id") ?: "", m.getString("png") ?: "", m.getInt("width"), m.getInt("height"))
         "inkDelete" -> DocxEditor.Op.InkDelete(m.getInt("para"), m.getString("id") ?: "")
@@ -722,6 +736,14 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
         putInt("contentControls", r.contentControls)
     }
 
+    private fun notePieces(pieces: List<DocxReader.NotePiece>) = Arguments.createArray().apply {
+        for (p in pieces) pushMap(Arguments.createMap().apply {
+            putString("t", p.text)
+            if (p.italic) putBoolean("i", true)
+            if (p.bold) putBoolean("b", true)
+        })
+    }
+
     /** Relationship id → extracted file, for the open document's pictures. */
     @Volatile
     private var pictures: Map<String, String> = emptyMap()
@@ -748,6 +770,7 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
             r.ink?.let { putString("ink", it) }
             if (r.pageBreak) putBoolean("pg", true)
             r.imageRel?.let { pictures[it] }?.let { putString("src", it) }
+            r.noteId?.let { putString("fn", it) }
             if (r.cx > 0 && r.cy > 0) {
                 putDouble("cx", r.cx.toDouble())
                 putDouble("cy", r.cy.toDouble())

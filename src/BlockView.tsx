@@ -199,7 +199,14 @@ function ParagraphView({p, selection, spell, onFrame, onLines, textRef, onTextFr
       }>
       {leadChars(p) ? <View key="first-line" style={{width: dpForTwips(p.first!, scale), height: 1}} /> : null}
       {withCaret(pieces(p, selection ?? null, spell), p.caret).map((r, i) =>
-        r.obj === 'image' && r.src ? (
+        r.obj === 'note' && r.nn ? (
+          // The footnote's number, raised: one character in the TextView, like the mark it replaces.
+          <View key={i} style={[styles.noteBox, {height: Math.round(runSize(r) * 0.95)}, r.sel ? styles.noteSelected : null]}>
+            <Text allowFontScaling={false} style={[styles.noteNumber, {fontSize: Math.round(runSize(r) * 0.62), lineHeight: Math.round(runSize(r) * 0.7)}, r.sel ? styles.noteNumberSelected : null]}>
+              {r.nn}
+            </Text>
+          </View>
+        ) : r.obj === 'image' && r.src ? (
           // One character in the TextView, like the placeholder it replaces: offsets stay the same.
           <Image key={i} source={{uri: `file://${r.src}`}} style={[pictureSize(r, scale, maxPicture), r.sel ? styles.pictureSelected : null]} resizeMode="contain" />
         ) : r.caret ? (
@@ -326,6 +333,10 @@ const styles = StyleSheet.create({
   selected: {backgroundColor: '#000', color: '#fff'},
   caret: {color: '#000', fontWeight: '400', fontStyle: 'normal'},
   pictureSelected: {opacity: 0.4},
+  noteBox: {justifyContent: 'flex-start', paddingHorizontal: 1},
+  noteSelected: {backgroundColor: '#000'},
+  noteNumber: {color: '#000', fontWeight: '700'},
+  noteNumberSelected: {color: '#fff'},
   inserted: {color: '#333'},
   misspelled: {backgroundColor: '#e6e6e6'},
   deleted: {color: '#777'},
