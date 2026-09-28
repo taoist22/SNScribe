@@ -146,3 +146,20 @@ export function pageIndexOf(pages: PageStart[], at: Anchor): number {
   }
   return found;
 }
+
+/**
+ * The page (0-based) a character is on: `shownChar` counts what the paragraph's TextView
+ * holds (as PageStart.char does). -1 when the count has not reached it.
+ */
+export function pageOfChar(pages: PageStart[], block: number, shownChar: number, done: boolean): number {
+  let found = -1;
+  for (let i = 0; i < pages.length; i++) {
+    const a = pages[i].anchor;
+    if (a.block < block || (a.block === block && (a.offset === 0 || pages[i].char <= shownChar))) {
+      found = i;
+    } else {
+      break;
+    }
+  }
+  return !done && found === pages.length - 1 ? -1 : found;
+}

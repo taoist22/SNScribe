@@ -17,6 +17,8 @@ import {
 import {PluginManager, RattaFileSelector} from 'sn-plugin-lib';
 import {BlockView} from './BlockView';
 import {PageCounter} from './PageCounter';
+import {pageInfo, pageMarks} from './domain/pageInfo';
+import {TouchLayer} from './services/touch';
 import {
   applyOps,
   comparePos,
@@ -63,8 +65,8 @@ import {lookUpDoi} from './services/doi';
 import {QUOTES_KEY, SOURCES_KEY, fileName, isEpub, parseList, parseMap, quoteWithReference, type SavedQuote, type SourceRef} from './domain/quotes';
 import {detailsFromEpub, formatSource, type Details} from './domain/reference';
 import {misspelledRanges, normal, tokens} from './domain/spelling';
-import {anchorAfter, findBreak, pageIndexOf, windowEnd, type Anchor, type BlockBox, type Break, type LineBox, type PageStart} from './domain/paging';
-import {countWords, fontsUsed, outline, paragraphText, wordCount, type DocxDocument, type ParagraphBlock, type Run} from './model/docx';
+import {anchorAfter, findBreak, pageIndexOf, pageOfChar, windowEnd, type Anchor, type BlockBox, type Break, type LineBox, type PageStart} from './domain/paging';
+import {countWords, fontsUsed, outline, paragraphText, wordCount, type Block, type DocxDocument, type ParagraphBlock, type Run} from './model/docx';
 import {ensureFileReadPermission, ensureFileWritePermission, ensureInternetPermission} from './pluginPermissions';
 import {Docx, DocxKeys, DocxText, errorText, log, nativeBuild, type KeyPress} from './services/native';
 
@@ -80,9 +82,9 @@ import {Docx, DocxKeys, DocxText, errorText, log, nativeBuild, type KeyPress} fr
  * Editing: the pen selects words (the paragraph's own TextView reports the character under
  * the pen, via DocxText); a tap places a caret, a double tap selects a word. One invisible
  * text field keeps the keyboard (Bluetooth or on-screen, incl. handwriting) connected
- * from the first tap until Done, and the first key decides what it does: typing at the
- * caret, typing over or deleting the selection, Enter for a new paragraph. Typed text shows
- * in the page as it is typed — a pending edit on top of the committed ones — and becomes
+ * from the first tap until the keyboard is hidden (Edit ▸ Hide keyboard), and the first
+ * key decides what it does: typing at the caret, typing over or deleting the selection,
+ * Enter for a new paragraph. Typed text shows in the page as it is typed — a pending edit on top of the committed ones — and becomes
  * one undo step when typing ends. Buttons turn
  * the selection into edits (domain/edits), one undo step per button press. The page shows
  * the original with the first `cursor` steps applied — Undo/Redo move the cursor — and Save
@@ -115,6 +117,8 @@ const INK_COLORS: Array<[string, string]> = [
 const START: Anchor = {block: 0, offset: 0};
 /** Pen travel below this (dp) is a tap: it selects the word under the pen. */
 const TAP_SLOP = 12;
+/** A finger swipe this far (dp), mostly sideways, turns the page. */
+const SWIPE_MIN = 80;
 /** A second tap this soon, this close, selects the word under it. */
 const DOUBLE_TAP_MS = 500;
 
@@ -124,7 +128,7 @@ type Typing = {mode: 'insert'; at: Pos} | {mode: 'replace'; range: Range};
 type HfLine = {text: string; align: 'left' | 'center' | 'right'; page: boolean};
 
 type Menu =
-  | 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count' | 'page' | 'preset' | 'header' | 'link' | 'thread' | 'comment' | 'note' | 'hl' | 'find' | 'cite' | 'quotes' | 'spell'
+  | 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count' | 'page' | 'preset' | 'header' | 'link' | 'thread' | 'comment' | 'note' | 'hl' | 'find' | 'cite' | 'quotes' | 'spell' | 'goto'
   | 'recent' | 'versions' | 'recover';
 
 /** Drop-down menu width; menus are kept inside the screen. */
@@ -138,6 +142,15 @@ const SCALES = [0.8, 0.9, 1, 1.15, 1.3, 1.5, 1.75];
 /** One line of text: line breaks and other control characters become spaces. */
 const clean = (text: string) => text.replace(/[\r\n\u0000-\u0008\u000b-\u001f\ufffc]/g, ' ');
 
+/** The first block index where two versions of the text differ (edits replace only the blocks they change). */
+function firstDifference(a: Block[], b: Block[]): number {
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) {
+    i++;
+  }
+  return i;
+}
+
 const typedRange = (t: Typing): Range =>
   t.mode === 'insert' ? {para: t.at.para, start: t.at.offset, end: t.at.offset} : t.range;
 
@@ -145,6 +158,10 @@ export function Reader(): React.JSX.Element {
   const [doc, setDoc] = useState<DocxDocument | null>(null);
   const [anchor, setAnchor] = useState<Anchor>(START);
   const [history, setHistory] = useState<Anchor[]>([]);
+  /** Pages view: only the pages with comments, handwritten notes or tracked changes. */
+  const [notesOnly, setNotesOnly] = useState(false);
+  const [goToText, setGoToText] = useState('');
+  const [goToNote, setGoToNote] = useState('');
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
   const [contents, setContents] = useState(false);
@@ -189,6 +206,19 @@ export function Reader(): React.JSX.Element {
     message: string;
   }>({setup: false, userId: '', apiKey: '', query: '', results: null, chosen: null, narrative: false, page: '', busy: false, message: ''});
   useEffect(() => setZoteroLog(line => log(line)), []);
+
+  // What Android reports about keyboards, for the strip that sometimes covers the page's
+  // last lines after switching from the on-screen keyboard to the Bluetooth one (CT).
+  useEffect(() => {
+    const shown = Keyboard.addListener('keyboardDidShow', e =>
+      log(`keyboard shown: ${Math.round(e.endCoordinates.height)} dp high, top at ${Math.round(e.endCoordinates.screenY)}`),
+    );
+    const hidden = Keyboard.addListener('keyboardDidHide', () => log('keyboard hidden'));
+    return () => {
+      shown.remove();
+      hidden.remove();
+    };
+  }, []);
   /** Spelling: marks while typing (View), the language, the dictionary's answers so far, the user's words. */
   const SPELL_LANG = 'en_US';
   const [spellOn, setSpellOn] = useState(true);
@@ -239,7 +269,8 @@ export function Reader(): React.JSX.Element {
   const textScale = SCALES[scaleAt];
   const [pageW, setPageW] = useState(0);
   /** The whole document's page starts, counted in the background for one layout (mapKey). */
-  const [pageMap, setPageMap] = useState<{key: string; pages: PageStart[]; done: boolean} | null>(null);
+  /** The page map: counted for one layout (width, page height, text size, fonts) from one version of the text. */
+  const [pageMap, setPageMap] = useState<{key: string; layout: string; blocks: Block[]; pages: PageStart[]; done: boolean} | null>(null);
   const [showPages, setShowPages] = useState(false);
   /** The margin column (View ▾); it appears only when the document has changes or comments. */
   const [showMargin, setShowMargin] = useState(true);
@@ -335,7 +366,31 @@ export function Reader(): React.JSX.Element {
   }, []);
 
   const applied = useMemo(() => edits.steps.slice(0, edits.cursor).flat(), [edits]);
-  const committed = useMemo(() => (doc ? applyOps(doc.blocks, applied) : []), [doc, applied]);
+  // The text after each undo step, kept: a new step applies only its own edits (not every
+  // edit since opening), and undo/redo step back to a kept version. Versions share the
+  // paragraphs an edit did not touch, so keeping them costs little.
+  const undoTexts = useRef<{doc: DocxDocument | null; steps: Op[][]; blocks: Block[][]}>({doc: null, steps: [], blocks: []});
+  const committed = useMemo(() => {
+    if (!doc) {
+      return [];
+    }
+    const v = undoTexts.current;
+    if (v.doc !== doc) {
+      undoTexts.current = {doc, steps: [], blocks: [doc.blocks]};
+    }
+    const cur = undoTexts.current;
+    let same = 0;
+    while (same < cur.steps.length && same < edits.steps.length && cur.steps[same] === edits.steps[same]) {
+      same++;
+    }
+    cur.steps = cur.steps.slice(0, same);
+    cur.blocks = cur.blocks.slice(0, same + 1);
+    for (let j = same; j < edits.cursor; j++) {
+      cur.blocks.push(applyOps(cur.blocks[j], edits.steps[j]));
+      cur.steps.push(edits.steps[j]);
+    }
+    return cur.blocks[edits.cursor];
+  }, [doc, edits]);
   // What is being typed: shown in the page as it is typed, committed when typing ends.
   const pending: Op[] = useMemo(() => {
     const text = typing ? clean(input) : '';
@@ -361,13 +416,25 @@ export function Reader(): React.JSX.Element {
   // and every save is verified, so nothing is read-only. Kept as a switch for future cases.
   const readOnly = false;
 
-  const counts = useMemo(() => blocks.map(wordCount), [blocks]);
+  // From the committed text: typing never adds blocks, and the window must not change size
+  // (redrawing the whole page) as words are typed.
+  const counts = useMemo(() => committed.map(wordCount), [committed]);
   const end = useMemo(() => (doc ? windowEnd(counts, anchor.block) : 0), [doc, counts, anchor.block]);
-  const window = useMemo(() => blocks.slice(anchor.block, end), [blocks, anchor.block, end]);
+  // While typing, the caret is drawn in the text itself (BlockView), not placed afterwards.
+  const window = useMemo(() => {
+    const w = blocks.slice(anchor.block, end);
+    if (!typing || !caretAt) {
+      return w;
+    }
+    return w.map(b => (b.type === 'p' && b.index === caretAt.para ? {...b, caret: caretAt.offset} : b));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [blocks, anchor.block, end, typing, caretAt?.para, caretAt?.offset]);
 
-  // Measurements belong to one page (window + offset + page height + edits). A new page
-  // starts them afresh, and a break computed for another page is never used.
-  const pageKey = `${doc?.path}:${anchor.block}:${anchor.offset}:${end}:${pageH}:${edits.cursor}:${textScale}`;
+  // Measurements belong to one page (window + offset + page height + text size). A new
+  // page starts them afresh (the column remounts), and a break computed for another page
+  // is never used. Edits keep them: a paragraph an edit changes reports its new layout,
+  // and one it doesn't change keeps the layout it reported.
+  const pageKey = `${doc?.path}:${anchor.block}:${anchor.offset}:${end}:${pageH}:${textScale}`;
   const measuredFor = useRef('');
   const frames = useRef<Array<Frame | undefined>>([]);
   const lines = useRef<Array<LineBox[] | undefined>>([]);
@@ -404,26 +471,63 @@ export function Reader(): React.JSX.Element {
     const key = pageKey;
     settle.current = setTimeout(() => {
       if (pageH > 0 && measuredFor.current === key) {
-        setMeasured({key, brk: findBreak(boxesNow(), anchor.offset, pageH)});
+        const found = findBreak(boxesNow(), anchor.offset, pageH);
+        // Unchanged (most keystrokes): no new state, so no extra redraw.
+        setMeasured(m => (m && m.key === key && JSON.stringify(m.brk) === JSON.stringify(found) ? m : {key, brk: found}));
       }
     }, 60);
   };
 
-  const onFrame = (i: number) => (e: LayoutChangeEvent) => {
-    const {x, y, height} = e.nativeEvent.layout;
-    frames.current[i] = {x, top: y, height};
-    remeasure();
+  // Recomputed when the window changes (an edit): the break is found again from what is measured.
+  const remeasureNow = useRef(remeasure);
+  remeasureNow.current = remeasure;
+  useEffect(() => {
+    remeasureNow.current();
+  }, [window]);
+
+  // One callback per window slot, kept for the life of the page: paragraphs are drawn again
+  // only when they change (BlockView is memoised), so a callback must never go stale.
+  const slotCallbacks = useRef<{
+    key: string;
+    frame: Array<(e: LayoutChangeEvent) => void>;
+    lines: Array<(l: LineBox[]) => void>;
+    text: Array<(e: LayoutChangeEvent) => void>;
+    ref: Array<(t: Text | null) => void>;
+  }>({key: '', frame: [], lines: [], text: [], ref: []});
+  if (slotCallbacks.current.key !== pageKey) {
+    slotCallbacks.current = {key: pageKey, frame: [], lines: [], text: [], ref: []};
+  }
+  /** The slot's callback of one kind, made once per page. */
+  const slot = <T,>(list: T[], i: number, make: () => T): T => {
+    if (list[i] === undefined) {
+      list[i] = make();
+    }
+    return list[i];
   };
 
-  const onLines = (i: number) => (l: LineBox[]) => {
-    lines.current[i] = l;
-    remeasure();
-  };
+  const onFrame = (i: number) =>
+    slot(slotCallbacks.current.frame, i, () => (e: LayoutChangeEvent) => {
+      const {x, y, height} = e.nativeEvent.layout;
+      frames.current[i] = {x, top: y, height};
+      remeasureNow.current();
+    });
 
-  const onTextFrame = (i: number) => (e: LayoutChangeEvent) => {
-    const {x, y} = e.nativeEvent.layout;
-    textFrames.current[i] = {x, y};
-  };
+  const onLines = (i: number) =>
+    slot(slotCallbacks.current.lines, i, () => (l: LineBox[]) => {
+      lines.current[i] = l;
+      remeasureNow.current();
+    });
+
+  const onTextFrame = (i: number) =>
+    slot(slotCallbacks.current.text, i, () => (e: LayoutChangeEvent) => {
+      const {x, y} = e.nativeEvent.layout;
+      textFrames.current[i] = {x, y};
+    });
+
+  const textRefFor = (i: number) =>
+    slot(slotCallbacks.current.ref, i, () => (t: Text | null) => {
+      textRefs.current[i] = t;
+    });
 
   // ---------------------------------------------------------------- open / close
 
@@ -674,36 +778,116 @@ export function Reader(): React.JSX.Element {
   }, [fonts, blocks]);
   const SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48, 72];
 
-  // The page map belongs to one layout: the document with its edits, the text size, and
-  // the page's size. It is recounted a moment after that settles, and not while typing.
-  // Includes what is being typed: the count follows typing once it pauses.
   const comments = useMemo(() => commentsAfter(doc?.comments, applied), [doc, applied]);
-  const hasChanges = blocks.some(b => b.type === 'p' && !!b.revs?.length);
+  // From the committed text: typing never adds changes or notes, and this runs on every key.
+  const hasChanges = useMemo(() => committed.some(b => b.type === 'p' && !!b.revs?.length), [committed]);
   const inks = useMemo(() => inksAfter(doc?.inks, applied), [doc, applied]);
-  const hasNotes =
-    hasChanges || blocks.some(b => b.type === 'p' && (!!b.marks?.length || b.runs.some(r => r.obj === 'ink')));
+  const hasNotes = useMemo(
+    () => hasChanges || committed.some(b => b.type === 'p' && (!!b.marks?.length || b.runs.some(r => r.obj === 'ink'))),
+    [hasChanges, committed],
+  );
   // The margin column is there whenever the document has notes, comments or changes: open,
   // or folded into a narrow strip.
   const marginOn = hasNotes && !showPages && !contents;
-  // The text column: the page less the margin column when it shows.
-  const textW = marginOn ? Math.max(200, pageW - (showMargin ? MARGIN_W : MARGIN_STRIP) - MARGIN_GAP) : pageW;
-  const mapKey = `${doc?.path}:${edits.cursor}:${input.length}:${textScale}:${textW}x${pageH}:${fonts.size}`;
-  const [countKey, setCountKey] = useState('');
+  // The reading page's text column: the page less the margin column. Pages are counted at
+  // this width even while Pages or Contents shows (they hide the margin column), so a page
+  // number means the same page everywhere.
+  const readW = hasNotes ? Math.max(200, pageW - (showMargin ? MARGIN_W : MARGIN_STRIP) - MARGIN_GAP) : pageW;
+  const textW = marginOn ? readW : pageW;
+
+  // The page map belongs to one layout (width, page height, text size, fonts) and one
+  // version of the committed text. It is recounted a moment after an edit settles — from
+  // the page the edit is on — and not while typing: typing is committed first.
+  const layoutKey = `${doc?.path}:${textScale}:${readW}x${pageH}:${fonts.size}`;
+  const versionNo = useRef(0);
+  // A new number for each version of the committed text.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const textVersion = useMemo(() => ++versionNo.current, [committed]);
+  const mapKey = `${layoutKey}:${textVersion}`;
+  const [counting, setCounting] = useState<{key: string; layout: string; blocks: Block[]; seed?: PageStart[]} | null>(null);
+  const pageMapNow = useRef(pageMap);
+  pageMapNow.current = pageMap;
   useEffect(() => {
     if (!doc || pageH <= 0 || pageW <= 0) {
       return;
     }
-    const t = setTimeout(() => setCountKey(mapKey), 1500);
+    const t = setTimeout(() => {
+      const prev = pageMapNow.current;
+      let seed: PageStart[] | undefined;
+      if (prev && prev.done && prev.layout === layoutKey) {
+        const d = firstDifference(prev.blocks, committed);
+        if (d > 0) {
+          seed = prev.pages.slice(0, pageIndexOf(prev.pages, {block: d, offset: 0}) + 1);
+        }
+      }
+      setCounting({key: mapKey, layout: layoutKey, blocks: committed, seed});
+    }, 1500);
     return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mapKey, doc, pageH, pageW]);
-  const map = pageMap?.key === mapKey ? pageMap : null;
+  // A recount keeps showing the last full count until it is done (no page number jumping on e-ink).
+  const map = pageMap && pageMap.layout === layoutKey ? pageMap : null;
   const pageNumber = map ? pageIndexOf(map.pages, anchor) + 1 : null;
+  // Only while the Pages view shows: what each page holds, for its card.
+  const pageInfos = useMemo(() => {
+    if (!showPages || !map) {
+      return [];
+    }
+    const replies = new Set(comments.filter(c => c.parent !== undefined).map(c => c.id));
+    return map.pages.map((_, i) => pageInfo(map.blocks, map.pages, i, id => replies.has(id)));
+  }, [showPages, map, comments]);
 
-  /** Goes to a page start (a jump: ◀ comes back). */
+  /** For checking page numbers against the screen: the count, and the page each heading starts on. */
+  const logPages = (bs: Block[], pages: PageStart[]) => {
+    const heads = outline(bs)
+      .slice(0, 40)
+      .map(h => `"${h.text.slice(0, 30)}" p${pageIndexOf(pages, {block: h.block, offset: 0}) + 1}`);
+    log(`pages: ${pages.length} at ${readW}x${pageH} scale ${textScale}; headings ${heads.join(', ') || 'none'}`);
+  };
+
+  /** A page start from the page map: the page `at` is on. Without a count reaching it, `at` itself. */
+  const pageStartOf = (at: Anchor): Anchor => {
+    if (!map || map.pages.length === 0) {
+      return at;
+    }
+    const i = pageIndexOf(map.pages, at);
+    if (!map.done && i === map.pages.length - 1) {
+      return at; // the count has not got past it yet
+    }
+    return map.pages[i].anchor;
+  };
+
+  // Which page shows, in the log: to compare with the Pages view when they disagree.
+  useEffect(() => {
+    if (doc && pageNumber !== null) {
+      const b = blocks[anchor.block];
+      const text = b?.type === 'p' ? paragraphText(b).slice(0, 30) : b?.type ?? '';
+      log(`showing page ${pageNumber}${map?.done ? '' : '?'} (block ${anchor.block}+${anchor.offset}: "${text}")`);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [anchor.block, anchor.offset]);
+
+  /** Turns to the page where character `offset` of paragraph `para` is (a find match, a misspelling). */
+  const showPlace = (para: number, offset: number) => {
+    const block = blocks.findIndex(b => b.type === 'p' && b.index === para);
+    const b = blocks[block];
+    // A long paragraph can run across pages: the page is found by the character.
+    const page = map && b?.type === 'p' ? pageOfChar(map.pages, block, toShown(b, offset), map.done) : -1;
+    if (page >= 0) {
+      const at = map!.pages[page].anchor;
+      if (at.block !== anchor.block || at.offset !== anchor.offset) {
+        goTo(at);
+      }
+    } else if (block >= 0 && (block < anchor.block || block >= end)) {
+      goTo({block, offset: 0});
+    }
+  };
+
+  /** Goes to the page `at` is on (◀ and ▶ then step page by page from there). */
   const goTo = (at: Anchor) => {
     flushTyping();
-    setHistory(h => [...h, anchor]);
-    setAnchor(at);
+    setHistory([]);
+    setAnchor(pageStartOf(at));
     setShowPages(false);
     setContents(false);
   };
@@ -726,24 +910,23 @@ export function Reader(): React.JSX.Element {
     }
   };
 
-  /** A page's heading (the last one at or before it) and opening text, for the Pages view. */
-  const pagePreview = (start: PageStart): {heading: string; text: string} => {
-    let heading = '';
-    for (let i = start.anchor.block; i >= 0; i--) {
-      const b = blocks[i];
-      if (b?.type === 'p' && b.kind !== 'body') {
-        heading = paragraphText(b).trim();
-        break;
-      }
+  // After the page size, text size or margin column changes, the page shown is re-aligned
+  // to a page start once the new count reaches it, so ◀ ▶ and the page number agree.
+  const alignedFor = useRef('');
+  useEffect(() => {
+    if (!map || alignedFor.current === map.layout || !doc) {
+      return;
     }
-    let text = '';
-    for (let i = start.anchor.block; i < blocks.length && text.length < 140; i++) {
-      const b = blocks[i];
-      const t = b.type === 'p' ? paragraphText(b) : b.type === 'table' ? '[Table]' : `[${b.what}]`;
-      text += (text ? ' ' : '') + (i === start.anchor.block ? t.slice(start.char) : t);
+    const at = pageStartOf(anchor);
+    if (at === anchor && !map.done) {
+      return; // not counted this far yet
     }
-    return {heading, text: text.replace(/\s+/g, ' ').replace(/\ufffc/g, '').trim().slice(0, 140)};
-  };
+    alignedFor.current = map.layout;
+    if (at.block !== anchor.block || at.offset !== anchor.offset) {
+      setAnchor(at);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [map]);
 
   /** Where a page begins, as a paragraph position (a table's page begins at the next paragraph). */
   const pageStartPos = (pg: PageStart): Pos | null => {
@@ -888,19 +1071,68 @@ export function Reader(): React.JSX.Element {
     setAnchor(to);
   };
 
+  const atStart = anchor.block === 0 && anchor.offset === 0;
+
+  /** Go to page…: from View, or by tapping the page number on the bottom line. */
+  const openGoTo = () => {
+    flushTyping();
+    setGoToText('');
+    setGoToNote('');
+    setMenuX(Math.max(0, pageW - MENU_W));
+    setMenu('goto');
+  };
+
+  const goToPage = () => {
+    const n = Number(goToText);
+    if (!map) {
+      setGoToNote('Still counting pages. Try again in a moment.');
+      return;
+    }
+    if (!Number.isInteger(n) || n < 1 || n > map.pages.length) {
+      setGoToNote(map.done ? `There are ${map.pages.length} pages.` : `Counted ${map.pages.length} pages so far.`);
+      return;
+    }
+    setMenu(null);
+    goTo(map.pages[n - 1].anchor);
+  };
+
+  /**
+   * ◀: the page before this one, as in any reader. From the page map; a page shown from
+   * part-way down (before the map counted it) goes to the start of its own page first.
+   * Before the count reaches here, back through the pages turned with ▶.
+   */
   const previous = () => {
-    if (history.length === 0) {
+    if (!doc || atStart) {
       return;
     }
     flushTyping();
-    setAnchor(history[history.length - 1]);
-    setHistory(history.slice(0, -1));
+    if (map && map.pages.length > 0) {
+      const i = pageIndexOf(map.pages, anchor);
+      const counted = map.done || i < map.pages.length - 1;
+      if (counted) {
+        const start = map.pages[i].anchor;
+        const onStart = start.block === anchor.block && Math.abs(start.offset - anchor.offset) <= 1;
+        const to = onStart ? map.pages[i - 1]?.anchor : start;
+        if (to) {
+          setHistory([]);
+          setAnchor(to);
+        }
+        return;
+      }
+    }
+    if (history.length > 0) {
+      setAnchor(history[history.length - 1]);
+      setHistory(history.slice(0, -1));
+    } else {
+      setStatus('Still counting pages. ◀ works in a moment.');
+    }
   };
 
+  /** From Contents: the page the heading is on. */
   const jump = (block: number) => {
     flushTyping();
-    setHistory(h => [...h, anchor]);
-    setAnchor({block, offset: 0});
+    setHistory([]);
+    setAnchor(pageStartOf({block, offset: 0}));
     setContents(false);
   };
 
@@ -956,7 +1188,9 @@ export function Reader(): React.JSX.Element {
   const penTo = useRef<{x: number; y: number} | null>(null);
   const selecting = useRef(false);
   const lastTap = useRef<{x: number; y: number; at: number} | null>(null);
-  /** The invisible field that receives the keyboard. Focused on the first tap, kept until Done. */
+  /** Pen and finger, each logged the first time it touches the page. */
+  const toolsSeen = useRef(new Set<string>());
+  /** The invisible field that receives the keyboard. Focused on the first tap, kept until Hide keyboard. */
   const keys = useRef<TextInput>(null);
 
   const release = async () => {
@@ -969,6 +1203,25 @@ export function Reader(): React.JSX.Element {
     }
     selecting.current = true;
     try {
+      // A finger only turns pages: swipe left for the next page, right for the one before.
+      // The pen does everything else. (Where the native layer is missing, all is pen.)
+      const tool = DocxText?.gestureTool ? await DocxText.gestureTool().catch(() => null) : null;
+      if (tool && !toolsSeen.current.has(tool.tool)) {
+        toolsSeen.current.add(tool.tool);
+        log(`touch: first ${tool.tool} (Android tool type ${tool.toolType})`);
+      }
+      if (tool?.tool === 'finger') {
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        if (Math.abs(dx) >= SWIPE_MIN && Math.abs(dx) > Math.abs(dy) * 1.5) {
+          if (dx < 0) {
+            next();
+          } else {
+            previous();
+          }
+        }
+        return;
+      }
       const tap = Math.hypot(b.x - a.x, b.y - a.y) < TAP_SLOP;
       const now = Date.now();
       const prev = lastTap.current;
@@ -1017,7 +1270,8 @@ export function Reader(): React.JSX.Element {
     }
   };
 
-  const point = (e: GestureResponderEvent) => ({x: e.nativeEvent.locationX, y: e.nativeEvent.locationY});
+  // The touch layer starts PAD left of the page's text column; points are in page coordinates.
+  const point = (e: GestureResponderEvent) => ({x: e.nativeEvent.locationX - PAD, y: e.nativeEvent.locationY});
 
   const selectedIn = (b: (typeof window)[number]): {start: number; end: number} | null => {
     // Once replacement text is typed, the selected text is gone from the page.
@@ -1353,10 +1607,7 @@ export function Reader(): React.JSX.Element {
     const k = Math.max(0, Math.min(i, items.length - 1));
     const m = items[k];
     flushTyping();
-    const block = blocks.findIndex(b => b.type === 'p' && b.index === m.para);
-    if (block >= 0 && (block < anchor.block || block >= end)) {
-      goTo({block, offset: 0});
-    }
+    showPlace(m.para, m.start);
     setCaret(null);
     setSelection({from: {para: m.para, offset: m.start}, to: {para: m.para, offset: m.end}});
     setSp(x => ({...x, items, at: k, suggestions: [], replace: '', message: `${k + 1} of ${items.length}`}));
@@ -1924,10 +2175,7 @@ export function Reader(): React.JSX.Element {
     const k = ((i % matches.length) + matches.length) % matches.length;
     const m = matches[k];
     flushTyping();
-    const block = blocks.findIndex(b => b.type === 'p' && b.index === m.para);
-    if (block >= 0 && (block < anchor.block || block >= end)) {
-      goTo({block, offset: 0});
-    }
+    showPlace(m.para, m.start);
     setCaret(null);
     setSelection({from: {para: m.para, offset: m.start}, to: {para: m.para, offset: m.end}});
     setFind(f => ({...f, at: k}));
@@ -2139,21 +2387,13 @@ export function Reader(): React.JSX.Element {
     setTyping({mode: 'insert', at: {para: at.para + 1, offset: 0}});
   };
 
-  /** Done: commit, leave the caret after the new text, and put the keyboard away. */
+  /** Hide keyboard (Edit menu): commit, leave the caret after the new text, and put the keyboard away. */
   const done = () => {
     const at = caretAt;
     flushTyping();
     setCaret(at);
     keys.current?.blur();
     Keyboard.dismiss();
-  };
-
-  /** Cancel: drop what was typed; the caret goes back to where typing began. */
-  const cancelTyping = () => {
-    const at = typing ? {para: typedRange(typing).para, offset: typedRange(typing).start} : caret;
-    setTyping(null);
-    setInput('');
-    setCaret(at);
   };
 
   /**
@@ -2761,7 +3001,7 @@ export function Reader(): React.JSX.Element {
     } else if (caretBox.top < anchor.offset - 1) {
       const i = blocks.findIndex(b => b.type === 'p' && b.index === at.para);
       if (i >= 0) {
-        setAnchor({block: i, offset: 0});
+        setAnchor(pageStartOf({block: i, offset: 0}));
       }
     }
     // Only a new caret box (for the moved caret) triggers this.
@@ -2780,8 +3020,8 @@ export function Reader(): React.JSX.Element {
       followCaret.current = false;
       const bi = blocks.findIndex(b => b.type === 'p' && b.index === at.para);
       if (bi >= 0) {
-        setHistory(h => [...h, anchor]);
-        setAnchor({block: bi, offset: 0});
+        setHistory([]);
+        setAnchor(pageStartOf({block: bi, offset: 0}));
       }
       return;
     }
@@ -3025,7 +3265,8 @@ export function Reader(): React.JSX.Element {
     );
   };
   const progress = doc && blocks.length > 0 ? Math.round((anchor.block / blocks.length) * 100) : 0;
-  const headings = useMemo(() => outline(blocks), [blocks]);
+  // From the committed text: typed words reach Contents when typing ends, not on every key.
+  const headings = useMemo(() => outline(committed), [committed]);
 
   // A pen tap sometimes arrives as two presses; a second press of the same control this soon is ignored.
   const lastPress = useRef<{key: string; at: number}>({key: '', at: 0});
@@ -3896,6 +4137,7 @@ export function Reader(): React.JSX.Element {
             {item('Smaller text  A−', () => setScale(scaleAt - 1))}
             {item('Normal size (100%)', () => setScale(SCALES.indexOf(1)))}
             {item('Pages…', () => setShowPages(true))}
+            {item('Go to page…', openGoTo)}
             {item('Word count…', () => setMenu('count'))}
             {item('Go to start', () => goTo({block: 0, offset: 0}))}
             {item('Go to end', goToEnd)}
@@ -4012,6 +4254,35 @@ export function Reader(): React.JSX.Element {
           </>
         );
       }
+      case 'goto':
+        return (
+          <View style={styles.nameForm}>
+            <Text allowFontScaling={false} style={styles.menuText}>
+              {map ? `Go to page (1–${map.pages.length}${map.done ? '' : '+'})` : 'Go to page'}
+            </Text>
+            <View style={styles.row}>
+              <TextInput
+                style={styles.nameInput}
+                value={goToText}
+                onChangeText={t => setGoToText(t.replace(/[^0-9]/g, ''))}
+                keyboardType="number-pad"
+                autoFocus
+                allowFontScaling={false}
+                returnKeyType="go"
+                onSubmitEditing={goToPage}
+              />
+            </View>
+            {goToNote ? (
+              <Text allowFontScaling={false} style={styles.presetSummary}>
+                {goToNote}
+              </Text>
+            ) : null}
+            <View style={styles.row}>
+              {panelButton('Go', goToPage, goToText === '')}
+              {button('Close', () => setMenu(null))}
+            </View>
+          </View>
+        );
       case 'find': {
         const n = find.query ? findAll().length : 0;
         return (
@@ -4129,7 +4400,7 @@ export function Reader(): React.JSX.Element {
         </Text>
         {doc ? button(contents ? 'Back to page' : 'Contents', () => setContents(c => !c), headings.length === 0) : null}
         {doc ? menuButton('View', 'view') : null}
-        {doc ? button('◀', previous, history.length === 0) : null}
+        {doc ? button('◀', previous, atStart) : null}
         {doc ? (
           <Pressable onPress={once('pages', () => setShowPages(p => !p))} style={styles.pageCount}>
             <Text allowFontScaling={false} style={styles.page}>
@@ -4174,18 +4445,28 @@ export function Reader(): React.JSX.Element {
       <View
         style={styles.pageArea}
         onLayout={e => {
+          log(`page area ${Math.round(e.nativeEvent.layout.width)}x${Math.round(e.nativeEvent.layout.height)}`);
           setPageH(Math.floor(e.nativeEvent.layout.height) - PAD * 2);
           setPageW(Math.floor(e.nativeEvent.layout.width) - PAD * 2);
         }}>
-        {doc && countKey === mapKey ? (
+        {doc && counting && counting.key === mapKey ? (
           <PageCounter
-            key={countKey}
-            blocks={blocks}
-            width={textW}
+            key={counting.key}
+            blocks={counting.blocks}
+            seed={counting.seed}
+            width={readW}
             pageH={pageH}
             fonts={fonts}
             scale={textScale}
-            onPages={(pages, isDone) => setPageMap({key: countKey, pages, done: isDone})}
+            onPages={(pages, isDone) => {
+              const c = counting;
+              setPageMap(prev =>
+                !isDone && prev && prev.done && prev.layout === c.layout ? prev : {key: c.key, layout: c.layout, blocks: c.blocks, pages, done: isDone},
+              );
+              if (isDone) {
+                logPages(c.blocks, pages);
+              }
+            }}
           />
         ) : null}
         {!doc ? (
@@ -4200,13 +4481,27 @@ export function Reader(): React.JSX.Element {
               <Text allowFontScaling={false} style={[styles.panelTitle, styles.flex]}>
                 {map ? `${map.pages.length}${map.done ? '' : '+'} pages${map.done ? '' : ' (still counting)'}` : 'Counting pages…'}
               </Text>
+              <Pressable onPress={once('notes-only', () => setNotesOnly(n => !n))} style={[styles.chip, styles.pagesChip, notesOnly ? styles.chipOn : null]}>
+                <Text allowFontScaling={false} style={[styles.chipText, notesOnly ? styles.chipTextOn : null]}>
+                  {notesOnly ? '✓ Only pages with notes' : 'Only pages with notes'}
+                </Text>
+              </Pressable>
               {button('Start', () => goTo({block: 0, offset: 0}))}
               {button('End', goToEnd)}
               {button('Back to page', () => setShowPages(false))}
             </View>
+            {notesOnly && pageInfos.every(pv => !pageMarks(pv)) ? (
+              <Text allowFontScaling={false} style={[styles.menuText, styles.pagesNone]}>
+                {'No page has comments, handwritten notes or tracked changes.'}
+              </Text>
+            ) : null}
             <View style={styles.pagesGrid}>
               {(map?.pages ?? []).map((pg, i) => {
-                const pv = pagePreview(pg);
+                const pv = pageInfos[i];
+                const marks = pv ? pageMarks(pv) : '';
+                if (!pv || (notesOnly && !marks)) {
+                  return null;
+                }
                 const here = pageNumber === i + 1;
                 return (
                   <Pressable key={i} onPress={once(`page:${i}`, () => goTo(pg.anchor))} style={[styles.pageCard, here ? styles.pageCardHere : null]}>
@@ -4218,7 +4513,12 @@ export function Reader(): React.JSX.Element {
                         {pv.heading}
                       </Text>
                     ) : null}
-                    <Text allowFontScaling={false} style={styles.pageCardText} numberOfLines={3}>
+                    {marks ? (
+                      <Text allowFontScaling={false} style={styles.pageCardMarks} numberOfLines={1}>
+                        {marks}
+                      </Text>
+                    ) : null}
+                    <Text allowFontScaling={false} style={styles.pageCardText} numberOfLines={marks ? 2 : 3}>
                       {pv.text}
                     </Text>
                     <View style={styles.pageCardTools}>
@@ -4262,43 +4562,45 @@ export function Reader(): React.JSX.Element {
                   onFrame={onFrame(i)}
                   onLines={onLines(i)}
                   onTextFrame={onTextFrame(i)}
-                  textRef={t => {
-                    textRefs.current[i] = t;
-                  }}
+                  textRef={textRefFor(i)}
                 />
               ))}
-              {caretAt && caretBox?.key === pageKey ? (
+              {caretAt && !typing && caretBox?.key === pageKey ? (
                 <View pointerEvents="none" style={[styles.caret, {left: caretBox.x - 1, top: caretBox.top, height: caretBox.height}]} />
               ) : null}
             </View>
             <View style={[styles.mask, {top: visible}]} />
-            {/* Owns the pen, so nothing inks and no text handles the touch itself. */}
-            <View
-              style={StyleSheet.absoluteFill}
-              onStartShouldSetResponder={() => {
-                // A tap on the page while a menu is open only closes the menu (not the
-                // restore question, which needs an answer).
-                if (menu) {
-                  if (menu !== 'recover') {
-                    setMenu(null);
-                  }
-                  return false;
-                }
-                return !readOnly;
-              }}
-              onMoveShouldSetResponder={() => !readOnly}
-              onResponderTerminationRequest={() => false}
-              onResponderGrant={e => {
-                penFrom.current = point(e);
-                penTo.current = penFrom.current;
-              }}
-              onResponderMove={e => {
-                penTo.current = point(e);
-              }}
-              onResponderRelease={release}
-              onResponderTerminate={release}
-            />
           </View>
+        ) : null}
+        {doc && !showPages && !contents && pageH > 0 ? (
+          // Owns the pen, so nothing inks and no text handles the touch itself. It reaches
+          // into the page's side margins: a pen set down just left of a line's first letter
+          // starts at that letter instead of missing the page (CT).
+          <TouchLayer
+            style={[styles.touchLayer, {top: PAD, height: pageH, width: PAD + textW + (marginOn ? MARGIN_GAP : PAD)}]}
+            onStartShouldSetResponder={() => {
+              // A tap on the page while a menu is open only closes the menu (not the
+              // restore question, which needs an answer).
+              if (menu) {
+                if (menu !== 'recover') {
+                  setMenu(null);
+                }
+                return false;
+              }
+              return !readOnly;
+            }}
+            onMoveShouldSetResponder={() => !readOnly}
+            onResponderTerminationRequest={() => false}
+            onResponderGrant={e => {
+              penFrom.current = point(e);
+              penTo.current = penFrom.current;
+            }}
+            onResponderMove={e => {
+              penTo.current = point(e);
+            }}
+            onResponderRelease={release}
+            onResponderTerminate={release}
+          />
         ) : null}
         {doc && marginOn && pageH > 0 ? (showMargin ? marginColumn() : marginStrip()) : null}
         {pad && pageH > 0 ? (
@@ -4360,11 +4662,16 @@ export function Reader(): React.JSX.Element {
               : caret
               ? 'Type to insert at the caret.'
               : doc && !readOnly
-              ? 'Tap to type · drag to select · double-tap a word.'
+              ? 'Pen: tap to type · drag to select · double-tap a word. Finger: swipe to turn pages.'
               : '')}
         </Text>
-        {typing ? button('Cancel', cancelTyping, false, styles.small) : null}
-        {typing || caret ? button('Done', done, false, styles.small) : null}
+        {doc && pageNumber !== null && map ? (
+          <Pressable onPress={once('goto', openGoTo)} style={styles.statusPage}>
+            <Text allowFontScaling={false} style={styles.statusPageText}>
+              {`Page ${pageNumber} of ${map.pages.length}${map.done ? '' : '+'}`}
+            </Text>
+          </Pressable>
+        ) : null}
       </View>
     </View>
   );
@@ -4416,6 +4723,10 @@ const styles = StyleSheet.create({
   pageCardNumber: {color: '#000', fontSize: 18, fontWeight: '700'},
   pageCardHeading: {color: '#000', fontSize: 15, fontWeight: '700', marginTop: 4},
   pageCardText: {color: '#333', fontSize: 14, marginTop: 4},
+  pageCardMarks: {color: '#000', fontSize: 14, fontWeight: '700', marginTop: 4, textDecorationLine: 'underline'},
+  pagesChip: {marginBottom: 0, marginLeft: 8},
+  pagesNone: {padding: 16},
+  touchLayer: {position: 'absolute', left: 0},
   menu: {position: 'absolute', top: 0, width: MENU_W, backgroundColor: '#fff', borderWidth: 2, borderColor: '#000'},
   menuItem: {paddingVertical: 14, paddingHorizontal: 16, borderBottomWidth: 1, borderColor: '#bbb'},
   menuText: {color: '#000', fontSize: 19},
@@ -4450,6 +4761,8 @@ const styles = StyleSheet.create({
   caretHint: {flex: 1, color: '#000', fontSize: 15},
   caret: {position: 'absolute', width: 3, backgroundColor: '#000'},
   statusText: {flex: 1, color: '#000', fontSize: 15},
+  statusPage: {marginLeft: 12, paddingVertical: 6, paddingHorizontal: 10, borderWidth: 1, borderColor: '#000', borderRadius: 5},
+  statusPageText: {color: '#000', fontSize: 15, fontWeight: '700'},
   pageArea: {flex: 1, padding: PAD},
   viewport: {overflow: 'hidden'},
   column: {position: 'absolute', left: 0, right: 0},

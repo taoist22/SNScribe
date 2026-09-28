@@ -71,7 +71,41 @@ export function leadChars(b: Block): number {
   return b.type === 'p' && (b.first ?? 0) > 0 && b.runs.length > 0 ? 1 : 0;
 }
 
-type Piece = Run & {sel?: boolean; del?: boolean; sp?: boolean};
+type Piece = Run & {sel?: boolean; del?: boolean; sp?: boolean; caret?: boolean};
+
+/** The caret drawn in the text while typing, so it shows in the same screen update as the typed letters. */
+const CARET = '|';
+
+/** The pieces with the caret before model character `caret` (after deleted text shown there). */
+function withCaret(ps: Piece[], caret: number | undefined): Piece[] {
+  if (caret === undefined) {
+    return ps;
+  }
+  const out: Piece[] = [];
+  let off = 0;
+  let placed = false;
+  for (const r of ps) {
+    if (!placed && !r.del && caret < off + r.t.length) {
+      const k = caret - off;
+      if (k > 0) {
+        out.push({...r, t: r.t.slice(0, k)});
+      }
+      out.push({t: CARET, caret: true, sz: r.sz});
+      out.push({...r, t: r.t.slice(k)});
+      placed = true;
+    } else {
+      out.push(r);
+    }
+    if (!r.del) {
+      off += r.t.length;
+    }
+  }
+  if (!placed) {
+    const last = [...ps].reverse().find(r => !r.del);
+    out.push({t: CARET, caret: true, sz: last?.sz});
+  }
+  return out;
+}
 
 /** The paragraph's runs with selection and misspellings marked, and deleted text placed where it sits. */
 function pieces(p: ParagraphBlock, selection: {start: number; end: number} | null, spell?: Array<{start: number; end: number}>): Piece[] {
@@ -146,7 +180,13 @@ function ParagraphView({p, selection, spell, onFrame, onLines, textRef, onTextFr
         onLines?.(e.nativeEvent.lines.map(l => ({y: l.y, height: l.height, len: l.text.length})))
       }>
       {leadChars(p) ? <View key="first-line" style={{width: dpForTwips(p.first!, scale), height: 1}} /> : null}
-      {pieces(p, selection ?? null, spell).map((r, i) => (
+      {withCaret(pieces(p, selection ?? null, spell), p.caret).map((r, i) =>
+        r.caret ? (
+          // Pulled together (negative spacing) so the text beside it barely moves.
+          <Text key={i} style={[styles.caret, {fontSize: runSize(r), letterSpacing: -Math.round(runSize(r) * 0.18)}]}>
+            {CARET}
+          </Text>
+        ) : (
         <Text
           key={i}
           style={[
@@ -167,7 +207,8 @@ function ParagraphView({p, selection, spell, onFrame, onLines, textRef, onTextFr
           ]}>
           {runText(r)}
         </Text>
-      ))}
+        ),
+      )}
     </Text>
   );
   // The document's own space before and after when it has them.
@@ -192,7 +233,28 @@ function ParagraphView({p, selection, spell, onFrame, onLines, textRef, onTextFr
   );
 }
 
-export function BlockView({block, ...rest}: Props): React.JSX.Element {
+const sameRange = (a?: {start: number; end: number} | null, b?: {start: number; end: number} | null) =>
+  a === b || (!!a && !!b && a.start === b.start && a.end === b.end) || (!a && !b);
+
+const sameRanges = (a?: Array<{start: number; end: number}>, b?: Array<{start: number; end: number}>) =>
+  a === b || ((a?.length ?? 0) === (b?.length ?? 0) && (a ?? []).every((r, i) => sameRange(r, b![i])));
+
+/**
+ * Drawn again only when what it shows changes: typing redraws the one paragraph typed in,
+ * not the page. The callbacks are left out of the comparison: callers keep them meaning
+ * the same thing for the same slot (Reader reads the latest state through refs).
+ */
+export const BlockView = React.memo(
+  BlockViewInner,
+  (a, b) =>
+    a.block === b.block &&
+    sameRange(a.selection, b.selection) &&
+    sameRanges(a.spell, b.spell) &&
+    a.fonts === b.fonts &&
+    a.scale === b.scale,
+);
+
+function BlockViewInner({block, ...rest}: Props): React.JSX.Element {
   if (block.type === 'p') {
     if (block.pb) {
       // Outside the paragraph's frame (so its frame and lines stay its own): the marker ends
@@ -240,6 +302,7 @@ const styles = StyleSheet.create({
   notItalic: {fontStyle: 'normal'},
   highlight: {backgroundColor: '#cfcfcf'},
   selected: {backgroundColor: '#000', color: '#fff'},
+  caret: {color: '#000', fontWeight: '400', fontStyle: 'normal'},
   inserted: {color: '#333'},
   misspelled: {backgroundColor: '#e6e6e6'},
   deleted: {color: '#777'},

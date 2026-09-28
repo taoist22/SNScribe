@@ -98,6 +98,8 @@ export type ParagraphBlock = {
   first?: number;
   /** Starts on a new page. */
   pb?: boolean;
+  /** On screen only (never saved): the caret, drawn in the text before this character while typing. */
+  caret?: number;
   /** Font and size (half-points) text here has unless it sets its own: from the style and document defaults. */
   bf?: string;
   bs?: number;
@@ -183,12 +185,21 @@ export function paragraphText(p: ParagraphBlock): string {
   return p.runs.map(r => r.t).join('');
 }
 
+const wordCounts = new WeakMap<Block, number>();
+
+/** Words in a block, for sizing the drawn window. Remembered per block: edits make new blocks, so a count never goes stale. */
 export function wordCount(b: Block): number {
   if (b.type !== 'p') {
     return 20;
   }
+  const known = wordCounts.get(b);
+  if (known !== undefined) {
+    return known;
+  }
   const text = paragraphText(b).trim();
-  return text ? text.split(/\s+/).length : 1;
+  const n = text ? text.split(/\s+/).length : 1;
+  wordCounts.set(b, n);
+  return n;
 }
 
 /** Headings and titles, for the contents list. */

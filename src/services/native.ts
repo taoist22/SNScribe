@@ -72,6 +72,8 @@ type DocxTextModule = {
   caretRect(tag: number, offset: number): Promise<{x?: number; top?: number; bottom?: number; error?: string}>;
   /** The offset one line up (dir -1) or down (+1) at the same x, or {outside} past the paragraph. */
   lineMove(tag: number, offset: number, dir: number): Promise<{offset?: number; outside?: boolean; error?: string}>;
+  /** Whether the last touch on the page (DocxTouchLayer) was the pen or a finger. Missing before native build 14. */
+  gestureTool?(): Promise<{tool: 'pen' | 'finger'; toolType: number}>;
 };
 
 /** A key the native listener caught: DEL_FWD, arrows, HOME/END, or a Ctrl/Cmd letter; `text` for a paste. */

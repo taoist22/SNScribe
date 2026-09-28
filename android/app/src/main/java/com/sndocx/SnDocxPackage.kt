@@ -10,5 +10,5 @@ class SnDocxPackage : ReactPackage {
     override fun createNativeModules(context: ReactApplicationContext): List<NativeModule> =
         listOf(DocxModule(context), DocxTextModule(context), DocxKeysModule(context), DocxInkModule(context))
 
-    override fun createViewManagers(context: ReactApplicationContext): List<ViewManager<*, *>> = listOf(DocxInkViewManager())
+    override fun createViewManagers(context: ReactApplicationContext): List<ViewManager<*, *>> = listOf(DocxInkViewManager(), DocxTouchLayerManager())
 }

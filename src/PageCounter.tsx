@@ -10,6 +10,10 @@ import {wordCount, type Block} from './model/docx';
  * as the page does (same BlockView, width, height and text size), and walks the same page
  * breaks the ▶ button would. Each window is a separate render, with a pause between, so
  * the page stays responsive. Remount it (change its key) to start again.
+ *
+ * `seed`: pages already known from an earlier count that an edit further on cannot have
+ * moved. Counting resumes at the last of them, so an edit on page 38 re-measures pages 38
+ * onward, not the whole document.
  */
 
 type Props = {
@@ -18,19 +22,23 @@ type Props = {
   pageH: number;
   fonts: Set<string>;
   scale: number;
+  seed?: PageStart[];
   /** Called as pages are found; `done` once the end is reached. */
   onPages: (pages: PageStart[], done: boolean) => void;
 };
 
 const FIRST: PageStart = {anchor: {block: 0, offset: 0}, char: 0};
 
-export function PageCounter({blocks, width, pageH, fonts, scale, onPages}: Props): React.JSX.Element | null {
+export function PageCounter({blocks, width, pageH, fonts, scale, seed, onPages}: Props): React.JSX.Element | null {
   const counts = useMemo(() => blocks.map(wordCount), [blocks]);
-  const [win, setWin] = useState<{start: Anchor; budget: number}>({start: FIRST.anchor, budget: 2500});
+  // The last seeded page is measured again: its end may have moved.
+  const known = seed && seed.length > 0 ? seed.slice(0, -1) : [];
+  const from = seed && seed.length > 0 ? seed[seed.length - 1] : FIRST;
+  const [win, setWin] = useState<{start: Anchor; budget: number}>({start: from.anchor, budget: 2500});
   const end = useMemo(() => windowEnd(counts, win.start.block, win.budget, 250), [counts, win]);
   const window = useMemo(() => blocks.slice(win.start.block, end), [blocks, win.start.block, end]);
 
-  const pages = useRef<PageStart[]>([FIRST]);
+  const pages = useRef<PageStart[]>([...known, from]);
   const frames = useRef<Array<{top: number; height: number} | undefined>>([]);
   const lines = useRef<Array<LineBox[] | undefined>>([]);
   const settle = useRef<ReturnType<typeof setTimeout> | null>(null);

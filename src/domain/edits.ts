@@ -701,8 +701,8 @@ function shiftDeletions(revs: Revision[] | undefined, start: number, end: number
  * first-line indent spacer (lead, before everything) and deleted text shown struck through
  * before character `at`. The TextView's offsets count them; the model's do not.
  */
-export function shownExtras(p: ParagraphBlock): Array<{at: number; len: number; lead?: boolean}> {
-  const out: Array<{at: number; len: number; lead?: boolean}> = [];
+export function shownExtras(p: ParagraphBlock): Array<{at: number; len: number; lead?: boolean; caret?: boolean}> {
+  const out: Array<{at: number; len: number; lead?: boolean; caret?: boolean}> = [];
   if ((p.first ?? 0) > 0 && p.runs.length > 0) {
     out.push({at: 0, len: 1, lead: true});
   }
@@ -710,6 +710,10 @@ export function shownExtras(p: ParagraphBlock): Array<{at: number; len: number; 
     if (v.kind === 'del' && v.runs?.length) {
       out.push({at: Math.max(0, v.at ?? 0), len: v.runs.reduce((n, r) => n + r.t.length, 0)});
     }
+  }
+  if (p.caret !== undefined) {
+    // Drawn in the text while typing: after deleted text at the same place, before the character.
+    out.push({at: p.caret, len: 1, caret: true});
   }
   return out;
 }
@@ -729,7 +733,7 @@ export function toShown(p: ParagraphBlock, offset: number): number {
 export function fromShown(p: ParagraphBlock, shown: number): number {
   let extra = 0;
   // Extras in display order: the lead first, then deletions by position.
-  const xs = shownExtras(p).sort((a, b) => (a.lead ? -1 : b.lead ? 1 : a.at - b.at));
+  const xs = shownExtras(p).sort((a, b) => (a.lead ? -1 : b.lead ? 1 : a.at - b.at || (a.caret ? 1 : 0) - (b.caret ? 1 : 0)));
   for (const x of xs) {
     const startShown = (x.lead ? 0 : x.at) + extra;
     if (shown < startShown) {

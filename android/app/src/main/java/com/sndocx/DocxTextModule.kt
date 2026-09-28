@@ -119,4 +119,13 @@ class DocxTextModule(private val reactContext: ReactApplicationContext) :
             promise.resolve(result)
         }
     }
+
+    /** Whether the last touch on the page was the pen ("pen") or a finger ("finger"), and Android's tool type. */
+    @ReactMethod
+    fun gestureTool(promise: Promise) {
+        val result = Arguments.createMap()
+        result.putString("tool", if (DocxTouchLayerManager.gesturePen) "pen" else "finger")
+        result.putInt("toolType", DocxTouchLayerManager.lastTool)
+        promise.resolve(result)
+    }
 }
