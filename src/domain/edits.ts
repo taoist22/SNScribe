@@ -703,8 +703,8 @@ function shiftDeletions(revs: Revision[] | undefined, start: number, end: number
  * first-line indent spacer (lead, before everything) and deleted text shown struck through
  * before character `at`. The TextView's offsets count them; the model's do not.
  */
-export function shownExtras(p: ParagraphBlock): Array<{at: number; len: number; lead?: boolean; caret?: boolean; label?: boolean}> {
-  const out: Array<{at: number; len: number; lead?: boolean; caret?: boolean; label?: boolean}> = [];
+export function shownExtras(p: ParagraphBlock): Array<{at: number; len: number; lead?: boolean; caret?: boolean}> {
+  const out: Array<{at: number; len: number; lead?: boolean; caret?: boolean}> = [];
   if ((p.first ?? 0) > 0 && p.runs.length > 0) {
     out.push({at: 0, len: 1, lead: true});
   }
@@ -713,10 +713,6 @@ export function shownExtras(p: ParagraphBlock): Array<{at: number; len: number; 
       out.push({at: Math.max(0, v.at ?? 0), len: v.runs.reduce((n, r) => n + r.t.length, 0)});
     }
   }
-  for (const at of pageBreakChars(p)) {
-    // A Word page break is labelled in the text, just before its line break.
-    out.push({at, len: PAGE_BREAK_LABEL.length, label: true});
-  }
   if (p.caret !== undefined) {
     // Drawn in the text while typing: after deleted text at the same place, before the character.
     out.push({at: p.caret, len: 1, caret: true});
@@ -724,10 +720,12 @@ export function shownExtras(p: ParagraphBlock): Array<{at: number; len: number; 
   return out;
 }
 
-/** What a Word page break shows as (before its line break). */
-export const PAGE_BREAK_LABEL = ' — page break — ';
-
-/** Text offsets of the paragraph's Word page breaks (the "\n" of each). */
+/**
+ * Text offsets of the paragraph's Word page breaks (the "\n" of each). On screen they are
+ * plain line breaks: screen pages are not Word's pages, and text reflows by font and size
+ * (CT: honouring them doubled a 50-page paper to 101 half-empty pages). Backspace at the
+ * start of the line after one still removes it.
+ */
 export function pageBreakChars(p: ParagraphBlock): number[] {
   const out: number[] = [];
   let off = 0;
@@ -744,11 +742,6 @@ export function pageBreakChars(p: ParagraphBlock): number[] {
   return out;
 }
 
-/** Where each Word page break's line break is in the paragraph's TextView (for paging). */
-export function shownPageBreaks(p: ParagraphBlock): number[] {
-  // The character itself: everything shown at its place (deleted text, the label, the caret) comes first.
-  return pageBreakChars(p).map(at => toShown(p, at + 1) - 1);
-}
 
 /** A text offset as a TextView offset: extras before it are counted (a deletion at the caret is after it). */
 export function toShown(p: ParagraphBlock, offset: number): number {
@@ -765,9 +758,7 @@ export function toShown(p: ParagraphBlock, offset: number): number {
 export function fromShown(p: ParagraphBlock, shown: number): number {
   let extra = 0;
   // Extras in display order: the lead first, then deletions by position.
-  // At one place: deleted text, then a page break's label, then the caret.
-  const rank = (x: {caret?: boolean; label?: boolean}) => (x.caret ? 2 : x.label ? 1 : 0);
-  const xs = shownExtras(p).sort((a, b) => (a.lead ? -1 : b.lead ? 1 : a.at - b.at || rank(a) - rank(b)));
+  const xs = shownExtras(p).sort((a, b) => (a.lead ? -1 : b.lead ? 1 : a.at - b.at || (a.caret ? 1 : 0) - (b.caret ? 1 : 0)));
   for (const x of xs) {
     const startShown = (x.lead ? 0 : x.at) + extra;
     if (shown < startShown) {

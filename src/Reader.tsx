@@ -47,7 +47,6 @@ import {
   textEditProblem,
   threadIds,
   toShown,
-  shownPageBreaks,
   pageBreakChars,
   wordAround,
   type FormatProp,
@@ -460,7 +459,7 @@ export function Reader(): React.JSX.Element {
         if (!f || (b.type === 'p' && b.runs.length > 0 && !l)) {
           return undefined;
         }
-        return {top: f.top, height: f.height, lines: l, forced: b.type === 'p' && !!b.pb, breaks: b.type === 'p' ? shownPageBreaks(b) : undefined};
+        return {top: f.top, height: f.height, lines: l, forced: b.type === 'p' && !!b.pb};
       }),
     [window],
   );

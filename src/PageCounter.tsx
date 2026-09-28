@@ -3,7 +3,6 @@ import {StyleSheet, View, type LayoutChangeEvent} from 'react-native';
 import {BlockView} from './BlockView';
 import {breaksInWindow, windowEnd, type Anchor, type BlockBox, type LineBox, type PageStart} from './domain/paging';
 import {wordCount, type Block} from './model/docx';
-import {shownPageBreaks} from './domain/edits';
 
 /**
  * Counts the pages of the whole document in the background, for the page count and the
@@ -66,7 +65,7 @@ export function PageCounter({blocks, width, pageH, fonts, scale, seed, onPages}:
       if (!f || (b.type === 'p' && b.runs.length > 0 && !l)) {
         return undefined;
       }
-      return {top: f.top, height: f.height, lines: l, forced: b.type === 'p' && !!b.pb, breaks: b.type === 'p' ? shownPageBreaks(b) : undefined};
+      return {top: f.top, height: f.height, lines: l, forced: b.type === 'p' && !!b.pb};
     });
 
   const measure = () => {

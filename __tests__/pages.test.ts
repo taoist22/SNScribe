@@ -1,6 +1,6 @@
-import {PAGE_BREAK_LABEL, applyOps, fromShown, pageBreakChars, shownPageBreaks, toShown} from '../src/domain/edits';
+import {applyOps, fromShown, pageBreakChars, toShown} from '../src/domain/edits';
 import {pageInfo, pageMarks} from '../src/domain/pageInfo';
-import {findBreak, pageIndexOf, pageOfChar, type PageStart} from '../src/domain/paging';
+import {pageIndexOf, pageOfChar, type PageStart} from '../src/domain/paging';
 import {OBJECT, type Block, type ParagraphBlock} from '../src/model/docx';
 
 const para = (index: number, t: string, extra: Partial<ParagraphBlock> = {}): ParagraphBlock => ({
@@ -107,38 +107,10 @@ describe('the page a character is on', () => {
 describe('Word page breaks', () => {
   const brk = para(3, 'end.\nNext', {runs: [{t: 'end.'}, {t: '\n', pg: true}, {t: 'Next'}]});
 
-  it('are found and labelled before their line break', () => {
+  it('are found, but shown as plain line breaks (screen pages reflow freely)', () => {
     expect(pageBreakChars(brk)).toEqual([4]);
-    // e n d . [label] \n N …
-    expect(shownPageBreaks(brk)).toEqual([4 + PAGE_BREAK_LABEL.length]);
-    expect(toShown(brk, 5)).toBe(5 + PAGE_BREAK_LABEL.length);
-    expect(fromShown(brk, 5)).toBe(4); // a pen on the label: before the break
-  });
-
-  it('end the page after their line', () => {
-    const len = 4 + PAGE_BREAK_LABEL.length + 1;
-    const lines = [
-      {y: 0, height: 20, len},
-      {y: 20, height: 20, len: 4},
-    ];
-    const boxes = [
-      {top: 0, height: 40, lines, breaks: shownPageBreaks(brk)},
-      {top: 40, height: 20, lines: [{y: 0, height: 20, len: 5}]},
-    ];
-    expect(findBreak(boxes, 0, 1000)).toEqual({kind: 'at', index: 0, top: 20});
-    // The next page (from the line after the break) runs on normally.
-    expect(findBreak(boxes, 20, 1000)).toEqual({kind: 'after', top: 60});
-  });
-
-  it('in a paragraph of its own, the next paragraph starts the page', () => {
-    const only = para(1, '\n', {runs: [{t: '\n', pg: true}]});
-    const len = PAGE_BREAK_LABEL.length + 1;
-    const boxes = [
-      {top: 0, height: 20, lines: [{y: 0, height: 20, len: 3}]},
-      {top: 20, height: 20, lines: [{y: 0, height: 20, len}], breaks: shownPageBreaks(only)},
-      {top: 40, height: 20, lines: [{y: 0, height: 20, len: 5}]},
-    ];
-    expect(findBreak(boxes, 0, 1000)).toEqual({kind: 'at', index: 2, top: 40});
+    expect(toShown(brk, 5)).toBe(5);
+    expect(fromShown(brk, 5)).toBe(5);
   });
 
   it('typed text beside one is plain text, and a split keeps the new page for the first half only', () => {

@@ -8,15 +8,7 @@
 /** A laid-out line: top and height (relative to its block), and how many characters it holds. */
 export type LineBox = {y: number; height: number; len?: number};
 /** A block's frame in column coordinates; `lines` (relative to the block) for text blocks. */
-export type BlockBox = {
-  top: number;
-  height: number;
-  lines?: LineBox[];
-  /** Starts on a new page (the paragraph's own page break). */
-  forced?: boolean;
-  /** Character positions (in its TextView) of Word page breaks inside it. */
-  breaks?: number[];
-};
+export type BlockBox = {top: number; height: number; lines?: LineBox[]; forced?: boolean};
 
 /** Page top: a block index into the document and a y offset inside that block. */
 export type Anchor = {block: number; offset: number};
@@ -29,14 +21,11 @@ export type Break =
 /**
  * Where the next page starts. `boxes[i]` is window block i (window block 0 is the anchor
  * block, top 0). A block taller than the page with no line boxes is cut at the page bottom.
- * A Word page break inside a block (`breaks`) ends the page after its line.
  */
 export function findBreak(boxes: Array<BlockBox | undefined>, pageTop: number, pageHeight: number): Break {
   const bottom = pageTop + pageHeight;
   let lastBottom = pageTop;
   let contentAbove = false;
-  // A page break at the end of the block before: this block starts a new page.
-  let forceNext = false;
   for (let i = 0; i < boxes.length; i++) {
     const box = boxes[i];
     if (!box) {
@@ -45,60 +34,30 @@ export function findBreak(boxes: Array<BlockBox | undefined>, pageTop: number, p
     // A page break before this block ends the page here — but only when something is
     // already on this page; at the top of a page (below its own marker) it is where the
     // page begins.
-    if ((box.forced || forceNext) && contentAbove && box.top > pageTop) {
+    if (box.forced && contentAbove && box.top > pageTop) {
       return {kind: 'at', index: i, top: box.top};
     }
-    forceNext = false;
     if (box.top + box.height > pageTop) {
       contentAbove = true;
     }
-    const breakLines = box.lines && box.breaks?.length ? linesEndingPages(box.lines, box.breaks) : null;
-    const fits = box.top + box.height <= bottom;
-    if (fits && !breakLines) {
+    if (box.top + box.height <= bottom) {
       lastBottom = Math.max(lastBottom, box.top + box.height);
       continue;
     }
     if (box.lines && box.lines.length > 0) {
-      for (let j = 0; j < box.lines.length; j++) {
-        const line = box.lines[j];
+      for (const line of box.lines) {
         const lineTop = box.top + line.y;
         if (lineTop + line.height > bottom) {
           return {kind: 'at', index: i, top: lineTop > pageTop ? lineTop : bottom};
         }
-        if (breakLines?.has(j) && lineTop + line.height > pageTop) {
-          const next = box.lines[j + 1];
-          if (next) {
-            if (box.top + next.y > pageTop) {
-              return {kind: 'at', index: i, top: box.top + next.y};
-            }
-          } else {
-            forceNext = true;
-          }
-        }
       }
-      // All lines fit; only trailing space may overflow. Start at the next block.
-      lastBottom = fits ? Math.max(lastBottom, box.top + box.height) : bottom;
+      // All lines fit; only trailing space overflows. Start at the next block.
+      lastBottom = bottom;
       continue;
     }
     return {kind: 'at', index: i, top: box.top > pageTop ? box.top : bottom};
   }
   return {kind: 'after', top: lastBottom};
-}
-
-/** Which lines end with a Word page break: `breaks` are character positions in the block's text (line lengths add up to it). */
-function linesEndingPages(lines: LineBox[], breaks: number[]): Set<number> {
-  const out = new Set<number>();
-  let start = 0;
-  for (let j = 0; j < lines.length; j++) {
-    const len = lines[j].len ?? 0;
-    for (const c of breaks) {
-      if (c >= start && (c < start + len || j === lines.length - 1)) {
-        out.add(j);
-      }
-    }
-    start += len;
-  }
-  return out;
 }
 
 /** The anchor for the page after a break, given the current anchor and window. */
