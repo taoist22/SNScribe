@@ -8,6 +8,15 @@ files that open cleanly in Word, Office 365 and LibreOffice. It is built for
 students and writers: paper formats, citations from Zotero, quotes from your PDFs and EPUBs,
 comments and tracked changes, handwritten margin notes and spell checking.
 
+> **A drafting tool, not a finishing tool.** SNScribe is for writing, revising and formatting.
+> Everything you set is saved as Word's own settings (fonts, styles, spacing, margins,
+> headers, page numbers, the page breaks you insert), and every save is checked against what
+> the screen shows. But SNScribe's pages are **screen pages**, not paper pages: Word decides
+> where its own pages and lines end, so page count and line breaks will differ. Some things
+> are also drawn only approximately on screen (hanging indents, raised superscript, colored
+> highlights, tables and images) while being saved correctly. **Before you submit or print,
+> open the document in Word, Office 365 or LibreOffice and check it there.**
+
 Not affiliated with Microsoft. Word is a trademark of Microsoft Corporation.
 
 <p align="center"><img src="docs/screenshot.png" alt="SNScribe on a Supernote Manta: a paper with headings, formatting, highlights, lists, a block quote and a reference list; the margin panel shows a comment, tracked-change cards with accept and reject, and a handwritten note." width="600"></p>
