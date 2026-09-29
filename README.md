@@ -94,9 +94,10 @@ Georgia → **Gelasio**. Copy them (all four styles) into `MyStyle/Fonts`. The f
 3. Tap where the citation goes, search your library, choose **Parenthetical** or **Narrative**,
    add a page if you like, and **Insert**.
 
-**Choosing the style:** the buttons at the top of **Edit → Cite from Zotero…** (APA 7, MLA 9,
-Chicago author-date, Chicago notes) set the style. SNScribe remembers it, and **Insert quote**,
-figure labels and table labels use it too.
+**Choosing the style:** **Citation style** buttons (APA 7, MLA 9, Chicago author-date, Chicago
+notes) are at the top of **Edit → Cite from Zotero…** — also before Zotero is connected — and in
+**Insert quote**, **Insert picture** and **Insert table**. It is one setting: SNScribe remembers it,
+and citations, quotes and figure and table labels all follow it.
 
 The citation goes into the sentence and the source into the **References** list (created on a
 new page at the end the first time; *Works Cited* for MLA), in alphabetical order, formatted by

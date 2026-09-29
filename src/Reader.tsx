@@ -897,6 +897,8 @@ export function Reader(): React.JSX.Element {
         // None set.
       }
     })();
+    // Per document: only a different file loads another target.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doc?.path]);
 
   const saveTarget = (text: string) => {
@@ -2195,9 +2197,9 @@ export function Reader(): React.JSX.Element {
   };
 
   /** A source's citation in the current style: from Zotero, or formatted from its details. */
-  const resolveSource = async (ref: SourceRef): Promise<Source> => {
+  const resolveSource = async (ref: SourceRef, style: CiteStyle = citeStyle): Promise<Source> => {
     if (ref.kind === 'details') {
-      return formatSource(ref.details, citeStyle);
+      return formatSource(ref.details, style);
     }
     if (!zotero) {
       throw new Error('Connect Zotero first (Edit → Cite from Zotero…).');
@@ -2205,8 +2207,55 @@ export function Reader(): React.JSX.Element {
     if (!(await ensureInternetPermission())) {
       throw new Error('SNScribe needs permission to use the internet to reach Zotero.');
     }
-    return zoteroItem(zotero, ref.key, CITE_STYLES.find(x => x.id === citeStyle)!.csl);
+    return zoteroItem(zotero, ref.key, CITE_STYLES.find(x => x.id === style)!.csl);
   };
+
+  /**
+   * The citation style, chosen in any panel that uses it: Cite from Zotero (also before
+   * Zotero is connected), Insert quote, Insert picture and Insert table. Without Zotero it
+   * could not be changed at all, so quotes and labels stayed APA.
+   */
+  const chooseStyle = (id: CiteStyle) => {
+    if (id === citeStyle) {
+      return;
+    }
+    setCiteStyle(id);
+    setCite(c => ({...c, chosen: null}));
+    if (cite.results && zotero) {
+      searchCite(id);
+    }
+    // A quote being previewed is cited again in the new style.
+    const quote = qp.chosen;
+    const ref = quote ? qp.sources[quote.path] : undefined;
+    if (quote && ref && qp.mode === 'preview') {
+      setQp(q => ({...q, busy: true, message: 'Getting the citation…'}));
+      resolveSource(ref, id)
+        .then(source => setQp(q => ({...q, source, busy: false, message: ''})))
+        .catch(error => setQp(q => ({...q, busy: false, message: errorText(error)})));
+    }
+  };
+
+  const styleChooser = (note?: string) => (
+    <View>
+      <Text allowFontScaling={false} style={styles.paraLabel}>
+        {'Citation style'}
+      </Text>
+      <View style={styles.chips}>
+        {CITE_STYLES.map(st => (
+          <Pressable key={st.id} onPress={once(`style:${st.id}`, () => chooseStyle(st.id))} style={[styles.chip, citeStyle === st.id ? styles.chipOn : null]}>
+            <Text allowFontScaling={false} style={[styles.chipText, citeStyle === st.id ? styles.chipTextOn : null]}>
+              {st.name}
+            </Text>
+          </Pressable>
+        ))}
+      </View>
+      {note ? (
+        <Text allowFontScaling={false} style={styles.presetSummary}>
+          {note}
+        </Text>
+      ) : null}
+    </View>
+  );
 
   const chooseQuote = async (quote: SavedQuote) => {
     const ref = qp.sources[quote.path];
@@ -4147,6 +4196,7 @@ export function Reader(): React.JSX.Element {
         if (cite.setup) {
           return (
             <View style={styles.nameForm}>
+              {styleChooser('Also used by Insert quote and by figure and table labels, with or without Zotero.')}
               <Text allowFontScaling={false} style={styles.paraLabel}>
                 {'Connect your Zotero library'}
               </Text>
@@ -4188,17 +4238,7 @@ export function Reader(): React.JSX.Element {
         const chosen = cite.chosen;
         return (
           <View style={styles.nameForm}>
-            <View style={styles.chips}>
-              {CITE_STYLES.map(st =>
-                chip(st.name, citeStyle === st.id, () => {
-                  setCiteStyle(st.id);
-                  setCite(c => ({...c, chosen: null}));
-                  if (cite.results) {
-                    searchCite(st.id);
-                  }
-                }),
-              )}
-            </View>
+            {styleChooser()}
             <View style={styles.row}>
               <TextInput
                 style={styles.nameInput}
@@ -4308,6 +4348,7 @@ export function Reader(): React.JSX.Element {
         if (qp.mode === 'list' || !q) {
           return (
             <View style={styles.nameForm}>
+              {styleChooser()}
               {msg}
               {qp.quotes.map(x => (
                 <Pressable key={x.id} onPress={once(`quote:${x.id}`, () => chooseQuote(x))} style={styles.menuItem}>
@@ -4422,6 +4463,7 @@ export function Reader(): React.JSX.Element {
         return (
           <View style={styles.nameForm}>
             {head}
+            {styleChooser()}
             <View style={[styles.row, styles.presetName]}>
               <Text allowFontScaling={false} style={styles.menuText}>
                 {'Page'}
@@ -4978,6 +5020,7 @@ export function Reader(): React.JSX.Element {
             </View>
             {tbl.label ? (
               <>
+                {styleChooser()}
                 <TextInput
                   style={styles.nameInput}
                   value={tbl.title}
@@ -4986,7 +5029,7 @@ export function Reader(): React.JSX.Element {
                   allowFontScaling={false}
                 />
                 <Text allowFontScaling={false} style={styles.presetSummary}>
-                  {`${labelHelp} Numbered in order. The format follows the style chosen in Cite from Zotero (now ${CITE_STYLES.find(x => x.id === citeStyle)?.name ?? ''}).`}
+                  {`${labelHelp} Numbered in order.`}
                 </Text>
               </>
             ) : null}
@@ -5040,6 +5083,7 @@ export function Reader(): React.JSX.Element {
             </Pressable>
             {pic.label ? (
               <>
+                {styleChooser()}
                 <TextInput
                   style={styles.nameInput}
                   value={pic.title}
@@ -5048,7 +5092,7 @@ export function Reader(): React.JSX.Element {
                   allowFontScaling={false}
                 />
                 <Text allowFontScaling={false} style={styles.presetSummary}>
-                  {`${labelHelp} Numbered in order. The format follows the style chosen in Cite from Zotero (now ${CITE_STYLES.find(x => x.id === citeStyle)?.name ?? ''}).`}
+                  {`${labelHelp} Numbered in order.`}
                 </Text>
               </>
             ) : null}
