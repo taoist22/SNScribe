@@ -21,6 +21,8 @@ type DocxModule = {
   store(name: string, json: string): Promise<string | null>;
   load(name: string): Promise<string | null>;
   forget(name: string): Promise<boolean>;
+  /** A private copy of `source` kept under `name` (a recovery record's base); resolves its path. Missing before native build 21. */
+  keepBase?(source: string, name: string): Promise<string>;
   /** "size:modified" of a file, or null when it is not there. */
   fileStamp(path: string): Promise<string | null>;
   /** A private copy of the document as opened; edits apply to it. */
@@ -42,6 +44,8 @@ type DocxModule = {
     dest: string,
     /** Every paragraph's text as the screen shows it after the edits; the save is refused on any mismatch. */
     expected: string[],
+    /** The document's key (recovery/backups): a save that fails while writing keeps its checked file there. */
+    key: string,
   ): Promise<{dest: string; name: string; ms: number; changed: string[]}>;
   /** The misspelled ones among `words` ([] loads the dictionary). */
   spellCheck(lang: string, words: string[]): Promise<string[]>;

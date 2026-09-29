@@ -1,5 +1,6 @@
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
+  AppState,
   DeviceEventEmitter,
   Image,
   Keyboard,
@@ -63,7 +64,7 @@ import {
 } from './domain/edits';
 import {listKind, recount} from './domain/lists';
 import {PAPER_FORMATS, presetOps} from './domain/presets';
-import {docKey, parseRecovery, recoveryFor, touchRecent, type RecentDoc, type RecoveryRecord} from './domain/recovery';
+import {docKey, journalFor, parseRecovery, touchRecent, type RecentDoc, type RecoveryRecord} from './domain/recovery';
 import {DocxInk, InkSurfaceView, activateInk, deactivateInk, isInkAvailable} from './services/ink';
 import {shownFont, withStandIns} from './domain/fonts';
 import {CITE_STYLES, htmlToPieces, inText, isNoteStyle, notePieces, piecesText, referenceOps, shortTitle, type CiteStyle, type Source} from './domain/citations';
@@ -442,8 +443,14 @@ export function Reader(): React.JSX.Element {
     return ops;
   }, [typing, input, script]);
   // List numbers are recounted after every edit, as Word does.
-  // List numbers are recounted and footnotes numbered after every edit, as Word does.
-  const blocks = useMemo(() => numberNotes(recount(applyOps(committed, pending), doc?.lists ?? {})), [committed, pending, doc]);
+  // List numbers are recounted and footnotes numbered after every edit, as Word does. The
+  // committed text is numbered once per edit (the page counter measures exactly this, and
+  // unchanged paragraphs keep their identity while typing); typing is numbered on top.
+  const shownCommitted = useMemo(() => numberNotes(recount(committed, doc?.lists ?? {})), [committed, doc]);
+  const blocks = useMemo(
+    () => (pending.length > 0 ? numberNotes(recount(applyOps(shownCommitted, pending), doc?.lists ?? {})) : shownCommitted),
+    [shownCommitted, pending, doc],
+  );
   /** Where the caret is drawn: after the typed text while typing. */
   const caretAt: Pos | null = typing
     ? {para: typedRange(typing).para, offset: typedRange(typing).start + clean(input).length}
@@ -863,12 +870,12 @@ export function Reader(): React.JSX.Element {
       const prev = pageMapNow.current;
       let seed: PageStart[] | undefined;
       if (prev && prev.done && prev.layout === layoutKey) {
-        const d = firstDifference(prev.blocks, committed);
+        const d = firstDifference(prev.blocks, shownCommitted);
         if (d > 0) {
           seed = prev.pages.slice(0, pageIndexOf(prev.pages, {block: d, offset: 0}) + 1);
         }
       }
-      setCounting({key: mapKey, layout: layoutKey, blocks: committed, seed});
+      setCounting({key: mapKey, layout: layoutKey, blocks: shownCommitted, seed});
     }, 1500);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1029,9 +1036,22 @@ export function Reader(): React.JSX.Element {
   const lastParagraph = (): ParagraphBlock | undefined =>
     [...blocks].reverse().find((b): b is ParagraphBlock => b.type === 'p');
 
+  /**
+   * Page edits (New page after, Select page, Remove page break) use positions from the page
+   * count: only a count of the text as it is now (audit 2026-09-28 — an older count, kept on
+   * screen while recounting, could point at the wrong place after an edit).
+   */
+  const pagesCurrent = (): boolean => {
+    if (map && map.key === mapKey && map.done) {
+      return true;
+    }
+    setStatus('Pages are being recounted after your last edit. Try again in a moment.');
+    return false;
+  };
+
   /** A blank page after page i: an empty paragraph that starts a new page, and what followed starts another. */
   const newPageAfter = (i: number) => {
-    if (!map) {
+    if (!map || !pagesCurrent()) {
       return;
     }
     flushTyping();
@@ -1114,6 +1134,9 @@ export function Reader(): React.JSX.Element {
   };
 
   const removePageBreak = (i: number) => {
+    if (!pagesCurrent()) {
+      return;
+    }
     const ops = pageBreakAt(i);
     if (!ops) {
       return;
@@ -1125,6 +1148,9 @@ export function Reader(): React.JSX.Element {
 
   /** Selects exactly the text on page i, to see it before deleting it. */
   const selectPage = (i: number) => {
+    if (!pagesCurrent()) {
+      return;
+    }
     if (!map) {
       return;
     }
@@ -1185,6 +1211,8 @@ export function Reader(): React.JSX.Element {
     if (pad) {
       setPad(null);
     }
+    // Unsaved edits are recorded now, not 0.8 s from now (the panel may never come back).
+    journalNow.current();
     // The pen engine must never outlive its pad (PluginHost wedges).
     deactivateInk().finally(() => PluginManager.closePluginView());
   };
@@ -1338,7 +1366,13 @@ export function Reader(): React.JSX.Element {
     setCellEdit({
       ...at,
       text: c.p.map(x => x.t).join(''),
-      note: c.m ? 'This cell is merged with the one above it: edit that one.' : c.n ? 'This cell holds a table of its own, which SNScribe can’t edit.' : '',
+      note: c.m
+        ? 'This cell is merged with the one above it: edit that one.'
+        : c.n
+        ? 'This cell holds a table of its own, which SNScribe can’t edit.'
+        : c.r
+        ? 'This cell has links, pictures, fields or mixed formatting that retyping it here would lose. Edit it in Word; rows and width can still be changed here.'
+        : '',
     });
     setMenuX(Math.max(0, pageW - MENU_W));
     setMenu('cell');
@@ -1346,7 +1380,7 @@ export function Reader(): React.JSX.Element {
 
   const saveCell = () => {
     const c = tableBlock(cellEdit.table)?.grid?.[cellEdit.row]?.[cellEdit.cell];
-    if (!c || c.m || c.n) {
+    if (!c || c.m || c.n || c.r) {
       return;
     }
     setMenu(null);
@@ -1767,13 +1801,26 @@ export function Reader(): React.JSX.Element {
   // ---------------------------------------------------------------- edits
 
   /** One button press = one undo step, however many paragraphs it touches. */
+  /** The last step, when it was a single Backspace: where it left the caret (to join the next one to it). */
+  const lastBackspace = useRef<{cursor: number; para: number; at: number} | null>(null);
+
   const commit = (ops: Op[], label: string) => {
     if (ops.length === 0) {
+      return;
+    }
+    // Backspaces in a row become one undo step, as in Word (audit 2026-09-28: holding Backspace
+    // made one step, and one kept copy of the text, per character). Never across a save.
+    const one = label === 'backspace' && ops.length === 1 && ops[0].op === 'text' && ops[0].text === '' ? ops[0] : null;
+    const prev = lastBackspace.current;
+    if (one && prev && prev.cursor === edits.cursor && edits.cursor === edits.steps.length && saved.cursor !== edits.cursor && prev.para === one.para && prev.at === one.end) {
+      setEdits(({steps, cursor}) => ({steps: [...steps.slice(0, cursor - 1), [...steps[cursor - 1], ...ops]], cursor}));
+      lastBackspace.current = {cursor: edits.cursor, para: one.para, at: one.start};
       return;
     }
     setEdits(({steps, cursor}) => ({steps: [...steps.slice(0, cursor), ops], cursor: cursor + 1}));
     // An undone save point can no longer be reached by redo.
     setSaved(sv => (sv.cursor > edits.cursor ? {...sv, cursor: -1} : sv));
+    lastBackspace.current = one ? {cursor: edits.cursor + 1, para: one.para, at: one.start} : null;
     log(`${label}: ${JSON.stringify(ops)}`);
   };
 
@@ -3414,7 +3461,7 @@ export function Reader(): React.JSX.Element {
       const onDisk = await Docx.fileStamp(doc.saveTo);
       if (onDisk !== diskStamp) {
         const copy = await Docx.copyName(doc.saveTo);
-        const res = await Docx.save(doc.source, ops, copy, expectedTexts(doc.blocks, ops));
+        const res = await Docx.save(doc.source, ops, copy, expectedTexts(doc.blocks, ops), docKey(doc.saveTo ?? doc.path));
         setStatus(`The document changed outside SNScribe since it was opened, so it was not overwritten. Your version was saved as ${res.name}.`);
         log(`save conflict: ${doc.saveTo} was ${diskStamp}, now ${onDisk}; saved ${res.dest}`);
         return;
@@ -3422,7 +3469,7 @@ export function Reader(): React.JSX.Element {
       if (!isNew || saved.dest) {
         await Docx.backup(doc.saveTo, docKey(doc.saveTo));
       }
-      const res = await Docx.save(doc.source, ops, doc.saveTo, expectedTexts(doc.blocks, ops));
+      const res = await Docx.save(doc.source, ops, doc.saveTo, expectedTexts(doc.blocks, ops), docKey(doc.saveTo ?? doc.path));
       setDiskStamp(await Docx.fileStamp(doc.saveTo));
       setSaved({cursor, dest: res.dest});
       setDiscardArmed(false);
@@ -3447,7 +3494,7 @@ export function Reader(): React.JSX.Element {
         setStatus('Saving needs file write permission.');
         return;
       }
-      const res = await Docx.save(doc.source, ops, await Docx.copyName(doc.saveTo), expectedTexts(doc.blocks, ops));
+      const res = await Docx.save(doc.source, ops, await Docx.copyName(doc.saveTo), expectedTexts(doc.blocks, ops), docKey(doc.saveTo ?? doc.path));
       setStatus(`Saved a copy as ${res.name}. The document itself is unchanged.`);
     } catch (error) {
       setStatus(`Copy not saved: ${errorText(error)}`);
@@ -3458,31 +3505,89 @@ export function Reader(): React.JSX.Element {
 
   // ---------------------------------------------------------------- recovery, versions, recent
 
-  // Unsaved edits are recorded a moment after each change; nothing is kept once saved.
-  useEffect(() => {
-    if (!doc?.saveTo || !Docx) {
+  // Unsaved edits are recorded a moment after each change (and at least every few seconds
+  // while typing goes on, and when SNScribe closes); nothing is kept once saved. While the
+  // Restore question is showing, the journal on disk is left alone: it is what Restore reads
+  // (audit 2026-09-28: it used to be deleted 0.8 s after the question appeared).
+  const journalNow = useRef<() => Promise<void>>(async () => {});
+  const lastJournal = useRef(0);
+  /** The private copy of the opened document a whole-history record replays onto (made once, when needed). */
+  const journalBase = useRef<{source: string; path: string} | null>(null);
+  journalNow.current = async () => {
+    if (!doc?.saveTo || !Docx || recovery) {
       return;
     }
     const key = `recovery-${docKey(doc.saveTo)}`;
-    const t = setTimeout(() => {
-      const rec = recoveryFor(doc.saveTo!, diskStamp, edits.steps, edits.cursor, saved.cursor, pending);
-      if (rec) {
-        Docx?.store(key, JSON.stringify(rec));
-      } else {
-        Docx?.forget(key);
+    const base = journalBase.current && journalBase.current.source === doc.source ? journalBase.current.path : null;
+    let j = journalFor(doc.saveTo, diskStamp, edits.steps, edits.cursor, saved.cursor, pending, base);
+    if (!j) {
+      return;
+    }
+    lastJournal.current = Date.now();
+    if (j.kind === 'needsBase') {
+      if (!Docx.keepBase || !doc.source) {
+        return; // an older native part: keep whatever is recorded
       }
-    }, 800);
+      try {
+        const path = await Docx.keepBase(doc.source, key);
+        journalBase.current = {source: doc.source, path};
+        j = journalFor(doc.saveTo, diskStamp, edits.steps, edits.cursor, saved.cursor, pending, path);
+      } catch (error) {
+        log(`recovery copy failed: ${errorText(error)}`);
+        return;
+      }
+    }
+    if (j?.kind === 'record') {
+      const refused = await Docx.store(key, JSON.stringify(j.record));
+      if (refused) {
+        log(`recovery not recorded: ${refused}`);
+      }
+    } else if (j?.kind === 'clean') {
+      journalBase.current = null;
+      await Docx.forget(key);
+    }
+  };
+  useEffect(() => {
+    if (!doc?.saveTo || !Docx || recovery) {
+      return;
+    }
+    // Trailing 0.8 s after the last change, but never more than 5 s behind while changes keep coming.
+    const wait = Date.now() - lastJournal.current > 5000 ? 0 : 800;
+    const t = setTimeout(() => journalNow.current(), wait);
     return () => clearTimeout(t);
-  }, [doc, edits, saved, pending, diskStamp]);
+  }, [doc, edits, saved, pending, diskStamp, recovery]);
 
-  const restoreRecovery = () => {
-    if (recovery) {
-      setEdits({steps: recovery.steps, cursor: recovery.steps.length});
+  // Leaving SNScribe (another app, the screen off): record at once.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', state => {
+      if (state !== 'active') {
+        journalNow.current();
+      }
+    });
+    return () => sub.remove();
+  }, []);
+
+  const restoreRecovery = async () => {
+    const rec = recovery;
+    setMenu(null);
+    if (rec && doc) {
+      if (rec.base) {
+        // Edits since opening: back onto the copy of the document as it was opened.
+        try {
+          const loaded = await Docx!.open(rec.base);
+          const source = await Docx!.snapshot(rec.base, docKey(doc.saveTo ?? doc.path));
+          setDoc({...loaded, path: doc.path, name: doc.name, source, saveTo: doc.saveTo});
+        } catch (error) {
+          setStatus(`Could not restore: ${errorText(error)}`);
+          setRecovery(null);
+          return;
+        }
+      }
+      setEdits({steps: rec.steps, cursor: rec.steps.length});
       setSaved({cursor: 0, dest: null});
       setStatus('Unsaved changes restored. Save to keep them.');
     }
     setRecovery(null);
-    setMenu(null);
   };
 
   const discardRecovery = () => {
@@ -4931,7 +5036,7 @@ export function Reader(): React.JSX.Element {
       case 'cell': {
         const t = tableBlock(cellEdit.table);
         const c = t?.grid?.[cellEdit.row]?.[cellEdit.cell];
-        const locked = !c || !!c.m || !!c.n;
+        const locked = !c || !!c.m || !!c.n || !!c.r;
         return (
           <View style={styles.nameForm}>
             <Text allowFontScaling={false} style={styles.menuText}>

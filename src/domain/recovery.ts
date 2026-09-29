@@ -14,29 +14,53 @@ export function docKey(path: string): string {
 }
 
 /**
- * Unsaved edits of one document: the steps made since the file on disk was last written
- * (by DOCX or anything else), and that file's fingerprint. Restoring is only offered when
- * the file still has that fingerprint — the steps apply to exactly that content.
+ * Unsaved edits of one document, and the fingerprint of the file on disk when they were
+ * recorded. Restoring is only offered when the file still has that fingerprint.
+ *
+ * Usually `steps` are the edits since the file was last written, replayed onto the file.
+ * After undoing past the last save and editing on, nothing on disk matches any step: then
+ * `base` names a private copy of the document as it was opened, and `steps` are every edit
+ * since (the editor's own history starts there).
  */
-export type RecoveryRecord = {path: string; stamp: string; time: number; steps: Op[][]};
+export type RecoveryRecord = {path: string; stamp: string; time: number; steps: Op[][]; base?: string};
 
-export function recoveryFor(
+/** What the journal should hold now: a record, nothing ('clean': all saved), or the base copy still to be made. */
+export type Journal = {kind: 'clean'} | {kind: 'record'; record: RecoveryRecord} | {kind: 'needsBase'; steps: Op[][]};
+
+export function journalFor(
   path: string,
   stamp: string | null,
   steps: Op[][],
   cursor: number,
   savedCursor: number,
   pending: Op[],
-): RecoveryRecord | null {
-  // Undoing past the last save and editing on leaves nothing on disk to replay onto.
-  if (!stamp || savedCursor < 0 || savedCursor > cursor) {
-    return null;
+  base: string | null,
+): Journal | null {
+  if (!stamp) {
+    return null; // nothing to fingerprint against: leave the journal as it is
   }
-  const since = steps.slice(savedCursor, cursor);
+  if (cursor === savedCursor && pending.length === 0) {
+    return {kind: 'clean'};
+  }
+  if (savedCursor >= 0 && savedCursor <= cursor) {
+    const since = steps.slice(savedCursor, cursor);
+    if (pending.length > 0) {
+      since.push(pending);
+    }
+    return {kind: 'record', record: {path, stamp, time: Date.now(), steps: since}};
+  }
+  // Undone past the last save and edited on: every step since opening, on the opened copy.
+  const all = steps.slice(0, cursor);
   if (pending.length > 0) {
-    since.push(pending);
+    all.push(pending);
   }
-  return since.length > 0 ? {path, stamp, time: Date.now(), steps: since} : null;
+  return base ? {kind: 'record', record: {path, stamp, time: Date.now(), steps: all, base}} : {kind: 'needsBase', steps: all};
+}
+
+/** The record for the common case (edits since the last save), or null. Kept for tests and callers that need only that. */
+export function recoveryFor(path: string, stamp: string | null, steps: Op[][], cursor: number, savedCursor: number, pending: Op[]): RecoveryRecord | null {
+  const j = journalFor(path, stamp, steps, cursor, savedCursor, pending, null);
+  return j?.kind === 'record' ? j.record : null;
 }
 
 export function parseRecovery(json: string | null, path: string, stamp: string | null): RecoveryRecord | null {

@@ -232,8 +232,11 @@ object DocxEditor {
     /**
      * Writes [src] with [ops] applied to [dest]. The package is built and verified in
      * [workDir] (private storage, where a failed attempt can be deleted) and only then
-     * written to [dest], so [dest] never holds an unverified file. Throws with the reason
-     * when anything fails; [dest] is then untouched.
+     * copied to [dest], so [dest] never receives an unverified file. Throws with the reason
+     * when anything fails. A failure before the final copy leaves [dest] untouched; the copy
+     * itself is not all-or-nothing (a plugin can't rename over the user's file), so it is read
+     * back and compared, and if it fails the verified file is handed to [keepFailed] (kept
+     * as a previous version) — the file saved before this one is a previous version already.
      */
     /**
      * The package being edited: parts parsed on first use, parts changed in place, parts
@@ -333,7 +336,7 @@ object DocxEditor {
         }
     }
 
-    fun save(src: File, ops: List<Op>, dest: File, workDir: File, expected: List<String> = emptyList()): Saved {
+    fun save(src: File, ops: List<Op>, dest: File, workDir: File, expected: List<String> = emptyList(), keepFailed: ((File) -> File?)? = null): Saved {
         require(src.length() <= DocxReader.MAX_DOCX_BYTES) { "too large: ${src.length()} bytes" }
         val effects = ArrayList<Op>()
         val notes = ArrayList<String>()
@@ -380,7 +383,18 @@ object DocxEditor {
                 removedNames = pkg.removed.toSet()
             }
             verify(src, temp, changed, effects, expected, addedNames, removedNames)
-            copy(temp, dest)
+            try {
+                copy(temp, dest)
+                check(dest.length() == temp.length() && crc(dest) == crc(temp)) { "the file written does not match the checked one" }
+            } catch (t: Throwable) {
+                val kept = runCatching { keepFailed?.invoke(temp) }.getOrNull()
+                throw IllegalStateException(
+                    "Saving stopped while writing ${dest.name} (${t.message}). " +
+                        (if (kept != null) "A checked copy of this save was kept: File ▸ Previous versions. " else "") +
+                        "The version saved before it is in File ▸ Previous versions too.",
+                    t,
+                )
+            }
             return Saved(dest, changed, notes)
         } finally {
             temp.delete()
@@ -1247,6 +1261,7 @@ object DocxEditor {
                 val tr = checkNotNull(rows.getOrNull(op.row)) { "table $index has no row ${op.row}" }
                 val tc = checkNotNull(elementChildren(tr).filter { it.localName == "tc" }.getOrNull(op.cell)) { "row ${op.row} has no cell ${op.cell}" }
                 check(elementChildren(tc).none { it.localName == "tbl" }) { "that cell holds a table of its own" }
+                check(!DocxReader.richCell(tc)) { "that cell holds links, pictures, fields or formatting SNScribe can't keep; edit it in Word" }
                 setCell(document, tc, op.pieces)
                 notes.add("table $index cell ${op.row},${op.cell}")
             }
@@ -1314,10 +1329,15 @@ object DocxEditor {
                 if (piece.bold) insertInOrder(rPr, document.createElementNS(W, "w:b"), RPR_ORDER)
                 if (piece.italic) insertInOrder(rPr, document.createElementNS(W, "w:i"), RPR_ORDER)
                 if (rPr.hasChildNodes()) r.appendChild(rPr)
-                val t = document.createElementNS(W, "w:t")
-                t.setAttributeNS(XMLConstants.XML_NS_URI, "xml:space", "preserve")
-                t.textContent = piece.text
-                r.appendChild(t)
+                piece.text.split('\t').forEachIndexed { i, part ->
+                    if (i > 0) r.appendChild(document.createElementNS(W, "w:tab"))
+                    if (part.isNotEmpty()) {
+                        val t = document.createElementNS(W, "w:t")
+                        t.setAttributeNS(XMLConstants.XML_NS_URI, "xml:space", "preserve")
+                        t.textContent = part
+                        r.appendChild(t)
+                    }
+                }
                 p.appendChild(r)
             }
             tc.appendChild(p)
@@ -2359,6 +2379,19 @@ object DocxEditor {
     }
 
     /** Plain write over [dest]: creating and overwriting are allowed for plugins; deleting is not. */
+    private fun crc(f: File): Long {
+        val c = java.util.zip.CRC32()
+        f.inputStream().use { input ->
+            val buf = ByteArray(64 * 1024)
+            while (true) {
+                val n = input.read(buf)
+                if (n < 0) break
+                c.update(buf, 0, n)
+            }
+        }
+        return c.value
+    }
+
     private fun copy(from: File, dest: File) {
         from.inputStream().use { input -> FileOutputStream(dest).use { input.copyTo(it) } }
     }

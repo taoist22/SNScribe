@@ -305,7 +305,11 @@ object DocxReader {
                     if (ext in RASTER && entry != null && entry.size in 1..20_000_000) {
                         checkEntryName(part)
                         dir.mkdirs()
-                        val dest = File(dir, part.substringAfterLast('/').replace(Regex("[^A-Za-z0-9_.-]"), "_"))
+                        // Named by content (the entry's CRC): a picture replaced by another of the same
+                        // size is extracted again and gets a new address, so the screen never shows
+                        // the old one (audit 2026-09-28: sizes alone were compared).
+                        val crc = java.lang.Long.toHexString(entry.crc)
+                        val dest = File(dir, crc + "-" + part.substringAfterLast('/').replace(Regex("[^A-Za-z0-9_.-]"), "_"))
                         if (!dest.exists() || dest.length() != entry.size) dest.writeBytes(readEntry(zip, entry))
                         out[n.getAttribute("Id")] = dest.path
                     }
@@ -493,7 +497,39 @@ object DocxReader {
     ) : Block()
 
     /** A table cell: how many grid columns it spans, whether it continues a merge from above (shown empty), its text. */
-    data class Cell(val span: Int, val merged: Boolean, val pieces: List<NotePiece>, val nested: Boolean = false)
+    data class Cell(val span: Int, val merged: Boolean, val pieces: List<NotePiece>, val nested: Boolean = false, val rich: Boolean = false)
+
+    /**
+     * Whether retyping [tc] would lose something: SNScribe rewrites an edited cell as plain
+     * runs (bold/italic kept) in its first paragraph's settings, with its first run's look.
+     * Anything else — links, pictures, fields, bookmarks, comments, tracked changes, line
+     * breaks, a nested table, paragraphs set differently, runs formatted differently beyond
+     * bold/italic — makes the cell one SNScribe won't edit (audit 2026-09-28).
+     */
+    fun richCell(tc: Element): Boolean {
+        if (elementChildren(tc).any { it.localName != "tcPr" && it.localName != "p" }) return true
+        val paras = elementChildren(tc).filter { it.localName == "p" }
+        fun shape(e: Element?, skip: Set<String> = emptySet()): String = e?.let { el ->
+            elementChildren(el).filter { it.localName !in skip }.joinToString(";") { c ->
+                c.localName + "(" + (0 until c.attributes.length).map { c.attributes.item(it) }.joinToString(",") { "${it.nodeName}=${it.nodeValue}" } + ")"
+            }
+        } ?: ""
+        if (paras.map { shape(child(it, "pPr")) }.toSet().size > 1) return true
+        val looks = HashSet<String>()
+        for (p in paras) {
+            for (c in elementChildren(p)) {
+                when (c.localName) {
+                    "pPr", "proofErr" -> {}
+                    "r" -> {
+                        if (elementChildren(c).any { it.localName !in setOf("rPr", "t", "tab", "lastRenderedPageBreak") }) return true
+                        looks.add(shape(child(c, "rPr"), setOf("b", "bCs", "i", "iCs")))
+                    }
+                    else -> return true
+                }
+            }
+        }
+        return looks.size > 1
+    }
 
     /** A table's structure for the screen. */
     fun tableOf(tbl: Element, index: Int, textWidth: Int = 9360): Table {
@@ -505,7 +541,7 @@ object DocxReader {
                 val vMerge = tcPr?.let { child(it, "vMerge") }
                 val merged = vMerge != null && vMerge.getAttributeNS(W, "val").let { it.isEmpty() || it == "continue" }
                 val nested = elementChildren(tc).any { it.localName == "tbl" }
-                Cell(maxOf(1, span), merged, textPieces(elementChildren(tc).filter { it.localName == "p" }), nested)
+                Cell(maxOf(1, span), merged, textPieces(elementChildren(tc).filter { it.localName == "p" }), nested, !nested && richCell(tc))
             }
         }
         val widths = child(tbl, "tblGrid")?.let { g -> elementChildren(g).filter { it.localName == "gridCol" }.map { it.getAttributeNS(W, "w").toIntOrNull() ?: 0 } }.orEmpty()

@@ -68,4 +68,38 @@ class TablesTest {
         assertEquals(2, sh.rows)
         assertEquals("new", sh.grid[1][1].pieces.single().text)
     }
+
+    /** A cell with a link or picture is not rewritten (audit 2026-09-28: it lost them). */
+    @Test
+    fun richCellsAreNotEdited() {
+        val blank = File(work, "blank-rich.docx").also { DocxBlank.write(it) }
+        val made = save(blank, listOf(Op.TableInsert(0, 1, 2, header = false), Op.TableCell(0, 0, 1, listOf(NotePiece("plain")))), "table-rich-base")
+        // Put a hyperlink into cell 0 by hand.
+        val rich = File(work, "rich.docx")
+        java.util.zip.ZipOutputStream(rich.outputStream()).use { zo ->
+            java.util.zip.ZipFile(made).use { z ->
+                for (e in z.entries()) {
+                    var bytes = z.getInputStream(e).readBytes()
+                    if (e.name == "word/document.xml") {
+                        val xml = String(bytes)
+                        val i = xml.indexOf("</w:pPr></w:p></w:tc>")
+                        bytes = (xml.substring(0, i) + "</w:pPr><w:hyperlink w:anchor=\"x\"><w:r><w:t>link</w:t></w:r></w:hyperlink></w:p></w:tc>" + xml.substring(i + "</w:pPr></w:p></w:tc>".length)).toByteArray()
+                    }
+                    zo.putNextEntry(java.util.zip.ZipEntry(e.name))
+                    zo.write(bytes)
+                    zo.closeEntry()
+                }
+            }
+        }
+        val t = tables(rich).single()
+        assertTrue(t.grid[0][0].rich)
+        assertTrue(!t.grid[0][1].rich)
+        val refused = runCatching { save(rich, listOf(Op.TableCell(0, 0, 0, listOf(NotePiece("x")))), "table-rich-refused") }
+        assertTrue(refused.isFailure)
+        // A plain cell next to it still edits, with a tab kept as a tab.
+        val ok = save(rich, listOf(Op.TableCell(0, 0, 1, listOf(NotePiece("a\tb")))), "table-rich-ok")
+        val xml = java.util.zip.ZipFile(ok).use { z -> String(z.getInputStream(z.getEntry("word/document.xml")).readBytes()) }
+        assertTrue(xml.contains("<w:hyperlink"))
+        assertTrue(xml.contains("<w:tab/>"))
+    }
 }

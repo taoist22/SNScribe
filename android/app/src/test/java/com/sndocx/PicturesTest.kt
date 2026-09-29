@@ -106,4 +106,26 @@ class PicturesTest {
         val xml = ZipFile(fixed).use { z -> String(z.getInputStream(z.getEntry("word/document.xml")).readBytes()) }
         assertTrue(xml, xml.contains("<w:p><w:pPr><w:jc w:val=\"center\"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"))
     }
+
+    /** A picture replaced by another of the same size is extracted again (audit 2026-09-28). */
+    @Test
+    fun equalSizeReplacementIsExtractedAgain() {
+        fun docWith(bytes: ByteArray, name: String): File {
+            val f = File(work, name)
+            java.util.zip.ZipOutputStream(f.outputStream()).use { zo ->
+                zo.putNextEntry(java.util.zip.ZipEntry("word/_rels/document.xml.rels"))
+                zo.write("<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"media/image1.png\"/></Relationships>".toByteArray())
+                zo.closeEntry()
+                zo.putNextEntry(java.util.zip.ZipEntry("word/media/image1.png"))
+                zo.write(bytes)
+                zo.closeEntry()
+            }
+            return f
+        }
+        val dir = File(work, "pics-same")
+        val a = DocxReader.extractImages(docWith(ByteArray(64) { 1 }, "a.docx"), dir).getValue("rId1")
+        val b = DocxReader.extractImages(docWith(ByteArray(64) { 2 }, "b.docx"), dir).getValue("rId1")
+        assertTrue(a != b)
+        assertTrue(File(b).readBytes().all { it == 2.toByte() })
+    }
 }

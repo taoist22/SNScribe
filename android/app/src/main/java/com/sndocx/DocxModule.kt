@@ -33,7 +33,7 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
 
     companion object {
         /** Bumped with each native change; first log line, to spot stale installs. */
-        const val NATIVE_BUILD = 20
+        const val NATIVE_BUILD = 21
         private val EXPORT_DIR = File("/storage/emulated/0/EXPORT")
         private const val LOG_MAX_BYTES = 2L * 1024 * 1024
         private const val LOG_LINE_MAX = 4000
@@ -204,7 +204,7 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
      * {dest, name, ms, changed, notes}; rejects with the reason, leaving any file untouched.
      */
     @ReactMethod
-    fun save(srcPath: String, ops: ReadableArray, dest: String, expected: ReadableArray, promise: Promise) {
+    fun save(srcPath: String, ops: ReadableArray, dest: String, expected: ReadableArray, key: String, promise: Promise) {
         worker.execute {
             val t0 = System.currentTimeMillis()
             try {
@@ -212,7 +212,11 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
                 val parsed = parseOps(ops)
                 val target = if (dest.isEmpty()) DocxEditor.editedCopyName(src) else File(dest)
                 val expect = (0 until expected.size()).map { expected.getString(it) ?: "" }
-                val saved = DocxEditor.save(src, parsed, target, File(reactContext.cacheDir, "saving"), expect)
+                // A save that fails while writing keeps its checked file as the newest previous version.
+                val keep: ((File) -> File?)? = if (key.isEmpty()) null else { verified ->
+                    File(home("backups/" + safeName(key)), "${System.currentTimeMillis()}.docx").also { verified.copyTo(it, overwrite = true) }
+                }
+                val saved = DocxEditor.save(src, parsed, target, File(reactContext.cacheDir, "saving"), expect, keep)
                 val ms = System.currentTimeMillis() - t0
                 appendLog("save ${src.name} → ${target.path}: ${parsed.size} ops, ${saved.changedParts}, $ms ms")
                 saved.notes.forEach { appendLog("  $it") }
@@ -452,8 +456,45 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
     @ReactMethod
     fun store(name: String, json: String, promise: Promise) {
         worker.execute {
-            val r = runCatching { File(home("data"), safeName(name) + ".json").writeText(json) }
+            // All or nothing: written beside it, then renamed over it, so an interrupted write
+            // never leaves a half record where the last good one was (audit 2026-09-28).
+            val dest = File(home("data"), safeName(name) + ".json")
+            val temp = File(dest.parentFile, dest.name + ".tmp")
+            val r = runCatching {
+                temp.writeText(json)
+                if (!temp.renameTo(dest)) {
+                    dest.delete()
+                    check(temp.renameTo(dest)) { "could not replace ${dest.name}" }
+                }
+            }
+            if (r.isFailure) {
+                temp.delete()
+                appendLog("store $name FAILED: ${r.exceptionOrNull()}")
+            }
             promise.resolve(r.exceptionOrNull()?.toString())
+        }
+    }
+
+    /**
+     * Keeps a private copy of [source] (the document as it was opened) under [name], for a
+     * recovery record that replays every edit since opening. Resolves the copy's path.
+     */
+    @ReactMethod
+    fun keepBase(source: String, name: String, promise: Promise) {
+        worker.execute {
+            try {
+                val dest = File(home("recovery"), safeName(name) + ".docx")
+                val temp = File(dest.parentFile, dest.name + ".tmp")
+                File(source).inputStream().use { input -> FileOutputStream(temp).use { input.copyTo(it) } }
+                if (!temp.renameTo(dest)) {
+                    dest.delete()
+                    check(temp.renameTo(dest)) { "could not replace ${dest.name}" }
+                }
+                promise.resolve(dest.path)
+            } catch (t: Throwable) {
+                appendLog("keepBase FAILED $source: $t")
+                promise.reject("DOCX_BASE", t.message ?: t.toString(), t)
+            }
         }
     }
 
@@ -469,6 +510,8 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
     @ReactMethod
     fun forget(name: String, promise: Promise) {
         worker.execute {
+            // A recovery record's kept copy of the opened document goes with it.
+            runCatching { File(home("recovery"), safeName(name) + ".docx").delete() }
             promise.resolve(runCatching { File(home("data"), safeName(name) + ".json").delete() }.getOrDefault(false))
         }
     }
@@ -851,6 +894,7 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
                             if (c.span > 1) putInt("s", c.span)
                             if (c.merged) putBoolean("m", true)
                             if (c.nested) putBoolean("n", true)
+                            if (c.rich) putBoolean("r", true)
                             putArray("p", notePieces(c.pieces))
                         })
                     })
