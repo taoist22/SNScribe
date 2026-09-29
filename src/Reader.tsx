@@ -23,6 +23,7 @@ import {targetLabel, wordCounts} from './domain/wordcount';
 import {PICTURE_SIZES, figureOps, pictureAtWidth, tableOps} from './domain/figures';
 import {editPieces, noteText} from './domain/footnotes';
 import {TouchLayer} from './services/touch';
+import {NotePlacement, insertIntoNote, openNotePath} from './NotePlacement';
 import {INK_LINK, linkSegments, quoteLinkName, quoteOfLink, type LinkKind} from './domain/links';
 import {
   applyOps,
@@ -124,6 +125,7 @@ const INK_COLORS: Array<[string, string]> = [
   ['Purple', '#6A1B9A'],
 ];
 const START: Anchor = {block: 0, offset: 0};
+const PENDING: Break = {kind: 'pending'};
 /** Pen travel below this (dp) is a tap: it selects the word under the pen. */
 const TAP_SLOP = 12;
 /** A finger swipe this far (dp), mostly sideways, turns the page. */
@@ -172,6 +174,8 @@ export function Reader(): React.JSX.Element {
   /** Pages view: only the pages with comments, handwritten notes or tracked changes. */
   const [notesOnly, setNotesOnly] = useState(false);
   const [goToText, setGoToText] = useState('');
+  /** Add to note: the passage waiting to be placed in the note (null: not placing). */
+  const [placing, setPlacing] = useState<string | null>(null);
   /** The quote link (bookmark name) whose panel is open; the place in the text that was tapped to open a link. */
   const [quoteOpen, setQuoteOpen] = useState<string | null>(null);
   const [linkTap, setLinkTap] = useState<Pos | null>(null);
@@ -500,7 +504,8 @@ export function Reader(): React.JSX.Element {
     textFrames.current = [];
     tableRows.current = [];
   }
-  const brk: Break = measured?.key === pageKey ? measured.brk : {kind: 'pending'};
+  // One object per measurement (a fresh "pending" each render re-ran every effect that depends on it).
+  const brk: Break = useMemo(() => (measured?.key === pageKey ? measured.brk : PENDING), [measured, pageKey]);
   const atEnd = !doc || (brk.kind === 'after' && end >= blocks.length);
 
   /** A block is measured once it has a frame and, if it is a paragraph with text, its lines. */
@@ -3431,6 +3436,21 @@ export function Reader(): React.JSX.Element {
           .join('\n')
       : '';
 
+  /** Edit ▸ Add to note…: the selected passage into the note SNScribe was opened from. */
+  const startAddToNote = async () => {
+    const text = !typing && selection ? selectedText().trim() : '';
+    if (!text) {
+      setStatus('Select the passage to add to your note first.');
+      return;
+    }
+    if (!(await openNotePath())) {
+      setStatus('Add to note works when SNScribe is opened from a note (it was opened from a PDF or EPUB).');
+      return;
+    }
+    setSelection(null);
+    setPlacing(text);
+  };
+
   const copy = async (cut: boolean) => {
     if (typing || !selection) {
       nothingSelected();
@@ -5108,6 +5128,7 @@ export function Reader(): React.JSX.Element {
             {item('Insert picture…', startPicture)}
             {item('Footnote…', startFootnote)}
             {item('Insert table…', startTable)}
+            {item('Add to note…', startAddToNote)}
             {hasChanges ? item('Accept all changes', () => {
               setMenu(null);
               review(-1, '*', true);
@@ -5505,6 +5526,30 @@ export function Reader(): React.JSX.Element {
         return null;
     }
   };
+
+  if (placing !== null) {
+    // Add to note: SNScribe steps aside; the note shows through and takes the passage where tapped.
+    return (
+      <NotePlacement
+        onPlace={async point => {
+          const text = placing;
+          setPlacing(null);
+          try {
+            await insertIntoNote(text, point);
+            log(`add to note: ${text.length} chars at ${Math.round(point.x)},${Math.round(point.y)}`);
+            setStatus('Added to your note as a text box. Close SNScribe to see it; the lasso moves or resizes it.');
+          } catch (error) {
+            log(`add to note failed: ${errorText(error)}`);
+            setStatus(`Could not add it to the note: ${errorText(error)}`);
+          }
+        }}
+        onCancel={() => {
+          setPlacing(null);
+          setStatus('');
+        }}
+      />
+    );
+  }
 
   return (
     <View style={styles.root}>

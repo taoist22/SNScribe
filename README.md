@@ -66,7 +66,7 @@ documents) and **internet** (only for Zotero and DOI look-ups).
 | Toolbar | **B I U**, **HL ▾** (highlight: yellow, green, blue, pink, red, turquoise, none), Undo / Redo |
 | **Style ▾** | Body text, Heading 1–3, Quote, Title |
 | **Para ▾** | Alignment, line spacing, space before/after, first-line or hanging indent, page breaks |
-| **List ▾** | Numbered, bulleted (lists continue as you type) |
+| **List ▾** | 1. 2. 3. · a. b. c. · A. B. C. · i. ii. iii. · outline (I. A. 1. a. i.) · bullets; **Indent / Outdent** — in a list, **Tab** and **Shift+Tab** do the same (lists continue as you type) |
 | **Font ▾** | Strikethrough, superscript, subscript, font. With no text selected, Superscript/Subscript switch on for what you type next (type *H*, Subscript, *2*, Subscript, *O*) |
 | **Size ▾** | Text size |
 | **Edit ▾** | Cut, copy, paste, delete, **Find & replace**, **Spelling**, links, comments, citations, quotes, handwritten notes, **footnotes**, **pictures**, **tables**, accept/reject all changes |
@@ -140,7 +140,18 @@ instead. The source joins the reference list. The files don't need to be in Zote
   A cell with links, pictures, fields or mixed formatting opens read-only (retyping it would lose
   them): edit that one in Word.
 
+## Add to note
+
+Opened from a note, SNScribe can put a passage into it: select the words, **Edit → Add to note…**,
+then tap where it goes on the note's page. It arrives as a Supernote text box (searchable,
+editable; move or resize it with the lasso). Opened from a PDF or EPUB, there's no note to add to.
+
 ## Review: comments, tracked changes, handwritten notes
+
+**Linked words:** the words a comment is on, the words a handwritten note is about, and quotes
+you inserted have a **dashed underline** on screen (not in Word). **Tap them** to open the
+comment, the note, or where the quote came from (file and page); **Type here** in that panel puts
+the cursor where you tapped. Notes and quotes made before version 0.1.3 have no link.
 
 - **Tracked changes** from Word show in the text (insertions underlined, deletions struck
   through) and as cards in the **margin panel**, each with ✓ accept / ✗ reject.
