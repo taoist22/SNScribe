@@ -610,13 +610,17 @@ export function Reader(): React.JSX.Element {
     const key = docKey(path);
     const source = created?.source ?? (await Docx!.snapshot(path, key));
     const stamp = await Docx!.fileStamp(path);
+    const found = parseRecovery(await Docx!.load(`recovery-${key}`), path, stamp);
+    // Everything is read first, then the new document, its empty history and its recovery
+    // question are set together: in between, the journal saw the new document with no edits
+    // (or the previous document's) and deleted — or overwrote — its recovery record (CT: the
+    // Restore question came back once after a restart, not twice).
     const opened: DocxDocument = {...loaded, source, saveTo: path};
     setDoc(opened);
     setIsNew(!!created);
     setDiskStamp(stamp);
     setPad(null);
     setIgnored(new Set());
-    const found = parseRecovery(await Docx!.load(`recovery-${key}`), path, stamp);
     setRecovery(found);
     setRecent(list => {
       const next = touchRecent(list, path, opened.name);
