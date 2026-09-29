@@ -6,19 +6,39 @@ import type {Block, ListDef, ParagraphBlock} from '../model/docx';
 
 const BULLETS = ['•', '◦', '▪'];
 
-/** The definition DocxEditor.Lists gives a list made while editing ("n…" numbers, "b…" bullets). */
-export function newListDef(kind: 'number' | 'bullet'): ListDef {
-  const fmts = ['decimal', 'lowerLetter', 'lowerRoman'];
+/** Lists SNScribe makes: 1. a. i. · bullets · a. i. 1. · A. 1. a. · i. a. 1. · outline I. A. 1. a. i. */
+export type ListKind = 'number' | 'bullet' | 'letter' | 'upper' | 'roman' | 'outline';
+
+/** A list made while editing is named by its kind's first letter and a counter: "n1", "b2", "o3" … */
+const KIND_BY_PREFIX: Record<string, ListKind> = {n: 'number', b: 'bullet', l: 'letter', u: 'upper', r: 'roman', o: 'outline'};
+
+/** The number format of level `i` in a list of `kind` (DocxEditor.listFormat is the same). */
+export function listFormat(kind: ListKind, i: number): string {
+  const cycle =
+    kind === 'letter'
+      ? ['lowerLetter', 'lowerRoman', 'decimal']
+      : kind === 'upper'
+      ? ['upperLetter', 'decimal', 'lowerLetter']
+      : kind === 'roman'
+      ? ['lowerRoman', 'lowerLetter', 'decimal']
+      : kind === 'outline'
+      ? ['upperRoman', 'upperLetter', 'decimal', 'lowerLetter', 'lowerRoman']
+      : ['decimal', 'lowerLetter', 'lowerRoman'];
+  return i < cycle.length ? cycle[i] : ['decimal', 'lowerLetter', 'lowerRoman'][(i - cycle.length) % 3];
+}
+
+/** The definition DocxEditor.Lists gives a list made while editing. */
+export function newListDef(kind: ListKind): ListDef {
   return {
     levels: Array.from({length: 9}, (_, i) =>
-      kind === 'bullet' ? {fmt: 'bullet', text: BULLETS[i % 3], start: 1} : {fmt: fmts[i % 3], text: `%${i + 1}.`, start: 1},
+      kind === 'bullet' ? {fmt: 'bullet', text: BULLETS[i % 3], start: 1} : {fmt: listFormat(kind, i), text: `%${i + 1}.`, start: 1},
     ),
     starts: {0: 1},
   };
 }
 
-export function listKind(id: number | string): 'number' | 'bullet' | null {
-  return typeof id === 'string' ? (id.startsWith('b') ? 'bullet' : 'number') : null;
+export function listKind(id: number | string): ListKind | null {
+  return typeof id === 'string' ? KIND_BY_PREFIX[id[0]] ?? 'number' : null;
 }
 
 function definition(lists: Record<string, ListDef>, id: number | string): ListDef | null {

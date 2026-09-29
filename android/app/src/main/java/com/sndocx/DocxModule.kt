@@ -33,7 +33,7 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
 
     companion object {
         /** Bumped with each native change; first log line, to spot stale installs. */
-        const val NATIVE_BUILD = 21
+        const val NATIVE_BUILD = 22
         private val EXPORT_DIR = File("/storage/emulated/0/EXPORT")
         private const val LOG_MAX_BYTES = 2L * 1024 * 1024
         private const val LOG_LINE_MAX = 4000
@@ -323,6 +323,7 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
         "inkDelete" -> DocxEditor.Op.InkDelete(m.getInt("para"), m.getString("id") ?: "")
         "revision" -> DocxEditor.Op.Revision(m.getInt("para"), m.getString("id") ?: "", m.getBoolean("accept"))
         "list" -> DocxEditor.Op.ListItem(m.getInt("para"), m.getString("kind") ?: "none", m.getString("listId") ?: "")
+        "listLevel" -> DocxEditor.Op.ListLevel(m.getInt("para"), m.getInt("delta"))
             else -> throw IllegalArgumentException("unknown op ${m.getString("op")}")
         }
     }

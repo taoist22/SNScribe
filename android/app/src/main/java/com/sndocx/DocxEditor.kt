@@ -76,6 +76,9 @@ object DocxEditor {
          */
         data class ListItem(val para: Int, val kind: String, val listId: String) : Op()
 
+        /** A list item moves [delta] levels in (+1) or out (−1), as Tab / Shift+Tab do in Word. */
+        data class ListLevel(val para: Int, val delta: Int) : Op()
+
         /** Sets the font family and/or the size (half-points) of characters [start, end). */
         data class RunStyle(val para: Int, val start: Int, val end: Int, val font: String?, val size: Int?) : Op()
 
@@ -557,6 +560,7 @@ object DocxEditor {
                 is Op.Split -> op.para
                 is Op.Join -> op.para
                 is Op.ListItem -> op.para
+                is Op.ListLevel -> op.para
                 is Op.RunStyle -> op.para
                 is Op.ParaProps -> op.para
                 is Op.Link -> op.para
@@ -574,6 +578,7 @@ object DocxEditor {
                 is Op.Split -> splitParagraph(document, p, op, styleIds, notes)
                 is Op.Join -> joinParagraph(checkNotNull(paragraphs.getOrNull(index - 1)) { "nothing before paragraph $index to join onto" }, p, op, notes)
                 is Op.ListItem -> setListItem(document, p, op, lists, styleIds, notes)
+                is Op.ListLevel -> listLevel(document, styles, p, op, notes)
                 is Op.RunStyle -> runStyle(document, p, op, notes)
                 is Op.ParaProps -> paraProps(document, p, op, notes)
                 is Op.Link -> link(document, p, op, pkg, styleIds, notes)
@@ -875,7 +880,7 @@ object DocxEditor {
         pPr?.let { pp -> child(pp, "numPr")?.let { pp.removeChild(it) } }
         val styleId = pPr?.let { child(it, "pStyle") }?.getAttributeNS(W, "val")
         val numId = when (op.kind) {
-            "number", "bullet" -> lists.numIdFor(op.listId, op.kind)
+            in LIST_KINDS -> lists.numIdFor(op.listId, op.kind)
             else -> if (styleId != null && styleIds.numbers(styleId)) 0 else null
         }
         if (numId != null) {
@@ -903,6 +908,53 @@ object DocxEditor {
         val rank = order.indexOf(el.localName)
         val before = elementChildren(parent).firstOrNull { (order.indexOf(it.localName).takeIf { i -> i >= 0 } ?: 1000) > rank }
         parent.insertBefore(el, before)
+    }
+
+    /** List kinds SNScribe makes: 1. a. i. / • ◦ ▪ / a. i. 1. / A. 1. a. / i. a. 1. / I. A. 1. a. i. */
+    val LIST_KINDS = setOf("number", "bullet", "letter", "upper", "roman", "outline")
+
+    /** The number format of level [i] of a list of [kind] (lists.ts listFormat is the same). */
+    fun listFormat(kind: String, i: Int): String {
+        val cycle = when (kind) {
+            "letter" -> listOf("lowerLetter", "lowerRoman", "decimal")
+            "upper" -> listOf("upperLetter", "decimal", "lowerLetter")
+            "roman" -> listOf("lowerRoman", "lowerLetter", "decimal")
+            "outline" -> listOf("upperRoman", "upperLetter", "decimal", "lowerLetter", "lowerRoman")
+            else -> listOf("decimal", "lowerLetter", "lowerRoman")
+        }
+        return if (i < cycle.size) cycle[i] else listOf("decimal", "lowerLetter", "lowerRoman")[(i - cycle.size) % 3]
+    }
+
+    /**
+     * One level in or out: the paragraph's own list level changes (0–8). A paragraph numbered
+     * by its style gets that numbering on itself first, so the level can differ from the style's.
+     */
+    private fun listLevel(document: Document, styles: Document?, p: Element, op: Op.ListLevel, notes: MutableList<String>) {
+        val pPr = child(p, "pPr") ?: document.createElementNS(W, "w:pPr").also { p.insertBefore(it, p.firstChild) }
+        var numPr = child(pPr, "numPr")
+        if (numPr == null) {
+            // Numbered by its style: the style's list, on the paragraph.
+            var styleId = child(pPr, "pStyle")?.getAttributeNS(W, "val")
+            var numId: String? = null
+            var guard = 0
+            while (styleId != null && numId == null && guard++ < 10) {
+                val st = styles?.documentElement?.let { root -> elementChildren(root).firstOrNull { it.localName == "style" && it.getAttributeNS(W, "styleId") == styleId } }
+                numId = st?.let { child(it, "pPr") }?.let { child(it, "numPr") }?.let { child(it, "numId") }?.getAttributeNS(W, "val")?.takeIf { it.isNotEmpty() }
+                styleId = st?.let { child(it, "basedOn") }?.getAttributeNS(W, "val")
+            }
+            check(numId != null && numId != "0") { "paragraph ${op.para} is not in a list" }
+            numPr = document.createElementNS(W, "w:numPr")
+            numPr.appendChild(document.createElementNS(W, "w:ilvl").also { it.setAttributeNS(W, "w:val", "0") })
+            numPr.appendChild(document.createElementNS(W, "w:numId").also { it.setAttributeNS(W, "w:val", numId) })
+            insertInOrder(pPr, numPr, PPR_ORDER)
+        }
+        val ilvl = child(numPr!!, "ilvl") ?: document.createElementNS(W, "w:ilvl").also { numPr.insertBefore(it, numPr.firstChild) }
+        val now = ilvl.getAttributeNS(W, "val").toIntOrNull() ?: 0
+        val next = (now + op.delta).coerceIn(0, 8)
+        ilvl.setAttributeNS(W, "w:val", next.toString())
+        // The list's level sets the indent: the paragraph's own would override it.
+        child(pPr, "ind")?.let { pPr.removeChild(it) }
+        notes.add("list level p${op.para}: $now → $next")
     }
 
     /**
@@ -935,7 +987,6 @@ object DocxEditor {
             val a = doc.createElementNS(W, "w:abstractNum")
             a.setAttributeNS(W, "w:abstractNumId", id.toString())
             a.appendChild(el("multiLevelType", "hybridMultilevel"))
-            val numberFormats = listOf("decimal", "lowerLetter", "lowerRoman")
             val bullets = listOf("\u2022", "\u25E6", "\u25AA")
             for (i in 0..8) {
                 val lvl = doc.createElementNS(W, "w:lvl")
@@ -945,7 +996,7 @@ object DocxEditor {
                     lvl.appendChild(el("numFmt", "bullet"))
                     lvl.appendChild(el("lvlText", bullets[i % 3]))
                 } else {
-                    lvl.appendChild(el("numFmt", numberFormats[i % 3]))
+                    lvl.appendChild(el("numFmt", listFormat(kind, i)))
                     lvl.appendChild(el("lvlText", "%${i + 1}."))
                 }
                 lvl.appendChild(el("lvlJc", "left"))

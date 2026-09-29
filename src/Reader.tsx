@@ -62,7 +62,7 @@ import {
   type Range,
   type StyleKind,
 } from './domain/edits';
-import {listKind, recount} from './domain/lists';
+import {listKind, recount, type ListKind} from './domain/lists';
 import {PAPER_FORMATS, presetOps} from './domain/presets';
 import {docKey, journalFor, parseRecovery, touchRecent, type RecentDoc, type RecoveryRecord} from './domain/recovery';
 import {DocxInk, InkSurfaceView, activateInk, deactivateInk, isInkAvailable} from './services/ink';
@@ -2864,7 +2864,7 @@ export function Reader(): React.JSX.Element {
   };
 
   /** Numbered / bulleted / not a list, for the paragraphs targeted. A list just above is continued. */
-  const listTool = (kind: 'number' | 'bullet' | 'none') => {
+  const listTool = (kind: ListKind | 'none') => {
     const paras = targetParagraphs();
     if (paras.length === 0) {
       nothingSelected();
@@ -2877,6 +2877,27 @@ export function Reader(): React.JSX.Element {
       listId = prev?.type === 'p' && prev.num && listKind(prev.num.id) === kind ? String(prev.num.id) : `${kind[0]}${++listCounter.current}`;
     }
     commit(paras.map(para => ({op: 'list', para, kind, listId})), kind === 'none' ? 'not a list' : `${kind} list`);
+  };
+
+  /**
+   * One level in (+1) or out (−1) for the list items targeted: Tab / Shift+Tab, or
+   * List ▸ Indent / Outdent. Returns false when none of them is in a list.
+   */
+  const listLevelTool = (delta: number): boolean => {
+    const paras = targetParagraphs().filter(para => !!paragraph(para)?.num);
+    if (paras.length === 0) {
+      return false;
+    }
+    const moves = paras.filter(para => {
+      const lvl = paragraph(para)!.num!.lvl;
+      return delta > 0 ? lvl < 8 : lvl > 0;
+    });
+    if (moves.length === 0) {
+      setStatus(delta > 0 ? 'Already as far in as a list goes.' : 'Already at the list’s first level.');
+      return true;
+    }
+    commit(moves.map(para => ({op: 'listLevel', para, delta})), delta > 0 ? 'list indent' : 'list outdent');
+    return true;
   };
 
   const paragraph = (para: number) => blocks.find(b => b.type === 'p' && b.index === para) as ParagraphBlock | undefined;
@@ -3372,7 +3393,13 @@ export function Reader(): React.JSX.Element {
         forwardDelete();
         return;
       case 'TAB':
-        paste('\t');
+        // In a list, Tab and Shift+Tab change the level, as in Word; elsewhere Tab is a tab.
+        if (listLevelTool(e.shift ? -1 : 1)) {
+          return;
+        }
+        if (!e.shift) {
+          paste('\t');
+        }
         return;
       case 'LEFT':
       case 'RIGHT':
@@ -5291,9 +5318,15 @@ export function Reader(): React.JSX.Element {
       case 'list':
         return (
           <>
-            {item('1.  Numbered', () => listTool('number'))}
+            {item('1.  2.  3.   Numbered', () => listTool('number'))}
+            {item('a.  b.  c.', () => listTool('letter'))}
+            {item('A.  B.  C.', () => listTool('upper'))}
+            {item('i.  ii.  iii.', () => listTool('roman'))}
+            {item('I.  A.  1.   Outline', () => listTool('outline'))}
             {item('•  Bulleted', () => listTool('bullet'))}
             {item('Not a list', () => listTool('none'))}
+            {item('→  Indent (Tab)', () => listLevelTool(1) || setStatus('Put the cursor in a list item first.'))}
+            {item('←  Outdent (Shift+Tab)', () => listLevelTool(-1) || setStatus('Put the cursor in a list item first.'))}
           </>
         );
       case 'font': {

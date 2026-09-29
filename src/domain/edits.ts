@@ -6,6 +6,7 @@
 // Offsets are into a paragraph's text (runs' `t` joined; objects are one U+FFFC), the
 // same text the native reader and writer use.
 
+import type {ListKind} from './lists';
 import {OBJECT, paragraphText, type Block, type Comment, type Footnote, type Mark, type NotePiece, type TableCell, type PageSetup, type ParagraphBlock, type Revision, type Run, type StyleLook} from '../model/docx';
 
 export type FormatProp = 'b' | 'i' | 'u' | 'h' | 's' | 'sup' | 'sub';
@@ -33,7 +34,9 @@ export type Op =
   /** Backspace at the start of `para`: it joins onto the end of `para` - 1. */
   | {op: 'join'; para: number}
   /** In or out of a list. listId: a document list (number as text) or a new list's name ("n1", "b2"). */
-  | {op: 'list'; para: number; kind: 'number' | 'bullet' | 'none'; listId: string}
+  | {op: 'list'; para: number; kind: ListKind | 'none'; listId: string}
+  /** One list level in (+1) or out (−1): Tab / Shift+Tab (DocxEditor.listLevel). */
+  | {op: 'listLevel'; para: number; delta: number}
   /** Font family and/or size (half-points) of [start, end). */
   | {op: 'runStyle'; para: number; start: number; end: number; font?: string; size?: number}
   /** Paragraph formatting; missing = unchanged. first: twips, negative = hanging, 0 = none. */
@@ -377,6 +380,15 @@ function join(out: Block[], i: number): void {
  * Mirrors DocxEditor.setListItem. The label is left for recount (domain/lists); a new list
  * item takes the list's first-level indent, and leaving a list drops the list indent.
  */
+/** Mirrors DocxEditor.listLevel: the level changes (0–8), and the text moves a level's indent (0.5″). */
+function listLevel(p: ParagraphBlock, op: Extract<Op, {op: 'listLevel'}>): ParagraphBlock {
+  if (!p.num) {
+    return p;
+  }
+  const lvl = Math.max(0, Math.min(8, p.num.lvl + op.delta));
+  return {...p, num: {...p.num, lvl}, indent: Math.max(0, p.indent + 720 * (lvl - p.num.lvl))};
+}
+
 function listItem(p: ParagraphBlock, op: Extract<Op, {op: 'list'}>): ParagraphBlock {
   if (op.kind === 'none') {
     return {...p, num: undefined, list: undefined, indent: p.num ? 0 : p.indent};
@@ -579,6 +591,9 @@ export function applyOps(blocks: Block[], ops: Op[]): Block[] {
         break;
       case 'runStyle':
         out[i] = runStyle(p, op);
+        break;
+      case 'listLevel':
+        out[i] = listLevel(p, op);
         break;
       case 'para':
         out[i] = paraProps(p, op);

@@ -1,5 +1,5 @@
 import {applyOps} from '../src/domain/edits';
-import {newListDef, recount} from '../src/domain/lists';
+import {listFormat, listKind, newListDef, recount} from '../src/domain/lists';
 import type {Block, ListDef, ParagraphBlock} from '../src/model/docx';
 
 const p = (index: number, text: string, num?: ParagraphBlock['num']): ParagraphBlock => ({
@@ -46,5 +46,30 @@ import {countWords} from '../src/model/docx';
 describe('countWords', () => {
   it('counts words and characters, not objects or stray punctuation', () => {
     expect(countWords(['Hello, world — again.', '￼ image', ''])).toEqual({words: 4, chars: 23});
+  });
+});
+
+describe('list kinds and levels (2026-09-29)', () => {
+  const item = (index: number, id: string, lvl = 0): ParagraphBlock => ({type: 'p', index, style: '', kind: 'body', level: 0, align: 'left', indent: 720, runs: [{t: 'x'}], num: {id, lvl}, list: ''});
+  const labels = (bs: Block[]) => bs.map(b => (b.type === 'p' ? b.list : ''));
+
+  it('numbers each kind as Word does, level by level', () => {
+    expect(labels(recount([item(0, 'l1'), item(1, 'l1')], {}))).toEqual(['a.', 'b.']);
+    expect(labels(recount([item(0, 'u1'), item(1, 'u1')], {}))).toEqual(['A.', 'B.']);
+    expect(labels(recount([item(0, 'r1'), item(1, 'r1'), item(2, 'r1'), item(3, 'r1')], {}))).toEqual(['i.', 'ii.', 'iii.', 'iv.']);
+    expect(labels(recount([item(0, 'o1'), item(1, 'o1', 1), item(2, 'o1', 2), item(3, 'o1', 1), item(4, 'o1')], {}))).toEqual(['I.', 'A.', '1.', 'B.', 'II.']);
+    expect(labels(recount([item(0, 'n1'), item(1, 'n1', 1), item(2, 'n1', 2)], {}))).toEqual(['1.', 'a.', 'i.']);
+    expect(listKind('o3')).toBe('outline');
+    expect(listFormat('outline', 4)).toBe('lowerRoman');
+    expect(listFormat('outline', 5)).toBe('decimal');
+  });
+
+  it('Tab moves an item a level in, Shift+Tab out, within 0–8', () => {
+    const [b] = applyOps([item(0, 'n1')], [{op: 'listLevel', para: 0, delta: 1}]) as ParagraphBlock[];
+    expect(b.num).toEqual({id: 'n1', lvl: 1});
+    expect(b.indent).toBe(1440);
+    const [c] = applyOps([b], [{op: 'listLevel', para: 0, delta: -1}, {op: 'listLevel', para: 0, delta: -1}]) as ParagraphBlock[];
+    expect(c.num?.lvl).toBe(0);
+    expect(c.indent).toBe(720);
   });
 });
