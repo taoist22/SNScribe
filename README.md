@@ -165,7 +165,9 @@ the cursor where you tapped. Notes and quotes made before version 0.1.3 have no 
 - **Handwritten notes** (**Edit → Handwritten note…**): write with the pen in the note box; your
   ink goes into the Word file as a picture in the right margin beside the words you chose (it
   shows and prints in Word), in the color you pick.
-- The margin panel folds away with **› Fold panel**.
+- The margin panel folds away with **› Fold panel**. It appears with a document's first comment
+  or note, folded to a narrow strip (tap it to open), and the page stays on the words you just
+  commented on while the text rewraps around it.
 
 ## Spelling
 
