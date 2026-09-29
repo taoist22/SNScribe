@@ -94,6 +94,10 @@ Georgia → **Gelasio**. Copy them (all four styles) into `MyStyle/Fonts`. The f
 3. Tap where the citation goes, search your library, choose **Parenthetical** or **Narrative**,
    add a page if you like, and **Insert**.
 
+**Choosing the style:** the buttons at the top of **Edit → Cite from Zotero…** (APA 7, MLA 9,
+Chicago author-date, Chicago notes) set the style. SNScribe remembers it, and **Insert quote**,
+figure labels and table labels use it too.
+
 The citation goes into the sentence and the source into the **References** list (created on a
 new page at the end the first time; *Works Cited* for MLA), in alphabetical order, formatted by
 Zotero in APA 7, MLA 9 or Chicago author-date. Citing a source again never duplicates it.
@@ -126,6 +130,8 @@ instead. The source joins the reference list. The files don't need to be in Zote
   bold and the title in italics above; MLA and Chicago: a caption below). Later figures are
   renumbered; mentions like "see Figure 2" in your text are not.
   **Tap a picture** with the pen to change its size or delete it.
+  To put space between a picture and the text below it, tap at the start of that text and press
+  **Enter** (an empty line, which Word keeps too).
 - **Tables** show as grids. **Tap a cell** to type in it, add a row above or below, delete a row,
   set the table's width (Full, 90%, 75%, 50%, centered), or delete the whole table. **Edit → Insert table…** adds one
   (rows × columns, width, header row, optional *Table N* label and title), ruled as APA tables are.
