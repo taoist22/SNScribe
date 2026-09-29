@@ -137,6 +137,8 @@ instead. The source joins the reference list. The files don't need to be in Zote
   set the table's width (Full, 90%, 75%, 50%, centered), or delete the whole table. **Edit → Insert table…** adds one
   (rows × columns, width, header row, optional *Table N* label and title), ruled as APA tables are.
   Columns, merged cells and borders stay as Word made them. The cell lines on screen are a guide.
+  A cell with links, pictures, fields or mixed formatting opens read-only (retyping it would lose
+  them): edit that one in Word.
 
 ## Review: comments, tracked changes, handwritten notes
 
