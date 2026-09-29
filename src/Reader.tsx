@@ -1032,8 +1032,44 @@ export function Reader(): React.JSX.Element {
   // After the page size, text size or margin column changes, the page shown is re-aligned
   // to a page start once the new count reaches it, so ◀ ▶ and the page number agree.
   const alignedFor = useRef('');
+  /** Words to keep on screen through the next rewrap: a new comment's or note's (with when). */
+  const keepInView = useRef<{pos: Pos; time: number} | null>(null);
+  // The first comment or note brings the margin panel: it opens folded (the text narrows only a
+  // little), and the page moves to the paragraph just commented on until the recount places it.
+  const hadNotes = useRef<{doc: DocxDocument | null; has: boolean}>({doc: null, has: false});
+  useEffect(() => {
+    const before = hadNotes.current;
+    hadNotes.current = {doc, has: hasNotes};
+    const keep = keepInView.current;
+    if (before.doc !== doc || before.has || !hasNotes || !keep || Date.now() - keep.time > 20000) {
+      return;
+    }
+    setShowMargin(false);
+    const bi = blocks.findIndex(b => b.type === 'p' && b.index === keep.pos.para);
+    if (bi >= 0) {
+      setHistory([]);
+      setAnchor({block: bi, offset: 0});
+    }
+    // Only the change of hasNotes matters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasNotes, doc]);
   useEffect(() => {
     if (!map || alignedFor.current === map.layout || !doc) {
+      return;
+    }
+    // Words just commented on (or given a note) stay in view when the margin panel's arrival
+    // rewraps the text: the page they are on now (CT: adding a comment shifted the page).
+    const keep = keepInView.current;
+    if (keep && Date.now() - keep.time < 20000) {
+      const bi = blocks.findIndex(b => b.type === 'p' && b.index === keep.pos.para);
+      const b = blocks[bi];
+      const page = b?.type === 'p' ? pageOfChar(map.pages, bi, toShown(b, keep.pos.offset), map.done) : -1;
+      if (page < 0) {
+        return; // not counted this far yet
+      }
+      keepInView.current = null;
+      alignedFor.current = map.layout;
+      setAnchor(map.pages[page].anchor);
       return;
     }
     const at = pageStartOf(anchor);
@@ -2054,6 +2090,7 @@ export function Reader(): React.JSX.Element {
       if (pad.end > pad.at) {
         ops.push({op: 'bookmark', para: -1, fromPara: pad.para, from: pad.at + 1, toPara: pad.para, to: pad.end + 1, name: `${INK_LINK}${id}`});
       }
+      keepInView.current = {pos: {para: pad.para, offset: pad.at}, time: Date.now()};
       commit(ops, 'handwritten note');
       setPad(null);
       setStatus('Note added in the right margin. Save to put it in the Word file.');
@@ -2632,6 +2669,7 @@ export function Reader(): React.JSX.Element {
     }
     const {quote: _q, text: _t, ...at} = commentForm;
     const name = author.trim();
+    keepInView.current = {pos: {para: at.fromPara, offset: at.from}, time: Date.now()};
     commit(
       [{op: 'comment', para: -1, id: nextCommentId(comments), ...at, text, author: name, initials: initialsOf(name), date: new Date().toISOString().replace(/\.\d+Z$/, 'Z')}],
       'comment',
