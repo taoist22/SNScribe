@@ -128,4 +128,53 @@ class DocxTextModule(private val reactContext: ReactApplicationContext) :
         result.putInt("toolType", DocxTouchLayerManager.lastTool)
         promise.resolve(result)
     }
+
+    /**
+     * Where the characters [start, end) of a Text view sit, one box per line: {left, right,
+     * top, bottom} in px relative to the view. For drawing a dashed line under linked words.
+     */
+    @ReactMethod
+    fun rangeRects(tag: Double, start: Double, end: Double, promise: Promise) {
+        UiThreadUtil.runOnUiThread {
+            val result = Arguments.createMap()
+            val rects = Arguments.createArray()
+            try {
+                val reactTag = tag.toInt()
+                val view = UIManagerHelper.getUIManagerForReactTag(reactContext, reactTag)?.resolveView(reactTag) as? TextView
+                val layout = view?.layout
+                if (view == null || layout == null) {
+                    result.putString("error", "no text layout")
+                } else {
+                    val len = layout.text.length
+                    val s = start.toInt().coerceIn(0, len)
+                    val e = end.toInt().coerceIn(s, len)
+                    if (e > s) {
+                        val first = layout.getLineForOffset(s)
+                        val last = layout.getLineForOffset(maxOf(s, e - 1))
+                        for (line in first..last) {
+                            val ls = maxOf(s, layout.getLineStart(line))
+                            val le = minOf(e, layout.getLineEnd(line))
+                            if (le <= ls) continue
+                            // Not the line break or trailing space at a line's end.
+                            var visibleEnd = le
+                            while (visibleEnd > ls && layout.text[visibleEnd - 1].isWhitespace()) visibleEnd--
+                            if (visibleEnd <= ls) continue
+                            val x1 = layout.getPrimaryHorizontal(ls)
+                            val x2 = if (visibleEnd >= layout.getLineEnd(line) || layout.getLineForOffset(visibleEnd) != line) layout.getLineRight(line) else layout.getPrimaryHorizontal(visibleEnd)
+                            rects.pushMap(Arguments.createMap().apply {
+                                putDouble("left", (minOf(x1, x2) + view.totalPaddingLeft).toDouble())
+                                putDouble("right", (maxOf(x1, x2) + view.totalPaddingLeft).toDouble())
+                                putDouble("top", (layout.getLineTop(line) + view.totalPaddingTop).toDouble())
+                                putDouble("bottom", (layout.getLineBaseline(line) + view.totalPaddingTop).toDouble())
+                            })
+                        }
+                    }
+                }
+            } catch (t: Throwable) {
+                result.putString("error", t.toString())
+            }
+            result.putArray("rects", rects)
+            promise.resolve(result)
+        }
+    }
 }

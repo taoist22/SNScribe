@@ -63,7 +63,7 @@ export function quoteOps(
   style: CiteStyle,
   page: string,
   note?: {id: number; short: boolean},
-): {ops: Op[]; block: boolean; caret: {para: number; offset: number}} {
+): {ops: Op[]; block: boolean; caret: {para: number; offset: number}; span: {para: number; start: number; end: number}} {
   const quote = text.trim().replace(/^[“"]+|[”"]+$/g, '');
   // Chicago notes: no citation in the sentence; a footnote after the quotation instead.
   const footnote = isNoteStyle(style) && note ? {id: note.id, pieces: notePieces(source, page, note.short)} : null;
@@ -71,6 +71,7 @@ export function quoteOps(
   const ops: Op[] = [];
   let caret = at;
   const block = words(quote) >= BLOCK_WORDS;
+  let lead = 0;
   const p = blocks.find(b => b.type === 'p' && b.index === at.para);
   const ptext = p && p.type === 'p' ? paragraphText(p) : '';
   if (block) {
@@ -87,10 +88,12 @@ export function quoteOps(
       ops.push({op: 'footnote', para: next, at: body.length, id: footnote.id, pieces: footnote.pieces});
     }
     caret = {para: next, offset: body.length + (footnote ? 1 : 0)};
+    return {ops, block, caret, span: {para: next, start: 0, end: ended.length}};
   } else {
     let insert = cite ? `“${quote}” ${cite}` : `“${quote}”`;
     if (at.offset > 0 && !/[\s(\[]/.test(ptext[at.offset - 1])) {
       insert = ` ${insert}`;
+      lead = 1;
     }
     if (at.offset < ptext.length && /[A-Za-z0-9À-ɏ“"]/.test(ptext[at.offset])) {
       insert = `${insert} `;
@@ -105,7 +108,9 @@ export function quoteOps(
       caret = {para: at.para, offset: at.offset + insert.length};
     }
   }
-  return {ops, block, caret};
+  // The quoted words, with their quotation marks: what a link bookmark goes around.
+  const start = at.offset + lead;
+  return {ops, block, caret, span: {para: at.para, start, end: start + quote.length + 2}};
 }
 
 /** quoteOps plus the reference-list entry, computed on the document after the quote. */
@@ -118,7 +123,7 @@ export function quoteWithReference(
   style: CiteStyle,
   page: string,
   note?: {id: number; short: boolean},
-): {ops: Op[]; block: boolean; caret: {para: number; offset: number}; added: boolean} {
+): {ops: Op[]; block: boolean; caret: {para: number; offset: number}; span: {para: number; start: number; end: number}; added: boolean} {
   const q = quoteOps(blocks, at, text, source, style, page, note);
   const ref = referenceOps(applyOps(blocks, q.ops), htmlToPieces(source.bibHtml), style);
   return {...q, ops: [...q.ops, ...ref.ops], added: ref.added};

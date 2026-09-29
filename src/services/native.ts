@@ -78,6 +78,8 @@ type DocxTextModule = {
   lineMove(tag: number, offset: number, dir: number): Promise<{offset?: number; outside?: boolean; error?: string}>;
   /** Whether the last touch on the page (DocxTouchLayer) was the pen or a finger. Missing before native build 14. */
   gestureTool?(): Promise<{tool: 'pen' | 'finger'; toolType: number}>;
+  /** Where characters [start, end) of a Text view sit, one box per line (px relative to the view). Missing before native build 22. */
+  rangeRects?(tag: number, start: number, end: number): Promise<{rects?: Array<{left: number; right: number; top: number; bottom: number}>; error?: string}>;
 };
 
 /** A key the native listener caught: DEL_FWD, arrows, HOME/END, or a Ctrl/Cmd letter; `text` for a paste. */

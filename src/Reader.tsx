@@ -23,6 +23,7 @@ import {targetLabel, wordCounts} from './domain/wordcount';
 import {PICTURE_SIZES, figureOps, pictureAtWidth, tableOps} from './domain/figures';
 import {editPieces, noteText} from './domain/footnotes';
 import {TouchLayer} from './services/touch';
+import {INK_LINK, linkSegments, quoteLinkName, quoteOfLink, type LinkKind} from './domain/links';
 import {
   applyOps,
   comparePos,
@@ -138,7 +139,7 @@ type Typing = {mode: 'insert'; at: Pos} | {mode: 'replace'; range: Range};
 type HfLine = {text: string; align: 'left' | 'center' | 'right'; page: boolean};
 
 type Menu =
-  | 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count' | 'page' | 'preset' | 'header' | 'link' | 'thread' | 'comment' | 'note' | 'hl' | 'find' | 'cite' | 'quotes' | 'spell' | 'goto' | 'picture' | 'footnote' | 'cell' | 'table' | 'picsize'
+  | 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count' | 'page' | 'preset' | 'header' | 'link' | 'thread' | 'comment' | 'note' | 'hl' | 'find' | 'cite' | 'quotes' | 'spell' | 'goto' | 'picture' | 'footnote' | 'cell' | 'table' | 'picsize' | 'quoteinfo'
   | 'recent' | 'versions' | 'recover';
 
 /** Drop-down menu width; menus are kept inside the screen. */
@@ -171,6 +172,12 @@ export function Reader(): React.JSX.Element {
   /** Pages view: only the pages with comments, handwritten notes or tracked changes. */
   const [notesOnly, setNotesOnly] = useState(false);
   const [goToText, setGoToText] = useState('');
+  /** The quote link (bookmark name) whose panel is open; the place in the text that was tapped to open a link. */
+  const [quoteOpen, setQuoteOpen] = useState<string | null>(null);
+  const [linkTap, setLinkTap] = useState<Pos | null>(null);
+  const [savedQuotes, setSavedQuotes] = useState<SavedQuote[]>([]);
+  /** Where linked words sit on this page (column coordinates), for their dashed underline and for taps. */
+  const [linkLines, setLinkLines] = useState<{key: string; lines: Array<{id: string; kind: LinkKind; x: number; w: number; top: number; bottom: number}>}>({key: '', lines: []});
   /** The cell being edited (table ordinal, row, cell) and its text. */
   const [cellEdit, setCellEdit] = useState<{table: number; row: number; cell: number; text: string; note: string; confirmDelete?: boolean}>({table: 0, row: 0, cell: 0, text: '', note: ''});
   /** Insert table…: after which paragraph, its size, header row, label and title. */
@@ -221,7 +228,7 @@ export function Reader(): React.JSX.Element {
   const [replyText, setReplyText] = useState('');
   const [commentForm, setCommentForm] = useState<{fromPara: number; from: number; toPara: number; to: number; text: string; quote: string} | null>(null);
   /** The pen pad, open for a note on these words. */
-  const [pad, setPad] = useState<{para: number; at: number; quote: string} | null>(null);
+  const [pad, setPad] = useState<{para: number; at: number; end: number; quote: string} | null>(null);
   const [noteOpen, setNoteOpen] = useState<string | null>(null);
   const [inkOk, setInkOk] = useState(false);
   /** The name comments are signed with (remembered). */
@@ -1337,6 +1344,97 @@ export function Reader(): React.JSX.Element {
     setStatus('Footnote deleted; the ones after it are renumbered. Undo puts it back.');
   };
 
+  // ---------------------------------------------------------------- linked words
+
+  const threadSet = useMemo(() => new Set(comments.filter(c => !c.parent).map(c => c.id)), [comments]);
+  const links = useMemo(() => linkSegments(blocks, threadSet), [blocks, threadSet]);
+
+  // Measure the linked words on this page once it is laid out (and after edits to it).
+  useEffect(() => {
+    if (brk.kind === 'pending' || !DocxText?.rangeRects) {
+      return;
+    }
+    const key = pageKey;
+    const t = setTimeout(async () => {
+      const lines: Array<{id: string; kind: LinkKind; x: number; w: number; top: number; bottom: number}> = [];
+      const scale = PixelRatio.get();
+      for (let i = 0; i < window.length; i++) {
+        const b = window[i];
+        const segs = b.type === 'p' ? links.get(b.index) : undefined;
+        const f = frames.current[i];
+        const tag = findNodeHandle(textRefs.current[i] ?? null);
+        if (!segs || b.type !== 'p' || !f || tag === null) {
+          continue;
+        }
+        const tf = textFrames.current[i] ?? {x: 0, y: 0};
+        for (const seg of segs) {
+          const r = await DocxText!.rangeRects!(tag, toShown(b, seg.start), toShown(b, seg.end));
+          for (const rc of r.rects ?? []) {
+            lines.push({
+              id: seg.id,
+              kind: seg.kind,
+              x: f.x + tf.x + rc.left / scale,
+              w: (rc.right - rc.left) / scale,
+              top: f.top + tf.y + rc.top / scale,
+              bottom: f.top + tf.y + rc.bottom / scale,
+            });
+          }
+        }
+      }
+      if (measuredFor.current === key) {
+        setLinkLines({key, lines});
+      }
+    }, 60);
+    return () => clearTimeout(t);
+    // Frames and refs are read when it runs; brk marks "measured".
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [brk, window, links, pageKey]);
+
+  /** The linked words under a point of the page, or null. */
+  const linkAt = (x: number, y: number) => {
+    if (linkLines.key !== pageKey) {
+      return null;
+    }
+    const colY = y + anchor.offset;
+    return linkLines.lines.find(l => x >= l.x - 4 && x <= l.x + l.w + 4 && colY >= l.top && colY <= l.bottom + 8) ?? null;
+  };
+
+  /** Whether a link's comment, note or quote is the one open now (its underline is drawn heavier). */
+  const linkOpen = (id: string, kind: LinkKind) =>
+    kind === 'comment' ? menu === 'thread' && thread === id : kind === 'ink' ? menu === 'note' && noteOpen === id.slice(INK_LINK.length) : menu === 'quoteinfo' && quoteOpen === id;
+
+  const openLink = async (link: {id: string; kind: LinkKind}, at: Pos) => {
+    flushTyping();
+    setLinkTap(at);
+    setMenuX(Math.max(0, pageW - MENU_W));
+    if (link.kind === 'comment') {
+      openThread(link.id);
+    } else if (link.kind === 'ink') {
+      setNoteOpen(link.id.slice(INK_LINK.length));
+      setMenu('note');
+    } else {
+      setQuoteOpen(link.id);
+      setSavedQuotes(parseList<SavedQuote>(await Docx?.load(QUOTES_KEY)));
+      setMenu('quoteinfo');
+    }
+  };
+
+  /** In a link's panel: put the cursor where the words were tapped, to type there. */
+  const typeHere = () =>
+    linkTap ? (
+      <View style={styles.row}>
+        {panelButton('Type here', () => {
+          setMenu(null);
+          setThread(null);
+          setNoteOpen(null);
+          setSelection(null);
+          setCaret(linkTap);
+          setLinkTap(null);
+          keys.current?.focus();
+        })}
+      </View>
+    ) : null;
+
   // ---------------------------------------------------------------- tables
 
   /** The table cell under a point of the page (as the pen gives it), or null. */
@@ -1747,6 +1845,12 @@ export function Reader(): React.JSX.Element {
       flushTyping();
       keys.current?.focus();
       setScript(null);
+      // A tap on linked words opens their comment, note or quote.
+      const link = tap && !doubleTap ? linkAt(a.x, a.y) : null;
+      if (link) {
+        openLink(link, {para: ha.para, offset: ha.offset});
+        return;
+      }
       // A tap on a footnote's number opens the footnote; on a picture, its size.
       const tapped = tap && !doubleTap ? noteAt(ha.para, ha.char) : null;
       if (tapped) {
@@ -1869,14 +1973,14 @@ export function Reader(): React.JSX.Element {
   const startNote = () => {
     setMenu(null);
     const ranges = !typing && selection ? rangesBetween(blocks, selection.from, selection.to).filter(r => r.end > r.start) : [];
-    let at: {para: number; at: number; quote: string} | null = null;
+    let at: {para: number; at: number; end: number; quote: string} | null = null;
     if (ranges.length > 0) {
       const r = ranges[0];
-      at = {para: r.para, at: r.start, quote: textOf(r.para).slice(r.start, r.end).slice(0, 200)};
+      at = {para: r.para, at: r.start, end: r.end, quote: textOf(r.para).slice(r.start, r.end).slice(0, 200)};
     } else if (caretAt) {
       flushTyping();
       const w = targets()[0];
-      at = w ? {para: w.para, at: w.start, quote: textOf(w.para).slice(w.start, w.end)} : {para: caretAt.para, at: caretAt.offset, quote: ''};
+      at = w ? {para: w.para, at: w.start, end: w.end, quote: textOf(w.para).slice(w.start, w.end)} : {para: caretAt.para, at: caretAt.offset, end: caretAt.offset, quote: ''};
     }
     if (!at) {
       setStatus('Select the words the note is about, or tap where it goes.');
@@ -1928,7 +2032,13 @@ export function Reader(): React.JSX.Element {
         setStatus('Write the note first, or Cancel.');
         return;
       }
-      commit([{op: 'ink', para: pad.para, at: pad.at, id, png: res.path, width: res.width ?? 1, height: res.height ?? 1}], 'handwritten note');
+      // The note's mark goes before the words; a hidden bookmark around them links the two
+      // (a dashed underline on screen; a tap on the words opens the note).
+      const ops: Op[] = [{op: 'ink', para: pad.para, at: pad.at, id, png: res.path, width: res.width ?? 1, height: res.height ?? 1}];
+      if (pad.end > pad.at) {
+        ops.push({op: 'bookmark', para: -1, fromPara: pad.para, from: pad.at + 1, toPara: pad.para, to: pad.end + 1, name: `${INK_LINK}${id}`});
+      }
+      commit(ops, 'handwritten note');
       setPad(null);
       setStatus('Note added in the right margin. Save to put it in the Word file.');
     } catch (error) {
@@ -2455,7 +2565,9 @@ export function Reader(): React.JSX.Element {
     }
     const note = isNoteStyle(citeStyle) ? {id: nextFootnoteId(footnotes, blocks), short: citedBefore(source)} : undefined;
     const r = quoteWithReference(blocks, applyOps, at, quote.text, source, citeStyle, qp.page, note);
-    commit(r.ops, 'quote');
+    // A hidden bookmark around the quoted words: a tap on them shows where the quote came from.
+    const link: Op = {op: 'bookmark', para: -1, fromPara: r.span.para, from: r.span.start, toPara: r.span.para, to: r.span.end, name: quoteLinkName(quote.id)};
+    commit([...r.ops, link], 'quote');
     setCaret(r.caret);
     setMenu(null);
     setStatus(`${r.block ? 'Block quote' : 'Quote'} inserted${r.added ? ', and the source added to the reference list' : ''}.`);
@@ -4742,6 +4854,33 @@ export function Reader(): React.JSX.Element {
             </View>
           </View>
         ) : null;
+      case 'quoteinfo': {
+        const q = quoteOpen ? quoteOfLink(quoteOpen, savedQuotes) : undefined;
+        const full = q ? (q as SavedQuote) : undefined;
+        return (
+          <View style={styles.nameForm}>
+            <Text allowFontScaling={false} style={styles.cardHead}>
+              {'Quote'}
+            </Text>
+            {full ? (
+              <>
+                <Text allowFontScaling={false} style={styles.menuText}>
+                  {`${fileName(full.path)} · page ${full.page}`}
+                </Text>
+                <Text allowFontScaling={false} style={[styles.presetSummary, styles.italicText]} numberOfLines={6}>
+                  {`“${full.text}”`}
+                </Text>
+              </>
+            ) : (
+              <Text allowFontScaling={false} style={styles.presetSummary}>
+                {'Inserted from a PDF or EPUB with Quote → SNScribe. Its details are no longer kept on this Supernote.'}
+              </Text>
+            )}
+            {typeHere()}
+            <View style={styles.row}>{button('Close', () => setMenu(null))}</View>
+          </View>
+        );
+      }
       case 'note': {
         const src = noteOpen ? inks[noteOpen] : undefined;
         return noteOpen ? (
@@ -4750,6 +4889,7 @@ export function Reader(): React.JSX.Element {
               {'Handwritten note · in the right margin of the Word file'}
             </Text>
             {src ? <Image source={{uri: `file://${src}`}} resizeMode="contain" style={{width: MENU_W - 32, height: 300, marginVertical: 10}} /> : null}
+            {typeHere()}
             <View style={styles.row}>
               {button('Delete note', () => deleteNote(noteOpen))}
               {button('Close', () => {
@@ -4788,6 +4928,7 @@ export function Reader(): React.JSX.Element {
               allowFontScaling={false}
               placeholder="Reply"
             />
+            {typeHere()}
             <View style={styles.row}>
               {panelButton('Reply', reply, !replyText.trim())}
               {button('Delete comment', deleteThread)}
@@ -5554,6 +5695,15 @@ export function Reader(): React.JSX.Element {
                   textRef={textRefFor(i)}
                 />
               ))}
+              {linkLines.key === pageKey
+                ? linkLines.lines.map((l, k) => (
+                    // A dashed line under linked words: Android draws a dashed border only on all
+                    // four sides, so a dashed box is clipped to its bottom edge.
+                    <View key={`lk${k}`} pointerEvents="none" style={[styles.linkClip, {left: l.x, top: l.bottom + 2, width: l.w}]}>
+                      <View style={[styles.linkDash, linkOpen(l.id, l.kind) ? styles.linkDashOn : null]} />
+                    </View>
+                  ))
+                : null}
               {caretAt && !typing && caretBox?.key === pageKey ? (
                 <View pointerEvents="none" style={[styles.caret, {left: caretBox.x - 1, top: caretBox.top, height: caretBox.height}]} />
               ) : null}
@@ -5725,6 +5875,9 @@ const styles = StyleSheet.create({
   pagesChip: {marginBottom: 0, marginLeft: 8},
   pagesNone: {padding: 16},
   touchLayer: {position: 'absolute', left: 0},
+  linkClip: {position: 'absolute', height: 3, overflow: 'hidden'},
+  linkDash: {position: 'absolute', left: -4, right: -4, bottom: 0, height: 14, borderWidth: 1.5, borderStyle: 'dashed', borderColor: '#000'},
+  linkDashOn: {borderWidth: 2.5},
   menu: {position: 'absolute', top: 0, width: MENU_W, backgroundColor: '#fff', borderWidth: 2, borderColor: '#000'},
   menuItem: {paddingVertical: 14, paddingHorizontal: 16, borderBottomWidth: 1, borderColor: '#bbb'},
   menuText: {color: '#000', fontSize: 19},

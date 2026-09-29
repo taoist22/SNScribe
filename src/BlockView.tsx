@@ -234,6 +234,8 @@ function ParagraphView({p, selection, spell, onFrame, onLines, textRef, onTextFr
               : null,
             {fontSize: r.sup || r.sub ? Math.round(runSize(r) * 0.65) : runSize(r)},
             shownFont(family(r), fonts) ? {fontFamily: shownFont(family(r), fonts)} : null,
+            // A handwritten note's mark: black, bold and a little larger, to be found among the text (CT).
+            r.obj === 'ink' ? [styles.inkMark, {fontSize: Math.round(runSize(r) * 1.25)}] : null,
             r.sel ? styles.selected : null,
           ]}>
           {runText(r)}
@@ -446,6 +448,7 @@ const styles = StyleSheet.create({
   highlight: {backgroundColor: '#cfcfcf'},
   selected: {backgroundColor: '#000', color: '#fff'},
   caret: {color: '#000', fontWeight: '400', fontStyle: 'normal'},
+  inkMark: {color: '#000', fontWeight: '900', fontStyle: 'normal'},
   pictureSelected: {opacity: 0.4},
   pictureText: {position: 'absolute', left: 0, top: 0, fontSize: 4, opacity: 0},
   pictureRow: {flexDirection: 'row', alignItems: 'flex-end'},

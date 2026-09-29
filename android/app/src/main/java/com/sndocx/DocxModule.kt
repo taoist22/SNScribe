@@ -324,6 +324,7 @@ class DocxModule(private val reactContext: ReactApplicationContext) : ReactConte
         "revision" -> DocxEditor.Op.Revision(m.getInt("para"), m.getString("id") ?: "", m.getBoolean("accept"))
         "list" -> DocxEditor.Op.ListItem(m.getInt("para"), m.getString("kind") ?: "none", m.getString("listId") ?: "")
         "listLevel" -> DocxEditor.Op.ListLevel(m.getInt("para"), m.getInt("delta"))
+        "bookmark" -> DocxEditor.Op.BookmarkAdd(m.getInt("fromPara"), m.getInt("from"), m.getInt("toPara"), m.getInt("to"), m.getString("name") ?: "")
             else -> throw IllegalArgumentException("unknown op ${m.getString("op")}")
         }
     }

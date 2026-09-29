@@ -713,7 +713,12 @@ object DocxReader {
         return ThemeFonts(latin("majorFont"), latin("minorFont"))
     }
 
+    /** Bookmarks SNScribe puts around the words a handwritten note or an inserted quote is about (hidden in Word: names starting "_"). */
+    const val LINK_PREFIX = "_sns_"
+
     private class Context(val styles: Styles, val numbering: Numbering, val theme: ThemeFonts) {
+        /** Bookmark w:id → name, for SNScribe's link bookmarks (their ends carry only the id). */
+        val linkNames = HashMap<String, String>()
         var tables = 0
         var images = 0
         var tracked = 0
@@ -848,6 +853,11 @@ object DocxReader {
                     }
                     "commentRangeStart" -> marks.add(Mark(el.getAttributeNS(W, "id"), "start", offset[0]))
                     "commentRangeEnd" -> marks.add(Mark(el.getAttributeNS(W, "id"), "end", offset[0]))
+                    "bookmarkStart" -> el.getAttributeNS(W, "name").takeIf { it.startsWith(LINK_PREFIX) }?.let { name ->
+                        linkNames[el.getAttributeNS(W, "id")] = name
+                        marks.add(Mark(name, "start", offset[0]))
+                    }
+                    "bookmarkEnd" -> linkNames[el.getAttributeNS(W, "id")]?.let { name -> marks.add(Mark(name, "end", offset[0])) }
                     "ins", "moveTo" -> {
                         if (lengthOf(el) > 0) out.add(meta(el, "ins"))
                         collectRevisions(el, base, offset, out, marks)

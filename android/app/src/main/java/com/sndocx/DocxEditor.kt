@@ -171,6 +171,9 @@ object DocxEditor {
         /** A new table of [rows]×[cols] empty cells before paragraph [before]; the first row a [header] row; [pct]% of the text width, centred. */
         data class TableInsert(val before: Int, val rows: Int, val cols: Int, val header: Boolean, val pct: Int = 100) : Op()
 
+        /** A hidden bookmark [name] around [from] of [fromPara] to [to] of [toPara]: the words a note or quote is about. */
+        data class BookmarkAdd(val fromPara: Int, val from: Int, val toPara: Int, val to: Int, val name: String) : Op()
+
         /** Removes table [table]. */
         data class TableDelete(val table: Int) : Op()
 
@@ -489,6 +492,10 @@ object DocxEditor {
                 deleteComments(document, pkg, op, notes)
                 continue
             }
+            if (op is Op.BookmarkAdd) {
+                addBookmark(document, paragraphs, op, notes)
+                continue
+            }
             if (op is Op.ImageSize || op is Op.ImageDelete) {
                 val i = if (op is Op.ImageSize) op.para else (op as Op.ImageDelete).para
                 val p = checkNotNull(paragraphs.getOrNull(i)) { "no paragraph $i for $op" }
@@ -568,7 +575,7 @@ object DocxEditor {
                 is Op.PageSetup, is Op.Defaults, is Op.HeaderFooter, is Op.Revision, is Op.CommentAdd, is Op.CommentDelete, is Op.InkAdd, is Op.InkDelete, is Op.ImageAdd, is Op.StyleDefs,
                 is Op.FootnoteAdd, is Op.FootnoteSet, is Op.FootnoteDelete,
                 is Op.TableCell, is Op.TableRowAdd, is Op.TableRowDelete, is Op.TableInsert, is Op.TableWidth,
-                is Op.ImageSize, is Op.ImageDelete, is Op.TableDelete -> error("unreachable")
+                is Op.ImageSize, is Op.ImageDelete, is Op.TableDelete, is Op.BookmarkAdd -> error("unreachable")
             }
             val p = checkNotNull(paragraphs.getOrNull(index)) { "no paragraph $index for $op" }
             when (op) {
@@ -586,7 +593,7 @@ object DocxEditor {
                 is Op.PageSetup, is Op.Defaults, is Op.HeaderFooter, is Op.Revision, is Op.CommentAdd, is Op.CommentDelete, is Op.InkAdd, is Op.InkDelete, is Op.ImageAdd, is Op.StyleDefs,
                 is Op.FootnoteAdd, is Op.FootnoteSet, is Op.FootnoteDelete,
                 is Op.TableCell, is Op.TableRowAdd, is Op.TableRowDelete, is Op.TableInsert, is Op.TableWidth,
-                is Op.ImageSize, is Op.ImageDelete, is Op.TableDelete -> {}
+                is Op.ImageSize, is Op.ImageDelete, is Op.TableDelete, is Op.BookmarkAdd -> {}
             }
             // Splits and joins renumber the paragraphs after them.
             if (op is Op.Split || op is Op.Join) paragraphs = bodyParagraphs(document)
@@ -1565,6 +1572,33 @@ object DocxEditor {
             pkg.touch(path)
         }
         notes.add("footnote ${op.id} deleted")
+    }
+
+    /**
+     * A hidden bookmark (its name starts with "_", so Word lists it only when asked) around the
+     * words a handwritten note or an inserted quote is about. Word keeps it; SNScribe shows it
+     * as a dashed underline and opens the note or quote from it. Adds no text.
+     */
+    private fun addBookmark(document: Document, paragraphs: List<Element>, op: Op.BookmarkAdd, notes: MutableList<String>) {
+        check(op.name.startsWith(DocxReader.LINK_PREFIX) && op.name.length <= 40) { "bad bookmark name ${op.name}" }
+        val first = checkNotNull(paragraphs.getOrNull(op.fromPara)) { "no paragraph ${op.fromPara}" }
+        val last = checkNotNull(paragraphs.getOrNull(op.toPara)) { "no paragraph ${op.toPara}" }
+        val all = document.getElementsByTagNameNS(W, "bookmarkStart")
+        var max = -1
+        for (i in 0 until all.length) {
+            val b = all.item(i) as Element
+            max = maxOf(max, b.getAttributeNS(W, "id").toIntOrNull() ?: -1)
+            check(b.getAttributeNS(W, "name") != op.name) { "bookmark ${op.name} exists already" }
+        }
+        val id = (max + 1).toString()
+        val end = document.createElementNS(W, "w:bookmarkEnd").apply { setAttributeNS(W, "w:id", id) }
+        placeAt(last, op.to, end, before = false)
+        val start = document.createElementNS(W, "w:bookmarkStart").apply {
+            setAttributeNS(W, "w:id", id)
+            setAttributeNS(W, "w:name", op.name)
+        }
+        if (first === last && op.from == op.to) end.parentNode.insertBefore(start, end) else placeAt(first, op.from, start, before = true)
+        notes.add("bookmark ${op.name} p${op.fromPara}:${op.from}–p${op.toPara}:${op.to}")
     }
 
     /** Picture formats a document may carry, by file extension: the content type Word expects. */

@@ -101,6 +101,8 @@ export type Op =
   | {op: 'tableRowDelete'; para: -1; table: number; row: number}
   /** A new rows × cols table before paragraph `before` (the first row a header row when `header`). */
   | {op: 'tableInsert'; para: -1; before: number; rows: number; cols: number; header: boolean; pct?: number}
+  /** A hidden bookmark `name` around the words a handwritten note or a quote is about (DocxEditor.addBookmark). */
+  | {op: 'bookmark'; para: -1; fromPara: number; from: number; toPara: number; to: number; name: string}
   /** Removes table `table`. */
   | {op: 'tableDelete'; para: -1; table: number}
   /** Table `table` becomes `pct`% of the text width, centred. */
@@ -530,6 +532,18 @@ export function applyOps(blocks: Block[], ops: Op[]): Block[] {
     }
     if (op.op === 'comment' || op.op === 'uncomment') {
       commentMarks(out, op);
+      continue;
+    }
+    if (op.op === 'bookmark') {
+      const add = (index: number, m: Mark) => {
+        const j = out.findIndex(b => b.type === 'p' && b.index === index);
+        if (j >= 0) {
+          const p = out[j] as ParagraphBlock;
+          out[j] = withMarks(p, [...(p.marks ?? []), m]);
+        }
+      };
+      add(op.fromPara, {id: op.name, kind: 'start', at: op.from});
+      add(op.toPara, {id: op.name, kind: 'end', at: op.to});
       continue;
     }
     if (op.op === 'revision') {
