@@ -1,5 +1,11 @@
 # SNScribe
 
+
+
+https://github.com/user-attachments/assets/1558c891-adef-48bb-8eb3-32c893fe3c3d
+
+
+
 **Write, format and cite in Word (.docx) documents on Supernote.**
 
 SNScribe opens Word documents on a Supernote Manta or Nomad and lets you write in them — by
@@ -18,8 +24,6 @@ comments and tracked changes, handwritten margin notes and spell checking.
 > open the document in Word, Office 365 or LibreOffice and check it there.**
 
 Not affiliated with Microsoft. Word is a trademark of Microsoft Corporation.
-
-<p align="center"><img src="docs/screenshot.png" alt="SNScribe on a Supernote Manta: a paper with headings, formatting, highlights, lists, a block quote and a reference list; the margin panel shows a comment, tracked-change cards with accept and reject, and a handwritten note." width="600"></p>
 
 ---
 
