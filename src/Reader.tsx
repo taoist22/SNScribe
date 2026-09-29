@@ -141,7 +141,7 @@ type Typing = {mode: 'insert'; at: Pos} | {mode: 'replace'; range: Range};
 type HfLine = {text: string; align: 'left' | 'center' | 'right'; page: boolean};
 
 type Menu =
-  | 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count' | 'page' | 'preset' | 'header' | 'link' | 'thread' | 'comment' | 'note' | 'hl' | 'find' | 'cite' | 'quotes' | 'spell' | 'goto' | 'picture' | 'footnote' | 'cell' | 'table' | 'picsize' | 'quoteinfo'
+  | 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count' | 'page' | 'preset' | 'header' | 'link' | 'thread' | 'comment' | 'note' | 'hl' | 'find' | 'cite' | 'quotes' | 'spell' | 'goto' | 'picture' | 'footnote' | 'cell' | 'table' | 'picsize' | 'quoteinfo' | 'addnote'
   | 'recent' | 'versions' | 'recover';
 
 /** Drop-down menu width; menus are kept inside the screen. */
@@ -176,6 +176,11 @@ export function Reader(): React.JSX.Element {
   const [goToText, setGoToText] = useState('');
   /** Add to note: the passage waiting to be placed in the note (null: not placing). */
   const [placing, setPlacing] = useState<string | null>(null);
+  /** Add to note: the passage and its source line, while the panel is open. */
+  const [addNote, setAddNote] = useState<{text: string; source: string}>({text: '', source: ''});
+  /** Add to note switches (remembered): a source line under the passage; stay in the note afterwards. */
+  const [noteSource, setNoteSource] = useState(true);
+  const [noteStay, setNoteStay] = useState(true);
   /** The quote link (bookmark name) whose panel is open; the place in the text that was tapped to open a link. */
   const [quoteOpen, setQuoteOpen] = useState<string | null>(null);
   const [linkTap, setLinkTap] = useState<Pos | null>(null);
@@ -369,7 +374,13 @@ export function Reader(): React.JSX.Element {
       const refused = await log(`DOCX opened: NATIVE_BUILD=${nativeBuild()} read=${canRead} write=${canWrite} log=${name}`);
       // Remembered between sessions: text size, New's folder, recent documents.
       try {
-        const saved = JSON.parse((await Docx?.load('settings')) ?? '{}') as {scaleAt?: number; newFolder?: string; lastName?: string; author?: string; marginOpen?: boolean; inkColor?: string; citeStyle?: string; spell?: boolean};
+        const saved = JSON.parse((await Docx?.load('settings')) ?? '{}') as {scaleAt?: number; newFolder?: string; lastName?: string; author?: string; marginOpen?: boolean; inkColor?: string; citeStyle?: string; spell?: boolean; noteSource?: boolean; noteStay?: boolean};
+        if (typeof saved.noteSource === 'boolean') {
+          setNoteSource(saved.noteSource);
+        }
+        if (typeof saved.noteStay === 'boolean') {
+          setNoteStay(saved.noteStay);
+        }
         if (typeof saved.lastName === 'string') {
           setLastName(saved.lastName);
         }
@@ -3447,8 +3458,61 @@ export function Reader(): React.JSX.Element {
       setStatus('Add to note works when SNScribe is opened from a note (it was opened from a PDF or EPUB).');
       return;
     }
+    const source = await sourceLine();
+    setAddNote({text, source});
+    setMenuX(Math.max(0, pageW - MENU_W));
+    setMenu('addnote');
+  };
+
+  /**
+   * Where the selected passage comes from, for a line under it in the note: the citation of
+   * a quote it contains (as the paper cites it), else the document and the heading it's under.
+   */
+  const sourceLine = async (): Promise<string> => {
+    const start = selection ? (comparePos(selection.from, selection.to) <= 0 ? selection.from : selection.to) : null;
+    const end = selection ? (comparePos(selection.from, selection.to) <= 0 ? selection.to : selection.from) : null;
+    const docName = (doc?.name ?? '').replace(/\.docx$/i, '');
+    if (!start || !end) {
+      return docName ? `— ${docName}` : '';
+    }
+    // A quote inside the passage: its source.
+    for (let para = start.para; para <= end.para; para++) {
+      for (const seg of links.get(para) ?? []) {
+        const from = para === start.para ? start.offset : 0;
+        const to = para === end.para ? end.offset : Infinity;
+        if (seg.kind !== 'quote' || seg.end <= from || seg.start >= to) {
+          continue;
+        }
+        try {
+          const quotes = parseList<SavedQuote>(await Docx?.load(QUOTES_KEY));
+          const q = quoteOfLink(seg.id, quotes) as SavedQuote | undefined;
+          if (!q) {
+            continue;
+          }
+          const ref = parseMap<SourceRef>(await Docx?.load(SOURCES_KEY))[q.path];
+          if (ref) {
+            try {
+              const src = await resolveSource(ref);
+              return isNoteStyle(citeStyle) ? piecesText(notePieces(src, String(q.page), true)) : inText(src, citeStyle, false, String(q.page));
+            } catch {
+              // Offline or no longer in Zotero: the file and page will do.
+            }
+          }
+          return `— ${fileName(q.path).replace(/\.(pdf|epub)$/i, '')}, p. ${q.page}`;
+        } catch {
+          // Unreadable store: fall through to the document.
+        }
+      }
+    }
+    const blockAt = blocks.findIndex(b => b.type === 'p' && b.index === start.para);
+    const heading = [...headings].reverse().find(h => h.block <= blockAt);
+    return `— ${docName}${heading ? ` · ${heading.text}` : ''}`;
+  };
+
+  const placeInNote = () => {
+    setMenu(null);
     setSelection(null);
-    setPlacing(text);
+    setPlacing(noteSource && addNote.source ? `${addNote.text}\n${addNote.source}` : addNote.text);
   };
 
   const copy = async (cut: boolean) => {
@@ -3813,8 +3877,8 @@ export function Reader(): React.JSX.Element {
 
   // Settings are remembered between sessions.
   useEffect(() => {
-    Docx?.store('settings', JSON.stringify({scaleAt, newFolder, lastName, author, marginOpen: showMargin, inkColor, citeStyle, spell: spellOn}));
-  }, [scaleAt, newFolder, lastName, author, showMargin, inkColor, citeStyle, spellOn]);
+    Docx?.store('settings', JSON.stringify({scaleAt, newFolder, lastName, author, marginOpen: showMargin, inkColor, citeStyle, spell: spellOn, noteSource, noteStay}));
+  }, [scaleAt, newFolder, lastName, author, showMargin, inkColor, citeStyle, spellOn, noteSource, noteStay]);
 
   // The page follows the caret when it moves (typing, arrows) — not when the page is turned.
   const followCaret = useRef(false);
@@ -4874,6 +4938,43 @@ export function Reader(): React.JSX.Element {
             </View>
           </View>
         ) : null;
+      case 'addnote': {
+        const sw = (label: string, on: boolean, toggle: () => void) => (
+          <Pressable onPress={once(`an:${label}`, toggle)} style={[styles.chip, on ? styles.chipOn : null]}>
+            <Text allowFontScaling={false} style={[styles.chipText, on ? styles.chipTextOn : null]}>
+              {on ? `✓ ${label}` : label}
+            </Text>
+          </Pressable>
+        );
+        return (
+          <View style={styles.nameForm}>
+            <Text allowFontScaling={false} style={styles.menuText}>
+              {'Add to note'}
+            </Text>
+            <Text allowFontScaling={false} style={styles.presetSummary} numberOfLines={5}>
+              {addNote.text}
+            </Text>
+            {noteSource && addNote.source ? (
+              <Text allowFontScaling={false} style={[styles.presetSummary, styles.italicText]} numberOfLines={2}>
+                {addNote.source}
+              </Text>
+            ) : null}
+            <View style={[styles.chips, styles.findLabel]}>
+              {sw('Add source line', noteSource, () => setNoteSource(v => !v))}
+              {sw('Stay in the note afterwards', noteStay, () => setNoteStay(v => !v))}
+            </View>
+            <Text allowFontScaling={false} style={styles.presetSummary}>
+              {noteStay
+                ? 'After you tap its place, you stay in the note to write about it. Open SNScribe again to come back here.'
+                : 'After you tap its place, SNScribe comes back, ready for the next passage.'}
+            </Text>
+            <View style={styles.row}>
+              {panelButton('Place in note', placeInNote)}
+              {button('Cancel', () => setMenu(null))}
+            </View>
+          </View>
+        );
+      }
       case 'quoteinfo': {
         const q = quoteOpen ? quoteOfLink(quoteOpen, savedQuotes) : undefined;
         const full = q ? (q as SavedQuote) : undefined;
@@ -5537,7 +5638,13 @@ export function Reader(): React.JSX.Element {
           try {
             await insertIntoNote(text, point);
             log(`add to note: ${text.length} chars at ${Math.round(point.x)},${Math.round(point.y)}`);
-            setStatus('Added to your note as a text box. Close SNScribe to see it; the lasso moves or resizes it.');
+            if (noteStay) {
+              // Stay in the note to write about it; SNScribe reopens where it was.
+              setStatus('Added to your note.');
+              close();
+            } else {
+              setStatus('Added to your note as a text box (the lasso moves or resizes it).');
+            }
           } catch (error) {
             log(`add to note failed: ${errorText(error)}`);
             setStatus(`Could not add it to the note: ${errorText(error)}`);

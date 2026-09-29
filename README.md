@@ -143,8 +143,13 @@ instead. The source joins the reference list. The files don't need to be in Zote
 ## Add to note
 
 Opened from a note, SNScribe can put a passage into it: select the words, **Edit → Add to note…**,
-then tap where it goes on the note's page. It arrives as a Supernote text box (searchable,
-editable; move or resize it with the lasso). Opened from a PDF or EPUB, there's no note to add to.
+then **Place in note** and tap where it goes on the note's page. It arrives as a Supernote text box
+(searchable, editable; move or resize it with the lasso). Two switches, remembered:
+**Add source line** puts a line under the passage — the citation of a quote in it (as your paper
+cites it), else the document and the heading it's under — and **Stay in the note afterwards**
+leaves you in the note to write about it (open SNScribe again to come back to the same place);
+off, SNScribe comes straight back for the next passage. Opened from a PDF or EPUB, there's no
+note to add to.
 
 ## Review: comments, tracked changes, handwritten notes
 
