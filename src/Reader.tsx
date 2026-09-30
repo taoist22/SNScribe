@@ -1154,7 +1154,7 @@ export function Reader(): React.JSX.Element {
     setShowPages(false);
     setSelection(null);
     setCaret(blank);
-    keys.current?.focus();
+    focusKeys();
     setStatus('New page. Type to fill it.');
   };
 
@@ -1229,7 +1229,7 @@ export function Reader(): React.JSX.Element {
     goTo(map.pages[i].anchor);
     setCaret(null);
     setSelection({from, to});
-    keys.current?.focus();
+    focusKeys();
     setStatus('Page selected. Delete (or Backspace) removes it; tap the page to cancel.');
   };
 
@@ -1482,7 +1482,7 @@ export function Reader(): React.JSX.Element {
           setSelection(null);
           setCaret(linkTap);
           setLinkTap(null);
-          keys.current?.focus();
+          focusKeys();
         })}
       </View>
     ) : null;
@@ -1842,6 +1842,18 @@ export function Reader(): React.JSX.Element {
   const lastTap = useRef<{x: number; y: number; at: number} | null>(null);
   /** Pen and finger, each logged the first time it touches the page. */
   const toolsSeen = useRef(new Set<string>());
+  /**
+   * Keys to the page: focus the invisible field and make sure the on-screen keyboard is up
+   * (after a panel closed it, focusing alone did not bring it back).
+   */
+  const focusKeys = () => {
+    keys.current?.focus();
+    const tag = findNodeHandle(keys.current);
+    if (tag !== null && DocxKeys?.showKeyboard) {
+      DocxKeys.showKeyboard(tag).catch(() => undefined);
+    }
+  };
+
   /** The invisible field that receives the keyboard. Focused on the first tap, kept until Hide keyboard. */
   const keys = useRef<TextInput>(null);
 
@@ -1895,7 +1907,7 @@ export function Reader(): React.JSX.Element {
       // Anything typed so far is committed first. The page already showed it, so the
       // positions just measured stay right.
       flushTyping();
-      keys.current?.focus();
+      focusKeys();
       setScript(null);
       // A tap on linked words opens their comment, note or quote.
       const link = tap && !doubleTap ? linkAt(a.x, a.y) : null;
@@ -3126,7 +3138,7 @@ export function Reader(): React.JSX.Element {
     }
     setInput('');
     setTyping({mode: 'replace', range: r});
-    keys.current?.focus();
+    focusKeys();
   };
 
   /** Commits what was typed (one undo step) and ends typing. */

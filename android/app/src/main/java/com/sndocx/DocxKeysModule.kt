@@ -91,6 +91,34 @@ class DocxKeysModule(private val reactContext: ReactApplicationContext) : ReactC
         }
     }
 
+    /**
+     * Brings up the on-screen keyboard (or handwriting input) for the editor's text field.
+     * Focusing a field React Native already counts as focused does nothing, so after a
+     * panel had closed the keyboard, tapping back into the page left it closed (a user
+     * report, 2026-09-30). Not with a hardware keyboard attached: Android would show only its
+     * strip at the bottom of the page.
+     */
+    @ReactMethod
+    fun showKeyboard(tag: Double, promise: Promise) {
+        UiThreadUtil.runOnUiThread {
+            val reactTag = tag.toInt()
+            val view = runCatching { UIManagerHelper.getUIManagerForReactTag(reactContext, reactTag)?.resolveView(reactTag) }.getOrNull()
+            if (view == null) {
+                promise.resolve("no view for tag $reactTag")
+                return@runOnUiThread
+            }
+            val hardware = view.resources.configuration.hardKeyboardHidden == android.content.res.Configuration.HARDKEYBOARDHIDDEN_NO
+            if (hardware) {
+                promise.resolve("hardware keyboard")
+                return@runOnUiThread
+            }
+            view.requestFocus()
+            val imm = reactContext.getSystemService(Context.INPUT_METHOD_SERVICE) as? android.view.inputmethod.InputMethodManager
+            val shown = imm?.showSoftInput(view, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT) ?: false
+            promise.resolve(if (shown) "shown" else "not shown")
+        }
+    }
+
     @ReactMethod
     fun copy(text: String, promise: Promise) {
         UiThreadUtil.runOnUiThread {
