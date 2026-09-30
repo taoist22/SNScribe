@@ -2,6 +2,7 @@ import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
   AppState,
   DeviceEventEmitter,
+  Dimensions,
   Image,
   Keyboard,
   PixelRatio,
@@ -174,6 +175,10 @@ export function Reader(): React.JSX.Element {
   /** Pages view: only the pages with comments, handwritten notes or tracked changes. */
   const [notesOnly, setNotesOnly] = useState(false);
   const [goToText, setGoToText] = useState('');
+  /** The on-screen keyboard's height (0: none), and where the page starts on screen: what the keyboard covers. */
+  const [keyboardH, setKeyboardH] = useState(0);
+  const [viewportTop, setViewportTop] = useState(0);
+  const viewportRef = useRef<View>(null);
   /** Add to note: the passage waiting to be placed in the note (null: not placing). */
   const [placing, setPlacing] = useState<string | null>(null);
   /** Add to note: the passage and its source line, while the panel is open. */
@@ -263,10 +268,14 @@ export function Reader(): React.JSX.Element {
   // What Android reports about keyboards, for the strip that sometimes covers the page's
   // last lines after switching from the on-screen keyboard to the Bluetooth one (CT).
   useEffect(() => {
-    const shown = Keyboard.addListener('keyboardDidShow', e =>
-      log(`keyboard shown: ${Math.round(e.endCoordinates.height)} dp high, top at ${Math.round(e.endCoordinates.screenY)}`),
-    );
-    const hidden = Keyboard.addListener('keyboardDidHide', () => log('keyboard hidden'));
+    const shown = Keyboard.addListener('keyboardDidShow', e => {
+      log(`keyboard shown: ${Math.round(e.endCoordinates.height)} dp high, top at ${Math.round(e.endCoordinates.screenY)}`);
+      setKeyboardH(Math.round(e.endCoordinates.height));
+    });
+    const hidden = Keyboard.addListener('keyboardDidHide', () => {
+      log('keyboard hidden');
+      setKeyboardH(0);
+    });
     return () => {
       shown.remove();
       hidden.remove();
@@ -1395,6 +1404,66 @@ export function Reader(): React.JSX.Element {
     commit([{op: 'footnoteDelete', para: -1, id: Number(fnEdit.id)}], 'delete footnote');
     setStatus('Footnote deleted; the ones after it are renumbered. Undo puts it back.');
   };
+
+  // ---------------------------------------------------------------- the on-screen keyboard
+
+  /** How much of the page shows above the on-screen keyboard (all of it without one). */
+  const visibleH = keyboardH > 0 ? Math.max(120, Math.min(pageH, Dimensions.get('window').height - keyboardH - viewportTop)) : pageH;
+  /** The page start before the view slid up for the keyboard (to go back to when it closes). */
+  const slidFrom = useRef<Anchor | null>(null);
+
+  // The keyboard covers the bottom of the page. When the cursor (or the start of the
+  // selection) would be under it, the page slides so that line is at the top, one line of
+  // what comes before it above: the same lines, a different slice of them — nothing reflows
+  // and nothing is recounted. When the keyboard closes, the page goes back to its start.
+  useEffect(() => {
+    if (keyboardH === 0 || brk.kind === 'pending') {
+      return;
+    }
+    let i = -1;
+    let top: number | null = null;
+    let lineH = 30;
+    if (caretAt && caretBox && caretBox.key === pageKey) {
+      i = window.findIndex(b => b.type === 'p' && b.index === caretAt.para);
+      top = caretBox.top - anchor.offset;
+      lineH = caretBox.height;
+    } else if (selection && !typing) {
+      const s0 = comparePos(selection.from, selection.to) <= 0 ? selection.from : selection.to;
+      i = window.findIndex(b => b.type === 'p' && b.index === s0.para);
+      top = i >= 0 ? yOf(i, s0.offset) : null;
+    }
+    if (i < 0 || top === null || (top >= 0 && top + lineH * 1.5 <= visibleH)) {
+      return;
+    }
+    const f = frames.current[i];
+    if (!f) {
+      return;
+    }
+    // The line before the cursor's line, in its paragraph (or the paragraph's top).
+    const inBlock = top + anchor.offset - f.top;
+    let prev = 0;
+    for (const line of lines.current[i] ?? []) {
+      if (line.y + 1 >= inBlock) {
+        break;
+      }
+      prev = line.y;
+    }
+    if (!slidFrom.current) {
+      slidFrom.current = anchor;
+    }
+    setAnchor({block: anchor.block + i, offset: Math.max(0, Math.round(prev))});
+    // frames/lines are read when it runs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [keyboardH, caretBox, selection, visibleH, brk]);
+
+  // Keyboard closed: back to the start of the page the cursor is on now.
+  useEffect(() => {
+    if (keyboardH === 0 && slidFrom.current) {
+      slidFrom.current = null;
+      setAnchor(a => pageStartOf(a));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [keyboardH]);
 
   // ---------------------------------------------------------------- linked words
 
@@ -5878,7 +5947,10 @@ export function Reader(): React.JSX.Element {
             ))}
           </ScrollView>
         ) : pageH > 0 ? (
-          <View style={[styles.viewport, {height: pageH, width: textW}]}>
+          <View
+            ref={viewportRef}
+            onLayout={() => viewportRef.current?.measureInWindow((_x, y) => setViewportTop(Math.round(y)))}
+            style={[styles.viewport, {height: pageH, width: textW}]}>
             <View key={pageKey} style={[styles.column, {top: -anchor.offset}]}>
               {window.map((b, i) => (
                 <BlockView
