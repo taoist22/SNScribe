@@ -55,6 +55,8 @@ documents) and **internet** (only for Zotero and DOI look-ups).
   comments, handwritten notes and tracked changes it has; **Only pages with notes** narrows the
   list. Card buttons (*New page after*, *Select page*, *Remove page break*) take a second tap.
 - **Backspace** at the start of a page removes that page's page break.
+- With the **on-screen keyboard** up, the page slides so the line you're typing on shows above
+  it, and slides back when the keyboard closes. Tapping back into the page brings the keyboard back.
 - **View → Word count…** shows the word count, and can set a **target** for the body text
   (without a title page and the reference list); progress shows on the bottom line.
   **View** also changes the text size.
@@ -153,21 +155,32 @@ note to add to.
 
 ## Review: comments, tracked changes, handwritten notes
 
+The text always keeps the full page width: opening a comment, a note or a change never
+rewraps the document or changes the page count.
+
 **Linked words:** the words a comment is on, the words a handwritten note is about, and quotes
 you inserted have a **dashed underline** on screen (not in Word). **Tap them** to open the
-comment, the note, or where the quote came from (file and page); **Type here** in that panel puts
-the cursor where you tapped. Notes and quotes made before version 0.1.3 have no link.
+comment, the note, or where the quote came from (file and page). Notes and quotes made before
+version 0.1.3 have no link; tap the note's ✎ mark instead.
 
+- **The review pane** slides in from the right over the page, beside the words: placed so those
+  words and a few lines before and after them stay readable. Close it with ✕, Back or a tap on
+  the page. **Type here** puts the cursor where you tapped. Opening it doesn't bring up the
+  keyboard; **Reply** does, and the page slides so the words stay in view above it.
+- **Comments:** read the thread, reply or delete. **Edit → Comment…** adds one.
 - **Tracked changes** from Word show in the text (insertions underlined, deletions struck
-  through) and as cards in the **margin panel**, each with ✓ accept / ✗ reject.
-- **Comments** show as margin cards: tap to read the thread, reply or delete.
-  **Edit → Comment…** adds one.
+  through). **Tap one** for who made it and when, and ✓ **Accept** / ✗ **Reject**.
+  **Edit → Accept all / Reject all** does the whole document.
 - **Handwritten notes** (**Edit → Handwritten note…**): write with the pen in the note box; your
   ink goes into the Word file as a picture in the right margin beside the words you chose (it
-  shows and prints in Word), in the color you pick.
-- The margin panel folds away with **› Fold panel**. It appears with a document's first comment
-  or note, folded to a narrow strip (tap it to open), and the page stays on the words you just
-  commented on while the text rewraps around it.
+  shows and prints in Word), in the color you pick. Tap the words or the ✎ mark to see or
+  delete it.
+- **View → Comments and changes…** lists every comment, handwritten note and tracked change in
+  order, with its page and the words it is about; chips at the top choose which kinds show.
+  **Tap a row** to go to its page with the pane open. In the pane, **◀ ▶** step to the previous
+  and next item in that list ("Comment · 3 of 12"), turning pages as needed — handy for working
+  through an instructor's feedback.
+- The bottom line shows how many comments, notes and changes the page has.
 
 ## Spelling
 
