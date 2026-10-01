@@ -57,6 +57,7 @@ import {
   textEditProblem,
   threadIds,
   toShown,
+  changeRanges,
   pageBreakChars,
   wordAround,
   type FormatProp,
@@ -106,17 +107,20 @@ import {Docx, DocxKeys, DocxText, errorText, log, nativeBuild, type KeyPress} fr
 const HEADER_H = 64;
 const BAR_H = 60;
 const PAD = 16;
-/** The margin column beside the text: tracked changes and comments, as in Word's margin. */
-const MARGIN_W = 290;
-const MARGIN_GAP = 14;
-/** A margin card's height: cards are a fixed size so they can be stacked before they are drawn. */
-const CARD_H = 84;
+/**
+ * The review pane: one comment, note, quote or tracked change, slid in from the right over
+ * the page beside the words it belongs to. The text never narrows for it (CT: a full-height
+ * margin column rewrapped the whole document whenever it opened or folded).
+ */
+const PANE_W = 270;
+/** Lines kept clear above and below the words a pane is about. */
+const PANE_CLEAR_LINES = 3;
+/** The pane's title row. */
+const PANE_HEAD = 48;
 /** The pen pad's header row (fixed: the surface below it must never move). */
 const PAD_HEAD = 64;
 /** The pen pad's writing column: margin-shaped. */
 const PAD_W = 420;
-/** The margin column folded away: a strip with a count and a button to open it again. */
-const MARGIN_STRIP = 44;
 /** Ink colours for the note picture in Word (the pad itself can only show black). */
 const INK_COLORS: Array<[string, string]> = [
   ['Black', '#000000'],
@@ -140,9 +144,11 @@ type Frame = {x: number; top: number; height: number};
 type Selection = {from: Pos; to: Pos};
 type Typing = {mode: 'insert'; at: Pos} | {mode: 'replace'; range: Range};
 type HfLine = {text: string; align: 'left' | 'center' | 'right'; page: boolean};
+/** What a tap on the page can open in the review pane: linked words, or a tracked change. */
+type TapKind = LinkKind | 'change';
 
 type Menu =
-  | 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count' | 'page' | 'preset' | 'header' | 'link' | 'thread' | 'comment' | 'note' | 'hl' | 'find' | 'cite' | 'quotes' | 'spell' | 'goto' | 'picture' | 'footnote' | 'cell' | 'table' | 'picsize' | 'quoteinfo' | 'addnote'
+  | 'file' | 'edit' | 'style' | 'list' | 'font' | 'size' | 'name' | 'folder' | 'view' | 'para' | 'count' | 'page' | 'preset' | 'header' | 'link' | 'thread' | 'comment' | 'note' | 'hl' | 'find' | 'cite' | 'quotes' | 'spell' | 'goto' | 'picture' | 'footnote' | 'cell' | 'table' | 'picsize' | 'quoteinfo' | 'addnote' | 'change'
   | 'recent' | 'versions' | 'recover';
 
 /** Drop-down menu width; menus are kept inside the screen. */
@@ -189,9 +195,14 @@ export function Reader(): React.JSX.Element {
   /** The quote link (bookmark name) whose panel is open; the place in the text that was tapped to open a link. */
   const [quoteOpen, setQuoteOpen] = useState<string | null>(null);
   const [linkTap, setLinkTap] = useState<Pos | null>(null);
+  /** The review pane: the tapped words' link id (their lines stay clear of it) and its drawn height. */
+  const [paneLink, setPaneLink] = useState<string | null>(null);
+  const [paneH, setPaneH] = useState(0);
+  /** The tracked change open in the review pane. */
+  const [changeOpen, setChangeOpen] = useState<{para: number; id: string} | null>(null);
   const [savedQuotes, setSavedQuotes] = useState<SavedQuote[]>([]);
   /** Where linked words sit on this page (column coordinates), for their dashed underline and for taps. */
-  const [linkLines, setLinkLines] = useState<{key: string; lines: Array<{id: string; kind: LinkKind; x: number; w: number; top: number; bottom: number}>}>({key: '', lines: []});
+  const [linkLines, setLinkLines] = useState<{key: string; lines: Array<{id: string; kind: TapKind; x: number; w: number; top: number; bottom: number}>}>({key: '', lines: []});
   /** The cell being edited (table ordinal, row, cell) and its text. */
   const [cellEdit, setCellEdit] = useState<{table: number; row: number; cell: number; text: string; note: string; confirmDelete?: boolean}>({table: 0, row: 0, cell: 0, text: '', note: ''});
   /** Insert table…: after which paragraph, its size, header row, label and title. */
@@ -334,8 +345,6 @@ export function Reader(): React.JSX.Element {
   /** The page map: counted for one layout (width, page height, text size, fonts) from one version of the text. */
   const [pageMap, setPageMap] = useState<{key: string; layout: string; blocks: Block[]; pages: PageStart[]; done: boolean} | null>(null);
   const [showPages, setShowPages] = useState(false);
-  /** The margin column (View ▾); it appears only when the document has changes or comments. */
-  const [showMargin, setShowMargin] = useState(true);
   /** Find & replace: what to find, what to put instead, and the match shown last. */
   const [find, setFind] = useState<{query: string; replace: string; matchCase: boolean; at: number}>({query: '', replace: '', matchCase: false, at: -1});
   /** The colour handwritten notes are saved in (remembered). */
@@ -383,7 +392,7 @@ export function Reader(): React.JSX.Element {
       const refused = await log(`DOCX opened: NATIVE_BUILD=${nativeBuild()} read=${canRead} write=${canWrite} log=${name}`);
       // Remembered between sessions: text size, New's folder, recent documents.
       try {
-        const saved = JSON.parse((await Docx?.load('settings')) ?? '{}') as {scaleAt?: number; newFolder?: string; lastName?: string; author?: string; marginOpen?: boolean; inkColor?: string; citeStyle?: string; spell?: boolean; noteSource?: boolean; noteStay?: boolean};
+        const saved = JSON.parse((await Docx?.load('settings')) ?? '{}') as {scaleAt?: number; newFolder?: string; lastName?: string; author?: string; inkColor?: string; citeStyle?: string; spell?: boolean; noteSource?: boolean; noteStay?: boolean};
         if (typeof saved.noteSource === 'boolean') {
           setNoteSource(saved.noteSource);
         }
@@ -411,9 +420,6 @@ export function Reader(): React.JSX.Element {
           setSpellOn(saved.spell);
         }
         setMyWords(new Set(parseList<string>(await Docx?.load(`spell-words-${SPELL_LANG}`))));
-        if (typeof saved.marginOpen === 'boolean') {
-          setShowMargin(saved.marginOpen);
-        }
         if (typeof saved.inkColor === 'string') {
           setInkColor(saved.inkColor);
         }
@@ -673,7 +679,7 @@ export function Reader(): React.JSX.Element {
     const r = opened.report;
     setStatus(
       r.trackedChanges > 0
-        ? 'This document has tracked changes: they are marked in the text and listed in the margin.'
+        ? 'This document has tracked changes: they are marked in the text. Tap one to accept or reject it.'
         : created
         ? 'New document. Tap the page to start typing.'
         : '',
@@ -873,18 +879,10 @@ export function Reader(): React.JSX.Element {
   // From the committed text: typing never adds changes or notes, and this runs on every key.
   const hasChanges = useMemo(() => committed.some(b => b.type === 'p' && !!b.revs?.length), [committed]);
   const inks = useMemo(() => inksAfter(doc?.inks, applied), [doc, applied]);
-  const hasNotes = useMemo(
-    () => hasChanges || committed.some(b => b.type === 'p' && (!!b.marks?.length || b.runs.some(r => r.obj === 'ink'))),
-    [hasChanges, committed],
-  );
-  // The margin column is there whenever the document has notes, comments or changes: open,
-  // or folded into a narrow strip.
-  const marginOn = hasNotes && !showPages && !contents;
-  // The reading page's text column: the page less the margin column. Pages are counted at
-  // this width even while Pages or Contents shows (they hide the margin column), so a page
-  // number means the same page everywhere.
-  const readW = hasNotes ? Math.max(200, pageW - (showMargin ? MARGIN_W : MARGIN_STRIP) - MARGIN_GAP) : pageW;
-  const textW = marginOn ? readW : pageW;
+  // The text always has the whole page width: comments, notes and changes open in a pane
+  // over the page, so they never rewrap the text or change the page count.
+  const readW = pageW;
+  const textW = pageW;
 
   // The page map belongs to one layout (width, page height, text size, fonts) and one
   // version of the committed text. It is recounted a moment after an edit settles — from
@@ -1038,47 +1036,11 @@ export function Reader(): React.JSX.Element {
     }
   };
 
-  // After the page size, text size or margin column changes, the page shown is re-aligned
+  // After the page size or text size changes, the page shown is re-aligned
   // to a page start once the new count reaches it, so ◀ ▶ and the page number agree.
   const alignedFor = useRef('');
-  /** Words to keep on screen through the next rewrap: a new comment's or note's (with when). */
-  const keepInView = useRef<{pos: Pos; time: number} | null>(null);
-  // The first comment or note brings the margin panel: it opens folded (the text narrows only a
-  // little), and the page moves to the paragraph just commented on until the recount places it.
-  const hadNotes = useRef<{doc: DocxDocument | null; has: boolean}>({doc: null, has: false});
-  useEffect(() => {
-    const before = hadNotes.current;
-    hadNotes.current = {doc, has: hasNotes};
-    const keep = keepInView.current;
-    if (before.doc !== doc || before.has || !hasNotes || !keep || Date.now() - keep.time > 20000) {
-      return;
-    }
-    setShowMargin(false);
-    const bi = blocks.findIndex(b => b.type === 'p' && b.index === keep.pos.para);
-    if (bi >= 0) {
-      setHistory([]);
-      setAnchor({block: bi, offset: 0});
-    }
-    // Only the change of hasNotes matters.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasNotes, doc]);
   useEffect(() => {
     if (!map || alignedFor.current === map.layout || !doc) {
-      return;
-    }
-    // Words just commented on (or given a note) stay in view when the margin panel's arrival
-    // rewraps the text: the page they are on now (CT: adding a comment shifted the page).
-    const keep = keepInView.current;
-    if (keep && Date.now() - keep.time < 20000) {
-      const bi = blocks.findIndex(b => b.type === 'p' && b.index === keep.pos.para);
-      const b = blocks[bi];
-      const page = b?.type === 'p' ? pageOfChar(map.pages, bi, toShown(b, keep.pos.offset), map.done) : -1;
-      if (page < 0) {
-        return; // not counted this far yet
-      }
-      keepInView.current = null;
-      alignedFor.current = map.layout;
-      setAnchor(map.pages[page].anchor);
       return;
     }
     const at = pageStartOf(anchor);
@@ -1323,6 +1285,18 @@ export function Reader(): React.JSX.Element {
     return null;
   };
 
+  /** The handwritten note whose ✎ mark is character `char` of paragraph `para`, or null. */
+  const inkAt = (para: number, char: number): string | null => {
+    let off = 0;
+    for (const r of paragraph(para)?.runs ?? []) {
+      if (char >= off && char < off + r.t.length) {
+        return r.obj === 'ink' && r.ink ? r.ink : null;
+      }
+      off += r.t.length;
+    }
+    return null;
+  };
+
   /** Whether `source` is cited in a footnote already (Chicago: later citations are short notes). */
   const citedBefore = (source: Source): boolean => {
     const key = shortTitle(source.title);
@@ -1423,7 +1397,17 @@ export function Reader(): React.JSX.Element {
     let i = -1;
     let top: number | null = null;
     let lineH = 30;
-    if (caretAt && caretBox && caretBox.key === pageKey) {
+    // Replying in the review pane: the words it is about go to the top, the pane below them.
+    const paneAt = paneOpen && linkTap ? paneWords() : null;
+    if (paneAt && linkTap) {
+      i = window.findIndex(b => b.type === 'p' && b.index === linkTap.para);
+      // Only when the pane would not fit between them and the keyboard.
+      if (i < 0 || (paneAt.top >= 0 && paneAt.bottom + paneAt.lineH + (paneH || 260) <= visibleH) || (paneAt.top >= 0 && paneAt.top <= paneAt.lineH * 2.5)) {
+        return;
+      }
+      top = paneAt.top;
+      lineH = paneAt.lineH;
+    } else if (caretAt && caretBox && caretBox.key === pageKey) {
       i = window.findIndex(b => b.type === 'p' && b.index === caretAt.para);
       top = caretBox.top - anchor.offset;
       lineH = caretBox.height;
@@ -1432,7 +1416,7 @@ export function Reader(): React.JSX.Element {
       i = window.findIndex(b => b.type === 'p' && b.index === s0.para);
       top = i >= 0 ? yOf(i, s0.offset) : null;
     }
-    if (i < 0 || top === null || (top >= 0 && top + lineH * 1.5 <= visibleH)) {
+    if (i < 0 || top === null || (!paneAt && top >= 0 && top + lineH * 1.5 <= visibleH)) {
       return;
     }
     const f = frames.current[i];
@@ -1454,7 +1438,7 @@ export function Reader(): React.JSX.Element {
     setAnchor({block: anchor.block + i, offset: Math.max(0, Math.round(prev))});
     // frames/lines are read when it runs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [keyboardH, caretBox, selection, visibleH, brk]);
+  }, [keyboardH, caretBox, selection, visibleH, brk, menu, paneLink]);
 
   // Keyboard closed: back to the start of the page the cursor is on now.
   useEffect(() => {
@@ -1477,19 +1461,27 @@ export function Reader(): React.JSX.Element {
     }
     const key = pageKey;
     const t = setTimeout(async () => {
-      const lines: Array<{id: string; kind: LinkKind; x: number; w: number; top: number; bottom: number}> = [];
+      const lines: Array<{id: string; kind: TapKind; x: number; w: number; top: number; bottom: number}> = [];
       const scale = PixelRatio.get();
       for (let i = 0; i < window.length; i++) {
         const b = window[i];
-        const segs = b.type === 'p' ? links.get(b.index) : undefined;
+        if (b.type !== 'p') {
+          continue;
+        }
+        // Linked words (model offsets) and tracked changes (already screen offsets): a tap on
+        // either opens the review pane.
+        const segs: Array<{id: string; kind: TapKind; from: number; to: number}> = [
+          ...(links.get(b.index) ?? []).map(g => ({id: g.id, kind: g.kind, from: toShown(b, g.start), to: toShown(b, g.end)})),
+          ...(b.revs?.length ? changeRanges(b).map(c => ({id: `${b.index}|${c.id}`, kind: 'change' as const, from: c.start, to: c.end})) : []),
+        ];
         const f = frames.current[i];
         const tag = findNodeHandle(textRefs.current[i] ?? null);
-        if (!segs || b.type !== 'p' || !f || tag === null) {
+        if (!segs.length || !f || tag === null) {
           continue;
         }
         const tf = textFrames.current[i] ?? {x: 0, y: 0};
         for (const seg of segs) {
-          const r = await DocxText!.rangeRects!(tag, toShown(b, seg.start), toShown(b, seg.end));
+          const r = await DocxText!.rangeRects!(tag, seg.from, seg.to);
           for (const rc of r.rects ?? []) {
             lines.push({
               id: seg.id,
@@ -1521,14 +1513,25 @@ export function Reader(): React.JSX.Element {
   };
 
   /** Whether a link's comment, note or quote is the one open now (its underline is drawn heavier). */
-  const linkOpen = (id: string, kind: LinkKind) =>
-    kind === 'comment' ? menu === 'thread' && thread === id : kind === 'ink' ? menu === 'note' && noteOpen === id.slice(INK_LINK.length) : menu === 'quoteinfo' && quoteOpen === id;
+  const linkOpen = (id: string, kind: TapKind) =>
+    kind === 'comment'
+      ? menu === 'thread' && thread === id
+      : kind === 'ink'
+      ? menu === 'note' && noteOpen === id.slice(INK_LINK.length)
+      : kind === 'quote'
+      ? menu === 'quoteinfo' && quoteOpen === id
+      : menu === 'change' && !!changeOpen && `${changeOpen.para}|${changeOpen.id}` === id;
 
-  const openLink = async (link: {id: string; kind: LinkKind}, at: Pos) => {
+  const openLink = async (link: {id: string; kind: TapKind}, at: Pos) => {
     flushTyping();
     setLinkTap(at);
-    setMenuX(Math.max(0, pageW - MENU_W));
-    if (link.kind === 'comment') {
+    setPaneLink(link.id);
+    setPaneH(0);
+    if (link.kind === 'change') {
+      const [para, id] = link.id.split('|');
+      setChangeOpen({para: Number(para), id});
+      setMenu('change');
+    } else if (link.kind === 'comment') {
       openThread(link.id);
     } else if (link.kind === 'ink') {
       setNoteOpen(link.id.slice(INK_LINK.length));
@@ -1543,11 +1546,12 @@ export function Reader(): React.JSX.Element {
   /** In a link's panel: put the cursor where the words were tapped, to type there. */
   const typeHere = () =>
     linkTap ? (
-      <View style={styles.row}>
+      <View style={styles.paneRow}>
         {panelButton('Type here', () => {
           setMenu(null);
           setThread(null);
           setNoteOpen(null);
+          setChangeOpen(null);
           setSelection(null);
           setCaret(linkTap);
           setLinkTap(null);
@@ -1976,18 +1980,25 @@ export function Reader(): React.JSX.Element {
       // Anything typed so far is committed first. The page already showed it, so the
       // positions just measured stay right.
       flushTyping();
-      focusKeys();
       setScript(null);
-      // A tap on linked words opens their comment, note or quote.
+      // A tap on linked words or a tracked change opens the review pane (no keyboard: that is
+      // for reading; Reply or Type here bring it).
       const link = tap && !doubleTap ? linkAt(a.x, a.y) : null;
       if (link) {
         openLink(link, {para: ha.para, offset: ha.offset});
         return;
       }
+      focusKeys();
       // A tap on a footnote's number opens the footnote; on a picture, its size.
       const tapped = tap && !doubleTap ? noteAt(ha.para, ha.char) : null;
       if (tapped) {
         openFootnote(tapped);
+        return;
+      }
+      // A tap on a handwritten note's ✎ mark opens the note (notes made before linked words too).
+      const ink = tap && !doubleTap ? inkAt(ha.para, ha.char) : null;
+      if (ink) {
+        openLink({id: `${INK_LINK}${ink}`, kind: 'ink'}, {para: ha.para, offset: ha.offset});
         return;
       }
       const picAt = tap && !doubleTap ? pictureAt(ha.para, ha.char) : null;
@@ -2171,7 +2182,6 @@ export function Reader(): React.JSX.Element {
       if (pad.end > pad.at) {
         ops.push({op: 'bookmark', para: -1, fromPara: pad.para, from: pad.at + 1, toPara: pad.para, to: pad.end + 1, name: `${INK_LINK}${id}`});
       }
-      keepInView.current = {pos: {para: pad.para, offset: pad.at}, time: Date.now()};
       commit(ops, 'handwritten note');
       setPad(null);
       setStatus('Note added in the right margin. Save to put it in the Word file.');
@@ -2750,7 +2760,6 @@ export function Reader(): React.JSX.Element {
     }
     const {quote: _q, text: _t, ...at} = commentForm;
     const name = author.trim();
-    keepInView.current = {pos: {para: at.fromPara, offset: at.from}, time: Date.now()};
     commit(
       [{op: 'comment', para: -1, id: nextCommentId(comments), ...at, text, author: name, initials: initialsOf(name), date: new Date().toISOString().replace(/\.\d+Z$/, 'Z')}],
       'comment',
@@ -3996,8 +4005,8 @@ export function Reader(): React.JSX.Element {
 
   // Settings are remembered between sessions.
   useEffect(() => {
-    Docx?.store('settings', JSON.stringify({scaleAt, newFolder, lastName, author, marginOpen: showMargin, inkColor, citeStyle, spell: spellOn, noteSource, noteStay}));
-  }, [scaleAt, newFolder, lastName, author, showMargin, inkColor, citeStyle, spellOn, noteSource, noteStay]);
+    Docx?.store('settings', JSON.stringify({scaleAt, newFolder, lastName, author, inkColor, citeStyle, spell: spellOn, noteSource, noteStay}));
+  }, [scaleAt, newFolder, lastName, author, inkColor, citeStyle, spellOn, noteSource, noteStay]);
 
   // The page follows the caret when it moves (typing, arrows) — not when the page is turned.
   const followCaret = useRef(false);
@@ -4094,196 +4103,93 @@ export function Reader(): React.JSX.Element {
     return f.top + tf.y + y - anchor.offset;
   };
 
-  /** The folded margin: a strip with how many items this page has, and a button to open it. */
-  const marginStrip = () => {
-    let n = 0;
-    window.forEach(b => {
-      if (b.type === 'p') {
-        n += (b.revs?.length ?? 0) + (b.marks ?? []).filter(m => m.kind === 'start').length + b.runs.filter(r => r.obj === 'ink').length;
-      }
-    });
-    return (
-      <Pressable
-        onPress={once('open-margin', () => setShowMargin(true))}
-        style={[styles.strip, {height: pageH, left: PAD + textW + MARGIN_GAP, top: PAD}]}>
-        <Text allowFontScaling={false} style={styles.stripArrow}>
-          {'‹'}
-        </Text>
-        {n > 0 ? (
-          <Text allowFontScaling={false} style={styles.stripCount}>
-            {String(n)}
-          </Text>
-        ) : null}
-      </Pressable>
-    );
-  };
-
-  /** The margin: a card beside the line of each note, comment and tracked change on this page. */
-  const marginColumn = () => {
-    type Card = {
-      key: string;
-      y: number;
-      para: number;
-      id: string;
-      kind: 'ins' | 'del' | 'comment' | 'ink';
-      author: string;
-      text: string;
-      move?: boolean;
-      replies?: number;
-      h?: number;
-      src?: string;
-    };
-    const cards: Card[] = [];
-    const inkW = MARGIN_W - 20;
+  /** Comments, handwritten notes and tracked changes that start on this page, for the bottom line. */
+  const pageNotes = (): string => {
+    let threads = 0;
+    let notes = 0;
+    let changes = 0;
     window.forEach((b, i) => {
       if (b.type !== 'p') {
         return;
       }
-      let offset = 0;
+      const here = (offset: number) => {
+        const y = yOf(i, offset);
+        return y !== null && y >= -4 && y < visible;
+      };
+      let off = 0;
+      const firstOf = new Map<string, number>();
       for (const r of b.runs) {
-        if (r.obj === 'ink' && r.ink) {
-          const y = yOf(i, offset);
-          if (y !== null && y >= -4 && y < visible) {
-            cards.push({key: `n:${r.ink}`, y: Math.max(0, y), para: b.index, id: r.ink, kind: 'ink', author: '', text: '', h: 120, src: inks[r.ink]});
-          }
+        if (r.obj === 'ink' && here(off)) {
+          notes++;
         }
-        offset += r.t.length;
-      }
-    });
-    const threads = new Set(comments.filter(c => !c.parent).map(c => c.id));
-    window.forEach((b, i) => {
-      if (b.type !== 'p') {
-        return;
+        if (r.rv && !firstOf.has(r.rv)) {
+          firstOf.set(r.rv, off);
+        }
+        off += r.t.length;
       }
       for (const m of b.marks ?? []) {
-        // A thread's card sits at its start (or, with no range, at its reference mark).
-        const hasStart = (b.marks ?? []).some(x => x.id === m.id && x.kind === 'start');
-        if (!threads.has(m.id) || (m.kind !== 'start' && !(m.kind === 'ref' && !hasStart))) {
-          continue;
-        }
-        const c = comments.find(x => x.id === m.id)!;
-        const y = yOf(i, m.at);
-        if (y !== null && y >= -4 && y < visible) {
-          cards.push({
-            key: `c:${m.id}`,
-            y: Math.max(0, y),
-            para: b.index,
-            id: m.id,
-            kind: 'comment',
-            author: c.author,
-            text: c.text || (c.pictures ? '✎ handwritten note' : ''),
-            replies: threadIds(comments, m.id).length - 1,
-          });
+        if (m.kind === 'start' && threadSet.has(m.id) && here(m.at)) {
+          threads++;
         }
       }
       for (const v of b.revs ?? []) {
-        let at = v.at ?? 0;
-        let text = (v.runs ?? []).map(r => r.t).join('');
-        if (v.kind === 'ins') {
-          let pos = 0;
-          let first = -1;
-          text = '';
-          for (const r of b.runs) {
-            if (r.rv === v.id) {
-              first = first < 0 ? pos : first;
-              text += r.t;
-            }
-            pos += r.t.length;
-          }
-          at = Math.max(0, first);
-        }
-        const y = yOf(i, at);
-        if (y !== null && y >= -4 && y < visible) {
-          cards.push({key: `${b.index}:${v.id}:${v.kind}`, y: Math.max(0, y), para: b.index, id: v.id, kind: v.kind, author: v.author, text, move: v.move});
+        if (here(v.kind === 'del' ? v.at ?? 0 : firstOf.get(v.id) ?? 0)) {
+          changes++;
         }
       }
     });
-    cards.sort((a, b) => a.y - b.y);
-    // Stacked downward where they would overlap; those that no longer fit are counted.
-    let bottom = 0;
-    const placed: Array<Card & {top: number}> = [];
-    let hidden = 0;
-    for (const c of cards) {
-      const top = Math.max(c.y, bottom);
-      const h = c.h ?? CARD_H;
-      if (top + h > pageH - 84) {
-        hidden++;
-        continue;
-      }
-      placed.push({...c, top});
-      bottom = top + h + 6;
-    }
-    return (
-      <View style={[styles.margin, {height: pageH, left: PAD + textW + MARGIN_GAP, top: PAD}]}>
-        {placed.map(c =>
-          c.kind === 'ink' ? (
-            <Pressable
-              key={c.key}
-              onPress={once(`note:${c.id}`, () => {
-                setNoteOpen(c.id);
-                setMenu('note');
-              })}
-              style={[styles.inkCard, {top: c.top, height: c.h}]}>
-              {c.src ? (
-                <Image source={{uri: `file://${c.src}`}} resizeMode="contain" style={{width: inkW, height: (c.h ?? CARD_H) - 8}} />
-              ) : (
-                <Text allowFontScaling={false} style={styles.cardBody}>
-                  {'✎ Handwritten note'}
-                </Text>
-              )}
-            </Pressable>
-          ) : c.kind === 'comment' ? (
-            <Pressable key={c.key} onPress={once(`thread:${c.id}`, () => openThread(c.id))} style={[styles.card, styles.commentCard, {top: c.top}]}>
-              <View style={styles.cardText}>
-                <Text allowFontScaling={false} style={styles.cardHead} numberOfLines={1}>
-                  {`Comment · ${c.author || 'Unknown'}${c.replies ? `  ·  ${c.replies} repl${c.replies === 1 ? 'y' : 'ies'}` : ''}`}
-                </Text>
-                <Text allowFontScaling={false} style={styles.cardBody} numberOfLines={2}>
-                  {c.text}
-                </Text>
-              </View>
-            </Pressable>
-          ) : (
-          <View key={c.key} style={[styles.card, {top: c.top}]}>
-            <View style={styles.cardText}>
-              <Text allowFontScaling={false} style={styles.cardHead} numberOfLines={1}>
-                {`${c.move ? (c.kind === 'ins' ? 'Moved here' : 'Moved away') : c.kind === 'ins' ? 'Inserted' : 'Deleted'} · ${c.author || 'Unknown'}`}
-              </Text>
-              <Text allowFontScaling={false} style={[styles.cardBody, c.kind === 'del' ? styles.cardDeleted : styles.cardInserted]} numberOfLines={2}>
-                {c.text.replace(/\ufffc/g, '◇')}
-              </Text>
-            </View>
-            <Pressable onPress={once(`acc:${c.key}`, () => review(c.para, c.id, true))} style={styles.cardButton}>
-              <Text allowFontScaling={false} style={styles.cardButtonText}>
-                {'✓'}
-              </Text>
-            </Pressable>
-            <Pressable onPress={once(`rej:${c.key}`, () => review(c.para, c.id, false))} style={styles.cardButton}>
-              <Text allowFontScaling={false} style={styles.cardButtonText}>
-                {'✗'}
-              </Text>
-            </Pressable>
-          </View>
-          ),
-        )}
-        {hidden > 0 ? (
-          <Text allowFontScaling={false} style={[styles.cardMore, {top: pageH - 76}]}>
-            {`+${hidden} more on this page (turn the page or hide some by reviewing)`}
-          </Text>
-        ) : null}
-        {doc?.otherRevisions ? (
-          <Text allowFontScaling={false} style={[styles.cardMore, {top: placed.length ? pageH - 100 : 0}]} numberOfLines={2}>
-            {`${doc.otherRevisions} formatting or paragraph change${doc.otherRevisions === 1 ? '' : 's'} can't be reviewed here yet; they stay as they are.`}
-          </Text>
-        ) : null}
-        <Pressable onPress={once('fold-margin', () => setShowMargin(false))} style={[styles.foldButton, {top: pageH - 44}]}>
-          <Text allowFontScaling={false} style={styles.foldText}>
-            {'›  Fold panel'}
-          </Text>
-        </Pressable>
-      </View>
-    );
+    const n = (k: number, one: string) => (k ? `${k} ${one}${k === 1 ? '' : 's'}` : '');
+    const parts = [n(threads, 'comment'), n(notes, 'note'), n(changes, 'change')].filter(Boolean);
+    return parts.length ? `${parts.join(' · ')} on this page` : '';
   };
+
+  const paneOpen = menu === 'thread' || menu === 'note' || menu === 'quoteinfo' || menu === 'change';
+
+  /** Where the pane's words are on the page (y, from the top of the page) and their line height. */
+  const paneWords = (): {top: number; bottom: number; lineH: number} | null => {
+    const rects = paneLink && linkLines.key === pageKey ? linkLines.lines.filter(l => l.id === paneLink) : [];
+    if (rects.length) {
+      return {
+        top: Math.min(...rects.map(r => r.top)) - anchor.offset,
+        bottom: Math.max(...rects.map(r => r.bottom)) - anchor.offset,
+        lineH: Math.max(20, rects[0].bottom - rects[0].top),
+      };
+    }
+    const i = linkTap ? window.findIndex(b => b.type === 'p' && b.index === linkTap.para) : -1;
+    const y = i >= 0 && linkTap ? yOf(i, linkTap.offset) : null;
+    return y === null ? null : {top: y, bottom: y + 30, lineH: 30};
+  };
+
+  /**
+   * Where the pane goes (y on the page, and the most it may take): below the words, with a
+   * few lines before and after them left clear, else above; when neither fits, closer to the
+   * words, then the larger side, scrolling. Above the on-screen keyboard while it shows.
+   */
+  const paneSpot = (): {top: number; maxH: number} => {
+    const area = keyboardH > 0 ? visibleH : pageH;
+    const at = paneWords();
+    const h = paneH || 260;
+    if (!at) {
+      return {top: 0, maxH: area};
+    }
+    for (const clear of [PANE_CLEAR_LINES, 1, 0]) {
+      const from = Math.max(0, at.top - clear * at.lineH);
+      const to = Math.min(area, at.bottom + clear * at.lineH);
+      if (area - to >= h) {
+        return {top: to, maxH: area - to};
+      }
+      if (from >= h) {
+        return {top: from - h, maxH: from};
+      }
+    }
+    const below = area - at.bottom;
+    const above = at.top;
+    const room = Math.max(160, Math.max(below, above));
+    return below >= above ? {top: Math.min(Math.max(0, at.bottom), area - Math.min(room, h)), maxH: room} : {top: Math.max(0, at.top - Math.min(room, h)), maxH: room};
+  };
+
+  const paneTitle = menu === 'thread' ? 'Comment' : menu === 'note' ? 'Handwritten note' : menu === 'quoteinfo' ? 'Quote' : 'Tracked change';
+
   const progress = doc && blocks.length > 0 ? Math.round((anchor.block / blocks.length) * 100) : 0;
   // From the committed text: typed words reach Contents when typing ends, not on every key.
   const headings = useMemo(() => outline(committed), [committed]);
@@ -5098,10 +5004,7 @@ export function Reader(): React.JSX.Element {
         const q = quoteOpen ? quoteOfLink(quoteOpen, savedQuotes) : undefined;
         const full = q ? (q as SavedQuote) : undefined;
         return (
-          <View style={styles.nameForm}>
-            <Text allowFontScaling={false} style={styles.cardHead}>
-              {'Quote'}
-            </Text>
+          <View style={styles.paneForm}>
             {full ? (
               <>
                 <Text allowFontScaling={false} style={styles.menuText}>
@@ -5117,26 +5020,19 @@ export function Reader(): React.JSX.Element {
               </Text>
             )}
             {typeHere()}
-            <View style={styles.row}>{button('Close', () => setMenu(null))}</View>
           </View>
         );
       }
       case 'note': {
         const src = noteOpen ? inks[noteOpen] : undefined;
         return noteOpen ? (
-          <View style={styles.nameForm}>
-            <Text allowFontScaling={false} style={styles.cardHead}>
-              {'Handwritten note · in the right margin of the Word file'}
+          <View style={styles.paneForm}>
+            <Text allowFontScaling={false} style={styles.presetSummary}>
+              {'In the right margin of the Word file.'}
             </Text>
-            {src ? <Image source={{uri: `file://${src}`}} resizeMode="contain" style={{width: MENU_W - 32, height: 300, marginVertical: 10}} /> : null}
+            {src ? <Image source={{uri: `file://${src}`}} resizeMode="contain" style={[styles.paneInk, {width: PANE_W - 28}]} /> : null}
             {typeHere()}
-            <View style={styles.row}>
-              {button('Delete note', () => deleteNote(noteOpen))}
-              {button('Close', () => {
-                setNoteOpen(null);
-                setMenu(null);
-              })}
-            </View>
+            <View style={styles.paneRow}>{button('Delete note', () => deleteNote(noteOpen))}</View>
           </View>
         ) : null;
       }
@@ -5144,7 +5040,7 @@ export function Reader(): React.JSX.Element {
         const ids = thread ? threadIds(comments, thread).map(String) : [];
         const items = comments.filter(c => ids.includes(c.id));
         return (
-          <View style={styles.nameForm}>
+          <View style={styles.paneForm}>
             {items.map((c, i) => (
               <View key={c.id} style={i > 0 ? styles.threadReply : null}>
                 <Text allowFontScaling={false} style={styles.cardHead}>
@@ -5169,14 +5065,45 @@ export function Reader(): React.JSX.Element {
               placeholder="Reply"
             />
             {typeHere()}
-            <View style={styles.row}>
+            <View style={styles.paneRow}>
               {panelButton('Reply', reply, !replyText.trim())}
               {button('Delete comment', deleteThread)}
-              {button('Close', () => {
-                setThread(null);
-                setMenu(null);
-              })}
             </View>
+          </View>
+        );
+      }
+      case 'change': {
+        const b = changeOpen ? paragraph(changeOpen.para) : undefined;
+        const v = changeOpen ? b?.revs?.find(x => x.id === changeOpen.id) : undefined;
+        if (!changeOpen || !b || !v) {
+          return (
+            <View style={styles.paneForm}>
+              <Text allowFontScaling={false} style={styles.presetSummary}>
+                {'This change is no longer in the text.'}
+              </Text>
+            </View>
+          );
+        }
+        const text = v.kind === 'ins' ? b.runs.filter(r => r.rv === v.id).map(r => r.t).join('') : (v.runs ?? []).map(r => r.t).join('');
+        const what = v.move ? (v.kind === 'ins' ? 'Moved here' : 'Moved away') : v.kind === 'ins' ? 'Inserted' : 'Deleted';
+        return (
+          <View style={styles.paneForm}>
+            <Text allowFontScaling={false} style={styles.cardHead}>
+              {`${what} · ${v.author || 'Unknown'}${v.date ? `  ·  ${v.date.slice(0, 10)}` : ''}`}
+            </Text>
+            <Text allowFontScaling={false} style={[styles.menuText, v.kind === 'del' ? styles.cardDeleted : styles.cardInserted]} numberOfLines={6}>
+              {text.replace(/\ufffc/g, '◇')}
+            </Text>
+            {typeHere()}
+            <View style={styles.paneRow}>
+              {button('✓ Accept', () => review(changeOpen.para, v.id, true))}
+              {button('✗ Reject', () => review(changeOpen.para, v.id, false))}
+            </View>
+            {doc?.otherRevisions ? (
+              <Text allowFontScaling={false} style={styles.panelNote}>
+                {`${doc.otherRevisions} formatting or paragraph change${doc.otherRevisions === 1 ? '' : 's'} in this document can't be reviewed here yet; they stay as they are.`}
+              </Text>
+            ) : null}
           </View>
         );
       }
@@ -5268,7 +5195,6 @@ export function Reader(): React.JSX.Element {
             {item('Go to start', () => goTo({block: 0, offset: 0}))}
             {item('Go to end', goToEnd)}
             {item(`${spellOn ? '✓ ' : ''}Mark misspellings`, () => setSpellOn(v => !v))}
-            {hasNotes ? item(showMargin ? 'Fold the margin panel' : 'Open the margin panel', () => setShowMargin(v => !v)) : null}
           </>
         );
       case 'folder':
@@ -5990,7 +5916,7 @@ export function Reader(): React.JSX.Element {
           // into the page's side margins: a pen set down just left of a line's first letter
           // starts at that letter instead of missing the page (CT).
           <TouchLayer
-            style={[styles.touchLayer, {top: PAD, height: pageH, width: PAD + textW + (marginOn ? MARGIN_GAP : PAD)}]}
+            style={[styles.touchLayer, {top: PAD, height: pageH, width: PAD + textW + PAD}]}
             onStartShouldSetResponder={() => {
               // A tap on the page while a menu is open only closes the menu (not the
               // restore question, which needs an answer).
@@ -6015,7 +5941,6 @@ export function Reader(): React.JSX.Element {
             onResponderTerminate={release}
           />
         ) : null}
-        {doc && marginOn && pageH > 0 ? (showMargin ? marginColumn() : marginStrip()) : null}
         {pad && pageH > 0 ? (
           <View style={[styles.pad, {width: pageW + PAD * 2, height: pageH + PAD * 2}]}>
             <View style={styles.padHead}>
@@ -6059,7 +5984,29 @@ export function Reader(): React.JSX.Element {
             </View>
           </View>
         ) : null}
-        {menu ? (
+        {menu && paneOpen ? (
+          // The review pane: over the right of the page, beside (not on) the words it is about.
+          (() => {
+            const spot = paneSpot();
+            return (
+              <View style={[styles.pane, {top: PAD + spot.top, maxHeight: Math.max(160, spot.maxH)}]}>
+                <View style={styles.paneHead}>
+                  <Text allowFontScaling={false} style={[styles.cardHead, styles.flex]} numberOfLines={1}>
+                    {paneTitle}
+                  </Text>
+                  <Pressable onPress={once('pane-close', () => setMenu(null))} style={styles.paneClose}>
+                    <Text allowFontScaling={false} style={styles.paneCloseText}>
+                      {'✕'}
+                    </Text>
+                  </Pressable>
+                </View>
+                <ScrollView keyboardShouldPersistTaps="always" onContentSizeChange={(_w, h) => setPaneH(Math.round(h) + PANE_HEAD + 4)}>
+                  {menuBody()}
+                </ScrollView>
+              </View>
+            );
+          })()
+        ) : menu ? (
           <View style={[styles.menu, {left: Math.max(0, Math.min(menuX, pageW + PAD * 2 - MENU_W - 4)), maxHeight: Math.max(240, pageH)}]}>
             <ScrollView keyboardShouldPersistTaps="always">{menuBody()}</ScrollView>
           </View>
@@ -6078,6 +6025,11 @@ export function Reader(): React.JSX.Element {
               ? 'Pen: tap to type · drag to select · double-tap a word. Finger: swipe to turn pages.'
               : '')}
         </Text>
+        {doc && !showPages && !contents && pageNotes() ? (
+          <Text allowFontScaling={false} style={styles.statusNotes} numberOfLines={1}>
+            {pageNotes()}
+          </Text>
+        ) : null}
         {doc && target ? (
           <Pressable onPress={once('count', () => setMenu('count'))} style={styles.statusPage}>
             <Text allowFontScaling={false} style={styles.statusPageText}>
@@ -6187,47 +6139,29 @@ const styles = StyleSheet.create({
   caretHint: {flex: 1, color: '#000', fontSize: 15},
   caret: {position: 'absolute', width: 3, backgroundColor: '#000'},
   statusText: {flex: 1, color: '#000', fontSize: 15},
+  statusNotes: {marginLeft: 12, color: '#000', fontSize: 15},
   statusPage: {marginLeft: 12, paddingVertical: 6, paddingHorizontal: 10, borderWidth: 1, borderColor: '#000', borderRadius: 5},
   statusPageText: {color: '#000', fontSize: 15, fontWeight: '700'},
   pageArea: {flex: 1, padding: PAD},
   viewport: {overflow: 'hidden'},
   column: {position: 'absolute', left: 0, right: 0},
-  margin: {position: 'absolute', width: MARGIN_W, borderLeftWidth: 1, borderColor: '#999', paddingLeft: 8},
-  card: {
-    position: 'absolute',
-    left: 8,
-    right: 0,
-    height: CARD_H,
-    borderWidth: 1,
-    borderColor: '#000',
-    borderRadius: 6,
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingLeft: 8,
-    backgroundColor: '#fff',
-  },
-  cardText: {flex: 1},
-  inkCard: {position: 'absolute', left: 8, right: 0, borderWidth: 1, borderColor: '#000', borderRadius: 6, padding: 3, backgroundColor: '#fff', alignItems: 'center'},
+  pane: {position: 'absolute', right: 0, width: PANE_W, backgroundColor: '#fff', borderWidth: 2, borderColor: '#000', borderRadius: 6},
+  paneHead: {height: PANE_HEAD, flexDirection: 'row', alignItems: 'center', paddingLeft: 14, borderBottomWidth: 1, borderColor: '#000'},
+  paneClose: {width: PANE_HEAD, height: PANE_HEAD, alignItems: 'center', justifyContent: 'center', borderLeftWidth: 1, borderColor: '#000'},
+  paneCloseText: {color: '#000', fontSize: 22, fontWeight: '700'},
+  paneForm: {paddingHorizontal: 14, paddingTop: 10, paddingBottom: 14},
+  paneInk: {height: 220, marginVertical: 8},
+  paneRow: {flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', rowGap: 8, marginTop: 10, marginLeft: -8},
   pad: {position: 'absolute', left: 0, top: 0, backgroundColor: '#fff'},
   padBody: {flexDirection: 'row', padding: 12},
   padSurface: {borderWidth: 2, borderColor: '#000'},
   padSide: {flex: 1, marginRight: 16},
-  strip: {position: 'absolute', width: MARGIN_STRIP, borderLeftWidth: 1, borderColor: '#999', alignItems: 'center', paddingTop: 8},
-  stripArrow: {color: '#000', fontSize: 30, fontWeight: '700'},
-  stripCount: {color: '#000', fontSize: 16, marginTop: 8, borderWidth: 1, borderColor: '#000', borderRadius: 12, minWidth: 24, textAlign: 'center', paddingHorizontal: 4},
-  foldButton: {position: 'absolute', left: 8, right: 0, height: 40, borderWidth: 1, borderColor: '#000', borderRadius: 6, justifyContent: 'center', alignItems: 'center', backgroundColor: '#fff'},
-  foldText: {color: '#000', fontSize: 16},
   padHead: {height: PAD_HEAD, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, borderBottomWidth: 1, borderColor: '#000'},
-  commentCard: {borderStyle: 'dashed', paddingRight: 8},
   commentInput: {height: 110, textAlignVertical: 'top', paddingTop: 8, marginVertical: 8},
   threadReply: {marginTop: 10, paddingLeft: 14, borderLeftWidth: 2, borderColor: '#000'},
   cardHead: {color: '#000', fontSize: 14, fontWeight: '700'},
-  cardBody: {color: '#333', fontSize: 15, marginTop: 2},
   cardInserted: {textDecorationLine: 'underline'},
   cardDeleted: {textDecorationLine: 'line-through'},
-  cardButton: {width: 44, height: CARD_H - 2, alignItems: 'center', justifyContent: 'center', borderLeftWidth: 1, borderColor: '#000'},
-  cardButtonText: {color: '#000', fontSize: 24},
-  cardMore: {position: 'absolute', left: 8, right: 0, color: '#333', fontSize: 13},
   mask: {position: 'absolute', left: 0, right: 0, bottom: 0, backgroundColor: '#fff'},
   empty: {flex: 1, alignItems: 'center', justifyContent: 'center'},
   emptyText: {color: '#000', fontSize: 20},

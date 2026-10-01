@@ -1001,6 +1001,42 @@ export function toShown(p: ParagraphBlock, offset: number): number {
   return n;
 }
 
+/**
+ * Where each tracked change shows, as TextView offsets [start, end): an insertion's runs
+ * (one range per unbroken stretch), and a deletion's struck-through text. A tap inside one
+ * opens that change.
+ */
+export function changeRanges(p: ParagraphBlock): Array<{id: string; start: number; end: number}> {
+  const out: Array<{id: string; start: number; end: number}> = [];
+  let off = 0;
+  for (const r of p.runs) {
+    const end = off + r.t.length;
+    if (r.rv && r.t.length) {
+      const last = out[out.length - 1];
+      const s = toShown(p, off);
+      if (last && last.id === r.rv && last.end === s) {
+        last.end = toShown(p, end);
+      } else {
+        out.push({id: r.rv, start: s, end: toShown(p, end)});
+      }
+    }
+    off = end;
+  }
+  // Deletions at the same place show one after another, in reading order.
+  const before = new Map<number, number>();
+  for (const v of p.revs ?? []) {
+    if (v.kind !== 'del' || !v.runs?.length) {
+      continue;
+    }
+    const at = Math.max(0, v.at ?? 0);
+    const len = v.runs.reduce((n, r) => n + r.t.length, 0);
+    const start = toShown(p, at) + (before.get(at) ?? 0);
+    before.set(at, (before.get(at) ?? 0) + len);
+    out.push({id: v.id, start, end: start + len});
+  }
+  return out;
+}
+
 /** A TextView offset as a text offset; inside shown deleted text it snaps to where the deletion sits. */
 export function fromShown(p: ParagraphBlock, shown: number): number {
   let extra = 0;
