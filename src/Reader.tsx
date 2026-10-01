@@ -25,6 +25,7 @@ import {PICTURE_SIZES, figureOps, pictureAtWidth, tableOps} from './domain/figur
 import {editPieces, noteText} from './domain/footnotes';
 import {TouchLayer} from './services/touch';
 import {NotePlacement, insertIntoNote, openNotePath} from './NotePlacement';
+import {reviewItems, type ReviewItem, type ReviewKind} from './domain/reviewlist';
 import {INK_LINK, linkSegments, quoteLinkName, quoteOfLink, type LinkKind} from './domain/links';
 import {
   applyOps,
@@ -234,6 +235,9 @@ export function Reader(): React.JSX.Element {
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
   const [contents, setContents] = useState(false);
+  /** The review list (View → Comments and changes…) and which kinds it shows. */
+  const [reviewList, setReviewList] = useState(false);
+  const [reviewKinds, setReviewKinds] = useState<Record<ReviewKind, boolean>>({comment: true, ink: true, change: true});
   /** The open drop-down menu, and the x of the button that opened it. */
   const [menu, setMenu] = useState<Menu | null>(null);
   const [menuX, setMenuX] = useState(0);
@@ -668,6 +672,7 @@ export function Reader(): React.JSX.Element {
     setAnchor(START);
     setHistory([]);
     setContents(false);
+    setReviewList(false);
     setShowPages(false);
     setPageMap(null);
     setMenu(null);
@@ -1016,6 +1021,7 @@ export function Reader(): React.JSX.Element {
     setAnchor(pageStartOf(at));
     setShowPages(false);
     setContents(false);
+    setReviewList(false);
   };
 
   const goToEnd = () => {
@@ -4145,6 +4151,27 @@ export function Reader(): React.JSX.Element {
 
   const paneOpen = menu === 'thread' || menu === 'note' || menu === 'quoteinfo' || menu === 'change';
 
+  // Worked out only while the review list or the pane shows.
+  const reviewAll = useMemo(() => (reviewList || paneOpen ? reviewItems(blocks, comments) : []), [reviewList, paneOpen, blocks, comments]);
+  const reviewShown = reviewAll.filter(r => reviewKinds[r.kind]);
+
+  /** Screen page of a review item ("…" while the count has not reached it). */
+  const reviewPage = (r: ReviewItem): string => {
+    const b = blocks[r.block];
+    const page = map && b?.type === 'p' ? pageOfChar(map.pages, r.block, toShown(b, r.offset), map.done) : -1;
+    return page >= 0 ? String(page + 1) : '…';
+  };
+
+  /** Opens a review item: its page, then the pane beside its words. */
+  const openReview = (r: ReviewItem) => {
+    setReviewList(false);
+    showPlace(r.para, r.offset);
+    openLink({id: r.id, kind: r.kind}, {para: r.para, offset: r.offset});
+  };
+
+  /** The pane's place in the review list (for ◀ ▶), or -1 (a quote, or a kind filtered out). */
+  const paneIndex = paneOpen && paneLink ? reviewShown.findIndex(r => r.id === paneLink) : -1;
+
   /** Where the pane's words are on the page (y, from the top of the page) and their line height. */
   const paneWords = (): {top: number; bottom: number; lineH: number} | null => {
     const rects = paneLink && linkLines.key === pageKey ? linkLines.lines.filter(l => l.id === paneLink) : [];
@@ -4188,7 +4215,7 @@ export function Reader(): React.JSX.Element {
     return below >= above ? {top: Math.min(Math.max(0, at.bottom), area - Math.min(room, h)), maxH: room} : {top: Math.max(0, at.top - Math.min(room, h)), maxH: room};
   };
 
-  const paneTitle = menu === 'thread' ? 'Comment' : menu === 'note' ? 'Handwritten note' : menu === 'quoteinfo' ? 'Quote' : 'Tracked change';
+  const paneTitle = menu === 'thread' ? 'Comment' : menu === 'note' ? 'Note' : menu === 'quoteinfo' ? 'Quote' : 'Change';
 
   const progress = doc && blocks.length > 0 ? Math.round((anchor.block / blocks.length) * 100) : 0;
   // From the committed text: typed words reach Contents when typing ends, not on every key.
@@ -5189,7 +5216,15 @@ export function Reader(): React.JSX.Element {
             {item('Larger text  A+', () => setScale(scaleAt + 1))}
             {item('Smaller text  A−', () => setScale(scaleAt - 1))}
             {item('Normal size (100%)', () => setScale(SCALES.indexOf(1)))}
-            {item('Pages…', () => setShowPages(true))}
+            {item('Pages…', () => {
+              setReviewList(false);
+              setShowPages(true);
+            })}
+            {item('Comments and changes…', () => {
+              setShowPages(false);
+              setContents(false);
+              setReviewList(true);
+            })}
             {item('Go to page…', openGoTo)}
             {item('Word count…', () => setMenu('count'))}
             {item('Go to start', () => goTo({block: 0, offset: 0}))}
@@ -5727,11 +5762,19 @@ export function Reader(): React.JSX.Element {
         <Text allowFontScaling={false} style={styles.title} numberOfLines={1}>
           {doc ? `${dirty || pending.length > 0 ? '• ' : ''}${doc.name.replace(/\.docx$/i, '')}` : 'SNScribe'}
         </Text>
-        {doc ? button(contents ? 'Back to page' : 'Contents', () => setContents(c => !c), headings.length === 0) : null}
+        {doc ? button(contents ? 'Back to page' : 'Contents', () => {
+          setReviewList(false);
+          setContents(c => !c);
+        }, headings.length === 0) : null}
         {doc ? menuButton('View', 'view') : null}
         {doc ? button('◀', previous, atStart) : null}
         {doc ? (
-          <Pressable onPress={once('pages', () => setShowPages(p => !p))} style={styles.pageCount}>
+          <Pressable
+            onPress={once('pages', () => {
+              setReviewList(false);
+              setShowPages(p => !p);
+            })}
+            style={styles.pageCount}>
             <Text allowFontScaling={false} style={styles.page}>
               {pageNumber !== null && map ? `${pageNumber} of ${map.pages.length}${map.done ? '' : '…'}` : `${progress}%`}
             </Text>
@@ -5862,6 +5905,59 @@ export function Reader(): React.JSX.Element {
               })}
             </View>
           </ScrollView>
+        ) : reviewList && !contents ? (
+          <ScrollView style={styles.contents} keyboardShouldPersistTaps="always">
+            <View style={styles.reviewHead}>
+              <View style={[styles.chips, styles.flex]}>
+                {(
+                  [
+                    ['comment', 'Comments'],
+                    ['ink', 'Notes'],
+                    ['change', 'Changes'],
+                  ] as Array<[ReviewKind, string]>
+                ).map(([k, label]) => {
+                  const n = reviewAll.filter(r => r.kind === k).length;
+                  const on = reviewKinds[k];
+                  return (
+                    <Pressable key={k} onPress={once(`rk:${k}`, () => setReviewKinds(v => ({...v, [k]: !v[k]})))} style={[styles.chip, on ? styles.chipOn : null]}>
+                      <Text allowFontScaling={false} style={[styles.chipText, on ? styles.chipTextOn : null]}>
+                        {`${on ? '✓ ' : ''}${label} (${n})`}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+              {button('Back to page', () => setReviewList(false))}
+            </View>
+            {reviewShown.length === 0 ? (
+              <Text allowFontScaling={false} style={[styles.presetSummary, styles.reviewEmpty]}>
+                {reviewAll.length ? 'Nothing of the kinds chosen above.' : 'This document has no comments, handwritten notes or tracked changes.'}
+              </Text>
+            ) : null}
+            {reviewShown.map(r => (
+              <Pressable key={`${r.kind}:${r.id}`} onPress={once(`rv:${r.id}`, () => openReview(r))} style={styles.contentsRow}>
+                <Text allowFontScaling={false} style={styles.cardHead} numberOfLines={1}>
+                  {`Page ${reviewPage(r)}  ·  ${
+                    r.kind === 'comment'
+                      ? `Comment · ${r.author || 'Unknown'}${r.replies ? ` · ${r.replies} repl${r.replies === 1 ? 'y' : 'ies'}` : ''}`
+                      : r.kind === 'ink'
+                      ? 'Handwritten note'
+                      : `${r.move ? (r.del ? 'Moved away' : 'Moved here') : r.del ? 'Deleted' : 'Inserted'} · ${r.author || 'Unknown'}`
+                  }`}
+                </Text>
+                {r.text ? (
+                  <Text allowFontScaling={false} style={[styles.contentsText, r.kind === 'change' ? (r.del ? styles.cardDeleted : styles.cardInserted) : null]} numberOfLines={2}>
+                    {r.text}
+                  </Text>
+                ) : null}
+                {r.words ? (
+                  <Text allowFontScaling={false} style={[styles.presetSummary, styles.italicText]} numberOfLines={1}>
+                    {`on “${r.words}”`}
+                  </Text>
+                ) : null}
+              </Pressable>
+            ))}
+          </ScrollView>
         ) : contents ? (
           <ScrollView style={styles.contents} keyboardShouldPersistTaps="always">
             {headings.map(h => (
@@ -5911,7 +6007,7 @@ export function Reader(): React.JSX.Element {
             <View style={[styles.mask, {top: visible}]} />
           </View>
         ) : null}
-        {doc && !showPages && !contents && pageH > 0 ? (
+        {doc && !showPages && !contents && !reviewList && pageH > 0 ? (
           // Owns the pen, so nothing inks and no text handles the touch itself. It reaches
           // into the page's side margins: a pen set down just left of a line's first letter
           // starts at that letter instead of missing the page (CT).
@@ -5992,8 +6088,28 @@ export function Reader(): React.JSX.Element {
               <View style={[styles.pane, {top: PAD + spot.top, maxHeight: Math.max(160, spot.maxH)}]}>
                 <View style={styles.paneHead}>
                   <Text allowFontScaling={false} style={[styles.cardHead, styles.flex]} numberOfLines={1}>
-                    {paneTitle}
+                    {paneIndex >= 0 ? `${paneTitle} · ${paneIndex + 1} of ${reviewShown.length}` : paneTitle}
                   </Text>
+                  {paneIndex >= 0 ? (
+                    <>
+                      <Pressable
+                        disabled={paneIndex === 0}
+                        onPress={once('pane-prev', () => openReview(reviewShown[paneIndex - 1]))}
+                        style={[styles.paneNav, paneIndex === 0 ? styles.disabled : null]}>
+                        <Text allowFontScaling={false} style={styles.paneCloseText}>
+                          {'◀'}
+                        </Text>
+                      </Pressable>
+                      <Pressable
+                        disabled={paneIndex === reviewShown.length - 1}
+                        onPress={once('pane-next', () => openReview(reviewShown[paneIndex + 1]))}
+                        style={[styles.paneNav, paneIndex === reviewShown.length - 1 ? styles.disabled : null]}>
+                        <Text allowFontScaling={false} style={styles.paneCloseText}>
+                          {'▶'}
+                        </Text>
+                      </Pressable>
+                    </>
+                  ) : null}
                   <Pressable onPress={once('pane-close', () => setMenu(null))} style={styles.paneClose}>
                     <Text allowFontScaling={false} style={styles.paneCloseText}>
                       {'✕'}
@@ -6025,7 +6141,7 @@ export function Reader(): React.JSX.Element {
               ? 'Pen: tap to type · drag to select · double-tap a word. Finger: swipe to turn pages.'
               : '')}
         </Text>
-        {doc && !showPages && !contents && pageNotes() ? (
+        {doc && !showPages && !contents && !reviewList && pageNotes() ? (
           <Text allowFontScaling={false} style={styles.statusNotes} numberOfLines={1}>
             {pageNotes()}
           </Text>
@@ -6147,6 +6263,9 @@ const styles = StyleSheet.create({
   column: {position: 'absolute', left: 0, right: 0},
   pane: {position: 'absolute', right: 0, width: PANE_W, backgroundColor: '#fff', borderWidth: 2, borderColor: '#000', borderRadius: 6},
   paneHead: {height: PANE_HEAD, flexDirection: 'row', alignItems: 'center', paddingLeft: 14, borderBottomWidth: 1, borderColor: '#000'},
+  paneNav: {width: 40, height: PANE_HEAD, alignItems: 'center', justifyContent: 'center', borderLeftWidth: 1, borderColor: '#000'},
+  reviewHead: {flexDirection: 'row', alignItems: 'flex-start', paddingTop: 8, paddingBottom: 4, borderBottomWidth: 1, borderColor: '#000'},
+  reviewEmpty: {marginTop: 16},
   paneClose: {width: PANE_HEAD, height: PANE_HEAD, alignItems: 'center', justifyContent: 'center', borderLeftWidth: 1, borderColor: '#000'},
   paneCloseText: {color: '#000', fontSize: 22, fontWeight: '700'},
   paneForm: {paddingHorizontal: 14, paddingTop: 10, paddingBottom: 14},
